@@ -201,10 +201,16 @@ def source_urls(s: "requests.Session", src: dict) -> tuple[list[tuple[str, str |
     return [(src["url"], None)], src.get("size")
 
 
+def content_range_start(r) -> int | None:
+    """First byte offset of a 206 response's Content-Range, or None if absent/invalid."""
+    m = re.fullmatch(r"\s*bytes\s+([0-9]+)-[0-9]+/(?:[0-9]+|\*)\s*", r.headers.get("content-range") or "")
+    return int(m.group(1)) if m else None
+
+
 def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = None,
-              referer: str | None = None, max_retries: int = 6) -> int:
-    """Resumable streaming download into dest (writes dest + '.part')."""
-    part = Path(str(dest) + ".part")
+              referer: str | None = None, max_retries: int = 6, part: Path | None = None) -> int:
+    """Resumable streaming download into dest (via `part`, default dest + '.part')."""
+    part = part or Path(str(dest) + ".part")
     for attempt in range(1, max_retries + 1):
         have = part.stat().st_size if part.exists() else 0
         if expect is not None and have > expect:
@@ -221,6 +227,11 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
             r.raise_for_status()
             if have and r.status_code == 200:      # server ignored Range
                 have = 0
+            elif have and content_range_start(r) != have:
+                # Never append bytes that do not continue the file on disk.
+                r.close()
+                part.unlink(missing_ok=True)
+                raise ValueError(f"resume offset mismatch (have {have}), restarting part from zero")
             mode = "ab" if have else "wb"
             total = expect
             if not total:
@@ -262,6 +273,12 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
     return dest.stat().st_size
 
 
+def source_part_tag(idx: int, src: dict) -> str:
+    """Stable per-source suffix so partial files from different sources never mix."""
+    ident = json.dumps([src.get("url"), src.get("parts"), src.get("size")], sort_keys=True)
+    return f"s{idx}-{hashlib.sha256(ident.encode('utf-8')).hexdigest()[:10]}"
+
+
 def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool = False,
                   force: bool = False) -> Path:
     game = man["game"]
@@ -271,19 +288,29 @@ def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool =
     if dest.exists() and dest.stat().st_size in sizes and not force:
         log(f"Game already downloaded: {dest.name}")
     else:
+        # Older runs shared one dest.part across sources; its origin is unknown.
+        Path(str(dest) + ".part").unlink(missing_ok=True)
         last_err = None
-        for src in game["sources"]:
+        prev_parts: list[Path] = []
+        for idx, src in enumerate(game["sources"]):
+            tag = source_part_tag(idx, src)
+            for stale in prev_parts:            # never resume another source's bytes
+                stale.unlink(missing_ok=True)
+            prev_parts = [Path(str(dest) + f".{tag}.part")]
             try:
                 urls, size = source_urls(s, src)
                 log(f"Game source: {src.get('url') or src.get('parts')[0]}  ->  {human(size) if size else '?'}")
                 if len(urls) == 1:
-                    stream_to(s, urls[0][0], dest, expect=size, referer=urls[0][1])
+                    stream_to(s, urls[0][0], dest, expect=size, referer=urls[0][1], part=prev_parts[0])
                 else:   # parts joined in order
                     tmp = Path(str(dest) + ".join")
+                    prev_parts.append(tmp)
                     with open(tmp, "wb") as f:
                         for i, (u, ref) in enumerate(urls, 1):
                             p = Path(str(dest) + f".p{i}")
-                            stream_to(s, u, p, referer=ref)
+                            pp = Path(str(dest) + f".{tag}.p{i}.part")
+                            prev_parts.append(pp)
+                            stream_to(s, u, p, referer=ref, part=pp)
                             log(f"  part {i}/{len(urls)} done ({human(p.stat().st_size)})")
                             with open(p, "rb") as pf:
                                 while (b := pf.read(8 * 1024 * 1024)):
@@ -311,6 +338,29 @@ def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool =
             raise RuntimeError(f"game checksum mismatch: {got}")
         log("Checksum OK — this is the supported build." if want else f"Checksum (re-pack, no pinned hash): {got}")
     return dest
+
+
+def apply_preset(game_dir: Path) -> Path:
+    """Merge PRESET into game_dir/hookshot_options.ini, keeping every line we do not own."""
+    game_dir = Path(game_dir)
+    game_dir.mkdir(parents=True, exist_ok=True)
+    ini = game_dir / "hookshot_options.ini"
+    lines = ini.read_text(encoding="ascii", errors="replace").splitlines() if ini.exists() else []
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in lines:
+        eq = line.find("=")
+        key = line[:eq].strip() if eq > 0 else None
+        if key in PRESET:
+            if key not in seen:
+                out.append(f"{key}={PRESET[key]}")
+                seen.add(key)
+        else:
+            out.append(line)
+    out.extend(f"{k}={v}" for k, v in PRESET.items() if k not in seen)
+    ini.write_text("\n".join(out) + "\n", encoding="ascii", errors="replace")
+    log(f"DLSS preset written: {ini}")
+    return ini
 
 
 def sha256(p: Path) -> str:
@@ -471,6 +521,30 @@ def fetch_update_checksum(s: "requests.Session", url: str) -> str:
         response.close()
 
 
+APP_TAG_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
+
+
+def latest_app_release(s: "requests.Session", repo: str) -> dict | None:
+    """Highest published, non-prerelease release tagged exactly vX.Y.Z, or None.
+
+    Other releases on the same repo (e.g. 'game-v1') must never break updates.
+    """
+    r = s.get(f"https://api.github.com/repos/{repo}/releases?per_page=30",
+              headers={"accept": "application/vnd.github+json"}, timeout=60)
+    r.raise_for_status()
+    best, best_key = None, None
+    for rel in r.json() or []:
+        if not isinstance(rel, dict) or rel.get("draft") or rel.get("prerelease"):
+            continue
+        tag = rel.get("tag_name") or ""
+        if not APP_TAG_RE.fullmatch(tag):
+            continue
+        key = version_key(tag)
+        if best_key is None or key > best_key:
+            best, best_key = rel, key
+    return best
+
+
 def check_self_update(s: "requests.Session", man: dict, args: list[str],
                       local_zip: str | None = None) -> None:
     if not getattr(sys, "frozen", False):
@@ -479,7 +553,10 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
     if local_zip:
         raise ValueError("unsigned local updates are disabled")
     # Executable updates must not be redirected by the mutable sources manifest.
-    rel = latest_release(s, "cputroll/Silver-Lantern")
+    rel = latest_app_release(s, "cputroll/Silver-Lantern")
+    if rel is None:
+        log(f"Self-update: no stable vX.Y.Z release found, up to date ({APP_VERSION})")
+        return
     remote = rel.get('tag_name', '')
     if version_key(remote) <= version_key(APP_VERSION):
         log(f"Self-update: up to date ({APP_VERSION})")
