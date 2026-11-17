@@ -570,7 +570,10 @@ def _apply_update(target: Path, replacement: Path, parent: int, args: list[str])
                 raise RuntimeError("timed out waiting for executable replacement")
             time.sleep(0.25)
     try:
-        subprocess.Popen([str(target), *args], cwd=str(target.parent))
+        if len(args) == 2 and args[0] == '--update-only-internal':
+            log(f'Updated to {args[1]}. Run the tool again to continue.')
+        else:
+            subprocess.Popen([str(target), *args], cwd=str(target.parent))
     finally:
         cleanup_stage(replacement.parent)
 
@@ -613,8 +616,14 @@ def latest_app_release(s: "requests.Session", repo: str) -> dict | None:
     return best
 
 
+_self_update_started = False
+
+
 def check_self_update(s: "requests.Session", man: dict, args: list[str],
                       local_zip: str | None = None) -> None:
+    global _self_update_started
+    if _self_update_started:
+        return
     if not getattr(sys, "frozen", False):
         log("Self-update is available only for the packaged executable.")
         return
@@ -647,8 +656,14 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
         replacement = stage_executable(zp, stage, target.name)
         helper = stage / 'update-helper.exe'
         shutil.copy2(target, helper)
-        rest = [arg for arg in args if arg != '--self-update']
+        if '--self-update' in args:
+            rest = ['--update-only-internal', remote]
+        else:
+            rest = list(args)
+            if '--no-self-update' not in rest:
+                rest.append('--no-self-update')
         subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), *rest], cwd=str(target.parent))
+        _self_update_started = True
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
         raise

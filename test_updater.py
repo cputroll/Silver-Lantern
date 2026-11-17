@@ -12,6 +12,46 @@ app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
 
 class UpdaterTests(unittest.TestCase):
+    def _run_update(self, args):
+        release = {'tag_name': 'v999.0.0', 'assets': [
+            {'name': app.UPDATE_ASSET, 'browser_download_url': 'zip', 'size': 3},
+            {'name': app.SUMS_ASSET, 'browser_download_url': 'sums'}]}
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / 'app.exe'
+            target.write_bytes(b'old')
+            def download(s, url, dest, expect):
+                dest.write_bytes(b'new')
+            with mock.patch.object(sys, 'frozen', True, create=True), \
+                 mock.patch.object(sys, 'executable', str(target)), \
+                 mock.patch.object(app, 'latest_app_release', return_value=release) as latest, \
+                 mock.patch.object(app, 'fetch_update_checksum', return_value='digest'), \
+                 mock.patch.object(app, 'stream_to', side_effect=download), \
+                 mock.patch.object(app, 'sha256', return_value='digest'), \
+                 mock.patch.object(app, 'stage_executable', return_value=Path(td) / 'new.exe'), \
+                 mock.patch.object(app.subprocess, 'Popen') as launch, \
+                 mock.patch.object(app, '_self_update_started', False, create=True):
+                with self.assertRaises(SystemExit) as result:
+                    app.check_self_update(mock.Mock(), {}, args)
+                self.assertEqual(result.exception.code, 0)
+                app.check_self_update(mock.Mock(), {}, args)
+                self.assertEqual(latest.call_count, 1)
+                return launch.call_args.args[0]
+
+    def test_normal_update_relaunch_skips_another_check(self):
+        command = self._run_update(['--no-launch', '--out', 'folder'])
+        self.assertEqual(command[5:], ['--no-launch', '--out', 'folder', '--no-self-update'])
+
+    def test_update_only_helper_replaces_without_relaunch(self):
+        command = self._run_update(['--self-update'])
+        with mock.patch.object(app, 'wait_for_parent'), \
+             mock.patch.object(app, 'replace_transactionally'), \
+             mock.patch.object(app, 'cleanup_stage'), \
+             mock.patch.object(app.subprocess, 'Popen') as launch, \
+             mock.patch.object(app, 'log') as log:
+            app._apply_update(Path('app.exe'), Path('stage/new.exe'), 123, command[5:])
+        launch.assert_not_called()
+        log.assert_called_with('Updated to v999.0.0. Run the tool again to continue.')
+
     def test_version_is_not_manifest_controlled(self):
         self.assertNotEqual(app.local_version({'tool': {'version': '999.0.0'}}), '999.0.0')
 
