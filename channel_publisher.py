@@ -5,7 +5,10 @@ from pathlib import Path
 import subprocess
 
 
-def publish_verified(assets, upload, verify, advance):
+def publish_verified(assets, upload, verify, advance, existing=()):
+    names = {str(item).casefold() for item in existing}
+    if any(str(asset).casefold() in names for asset in assets):
+        raise FileExistsError('immutable asset already exists')
     for asset in assets:
         upload(asset)
     for asset in assets:

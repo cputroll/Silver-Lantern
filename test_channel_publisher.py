@@ -69,6 +69,14 @@ class ChannelPublisherTests(unittest.TestCase):
         channel_publisher.publish_verified(['a', 'b'], lambda x: events.append(('upload', x)), lambda x: events.append(('verify', x)), lambda: events.append(('advance',)))
         self.assertEqual(events, [('upload', 'a'), ('upload', 'b'), ('verify', 'a'), ('verify', 'b'), ('advance',)])
 
+    def test_publish_rejects_existing_remote_asset_before_upload(self):
+        from unittest.mock import Mock
+        upload, verify, advance = Mock(), Mock(), Mock()
+        with self.assertRaises(FileExistsError):
+            channel_publisher.publish_verified(['a'], upload, verify, advance, existing={'a'})
+        upload.assert_not_called()
+        advance.assert_not_called()
+
     def test_pointer_rejects_bad_asset(self):
         with self.assertRaises(ValueError):
             channel_publisher.make_pointer(None, 1, '../bad', 'a' * 64)
