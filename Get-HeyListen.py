@@ -1629,11 +1629,17 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
                     if segment_hash.hexdigest() != segment['sha256']:
                         raise ValueError(f"segment SHA-256 mismatch: {segment['asset']}")
                     state['next'] += 1
+                    if not state['direct'] and state['next'] < len(state['item']['segments']):
+                        checkpoint = Path(str(state['temp']) + '.json')
+                        staging = Path(str(checkpoint) + '.tmp')
+                        staging.write_text(json.dumps({'next_index': state['next'], 'bytes_written': state['temp'].stat().st_size}), encoding='utf-8')
+                        os.replace(staging, checkpoint)
                     if state['next'] == len(state['item']['segments']):
                         if state['temp'].stat().st_size != state['item']['size'] or state['hasher'].hexdigest() != state['item']['sha256']:
                             raise ValueError(f"assembled SHA-256 mismatch: {state['item']['path']}")
                         if not state['direct']:
                             state['temp'].replace(state['target'])
+                            Path(str(state['temp']) + '.json').unlink(missing_ok=True)
                         state['complete'] = True
                     with cond:
                         bundle['refs'] -= 1
