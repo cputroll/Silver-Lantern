@@ -277,6 +277,24 @@ def load_game_folder():
         return None
 
 
+def resolve_game_folder():
+    configured = load_game_folder()
+    if configured:
+        return configured
+    profile = Path(os.environ.get('USERPROFILE', str(Path.home())))
+    legacy = profile / 'Games' / 'HeyListen'
+    if legacy.exists():
+        return legacy
+    primary = Path(r'C:\Games') / GAME_NAME
+    try:
+        probe_writable(primary)
+        return primary
+    except OSError:
+        fallback = profile / 'Games' / GAME_NAME
+        probe_writable(fallback)
+        return fallback
+
+
 def schedule_owned_cleanup():
     if not getattr(sys, 'frozen', False):
         return
@@ -318,23 +336,31 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
         state = STATE_DIR.resolve()
         if game == Path(game.anchor) or home == game or home.is_relative_to(game) or state == game or state.is_relative_to(game):
             raise RuntimeError('Refusing to remove an unsafe game folder.')
-        if getattr(sys, 'frozen', False):
-            program = Path(sys.executable).resolve().parent
-            game = folder.resolve()
-            if program == game or program.is_relative_to(game):
-                raise RuntimeError('Cannot safely remove a game folder containing the launcher; move the launcher first.')
         if not remove_defender_exclusion():
             raise RuntimeError('Could not remove the Windows Defender exclusion; retry uninstall or remove it in Windows Security.')
-        if not purge_saves:
-            for child in folder.iterdir():
-                if child.name.casefold() == 'user':
-                    continue
-                if child.is_dir() and not child.is_symlink():
-                    shutil.rmtree(child)
-                else:
-                    child.unlink()
-        else:
-            shutil.rmtree(folder)
+        running = Path(sys.executable).resolve() if getattr(sys, 'frozen', False) else None
+        owned = manifest_owned_files(folder, ownership_manifest(folder))
+        owned.extend(folder / name for name in OWNED_FILES)
+        owned.append(folder / '.heylisten-get' / 'game-manifest.json')
+        for path in owned:
+            try:
+                if path.resolve() != running and not path.is_symlink() and path.is_file():
+                    path.unlink()
+            except OSError:
+                pass
+        if purge_saves:
+            saves = folder / 'user'
+            if saves.is_dir() and not saves.is_symlink():
+                shutil.rmtree(saves)
+        unknown = sum(1 for base, dirs, files in os.walk(folder, followlinks=False)
+                      if not Path(base).relative_to(folder).parts or Path(base).relative_to(folder).parts[0].casefold() != 'user'
+                      for name in files if (Path(base) / name).resolve() != running)
+        print(f'Unknown user files preserved: {unknown}')
+        for base, dirs, files in os.walk(folder, topdown=False, followlinks=False):
+            try:
+                Path(base).rmdir()
+            except OSError:
+                pass
     if not had_folder and not remove_defender_exclusion():
         raise RuntimeError('Could not remove the Windows Defender exclusion; retry uninstall or remove it in Windows Security.')
     shortcut_path().unlink(missing_ok=True)

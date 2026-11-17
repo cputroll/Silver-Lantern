@@ -58,17 +58,18 @@ class WindowsInstallTests(unittest.TestCase):
             root = Path(d); game = root / 'game'; (game / 'user').mkdir(parents=True)
             (game / 'user' / 'save').write_text('save'); (game / 'game.bin').write_text('game')
             output = io.StringIO()
-            with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'), redirect_stdout(output):
+            with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'ownership_manifest', return_value=None), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'), redirect_stdout(output):
                 self.assertTrue(launcher.uninstall())
             self.assertEqual((game / 'user' / 'save').read_text(), 'save')
-            self.assertEqual([p.name for p in game.iterdir()], ['user'])
+            self.assertEqual({p.name for p in game.iterdir()}, {'user', 'game.bin'})
+            self.assertIn('Unknown user files preserved: 1', output.getvalue())
             self.assertIn(f'Your saves stay at {game / "user"} — use --purge-saves to remove them too', output.getvalue())
 
     def test_explicit_purge_removes_game_and_saves(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); game = root / 'game'; (game / 'user').mkdir(parents=True)
             (game / 'user' / 'save').write_text('save')
-            with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'):
+            with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'ownership_manifest', return_value=None), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'):
                 self.assertTrue(launcher.uninstall(purge_saves=True))
             self.assertFalse(game.exists())
 
@@ -93,7 +94,7 @@ class WindowsInstallTests(unittest.TestCase):
             with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'remove_registration') as reg, patch.object(launcher, 'schedule_owned_cleanup') as cleanup, patch.object(launcher, 'STATE_DIR', root / 'state'), patch('builtins.input', return_value='n'):
                 self.assertFalse(launcher.uninstall())
                 reg.assert_not_called(); cleanup.assert_not_called(); self.assertTrue((game / 'game.bin').exists())
-            with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup') as cleanup, patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'):
+            with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'ownership_manifest', return_value=None), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup') as cleanup, patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'):
                 self.assertTrue(launcher.uninstall(keep_saves=True))
-                self.assertTrue((game / 'user' / 'save').exists()); self.assertFalse((game / 'game.bin').exists())
+                self.assertTrue((game / 'user' / 'save').exists()); self.assertTrue((game / 'game.bin').exists())
                 cleanup.assert_called_once()
