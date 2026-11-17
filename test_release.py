@@ -29,6 +29,9 @@ class ReleaseTests(unittest.TestCase):
                 self.assertEqual(result.stdout.strip(), version)
             self.assertIn('SilverLantern-Get.cmd', names)
             self.assertIn('SilverLantern-Preset.cmd', names)
+            # The game updater and watcher must ship beside the EXE (it looks for Update-Game.ps1 there).
+            for name in ('Update-Game.ps1', 'Watch-Game.ps1', 'SilverLantern-AutoUpdate.cmd', 'Apply-HeyListen-Preset.ps1'):
+                self.assertIn(name, names)
 
 
 if __name__ == '__main__':

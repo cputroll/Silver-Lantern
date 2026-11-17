@@ -48,6 +48,7 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
+          body_path: RELEASE_NOTES.md
           files: |
             dist-release/HeyListen-Get.zip
             dist-release/SHA256SUMS.txt
