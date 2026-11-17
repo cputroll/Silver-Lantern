@@ -578,7 +578,29 @@ def check_disk_space(folder: Path, need: int, label: str = "Free space") -> None
 
 
 def session() -> "requests.Session":
-    return requests.Session(impersonate="chrome", timeout=90)
+    return requests.Session(impersonate="chrome", timeout=(10, 60))
+
+
+def stream_session(source=None) -> "requests.Session":
+    from curl_cffi import CurlOpt
+    options = {}
+    if source is not None:
+        options = {key: getattr(source, key) for key in ('headers', 'cookies', 'auth', 'proxies', 'verify', 'trust_env', 'impersonate') if hasattr(source, key)}
+    options.setdefault('impersonate', 'chrome')
+    return requests.Session(**options, timeout=(10, 30), curl_options={
+        CurlOpt.CONNECTTIMEOUT_MS: 10000, CurlOpt.TIMEOUT_MS: 0,
+        CurlOpt.LOW_SPEED_LIMIT: 1024, CurlOpt.LOW_SPEED_TIME: 30})
+
+
+def metadata_get(client, url, **kwargs):
+    kwargs['timeout'] = (10, 60)
+    for attempt in range(2):
+        try:
+            return client.get(url, **kwargs)
+        except Exception:
+            if attempt:
+                raise
+            say('Connection stalled — retrying…')
 
 
 # ---------------------------------------------------------------- manifest
@@ -613,7 +635,7 @@ def load_manifest(manifest_arg: str | None) -> dict:
             elif kind == "cache":
                 data = json.loads(Path(label).read_text(encoding="utf-8-sig"))
             else:
-                r = session().get(label, headers={"accept": "application/json"}, timeout=(10, 30))
+                r = metadata_get(session(), label, headers={"accept": "application/json"})
                 r.raise_for_status()
                 data = r.json()
             if "game" not in data or "builder" not in data:
@@ -635,8 +657,8 @@ def load_manifest(manifest_arg: str | None) -> dict:
 
 # ---------------------------------------------------------------- builder
 def latest_release(s: "requests.Session", repo: str) -> dict:
-    r = s.get(f"https://api.github.com/repos/{repo}/releases/latest",
-              headers={"accept": "application/vnd.github+json"}, timeout=(10, 30))
+    r = metadata_get(s, f"https://api.github.com/repos/{repo}/releases/latest",
+                     headers={"accept": "application/vnd.github+json"})
     r.raise_for_status()
     return r.json()
 
@@ -657,7 +679,7 @@ def download_builder(s: "requests.Session", man: dict, out: Path, force: bool = 
 
     if sums_name not in assets:
         raise RuntimeError(f"{repo} {tag} has no {sums_name}")
-    response = s.get(assets[sums_name]["browser_download_url"], timeout=(10, 30))
+    response = metadata_get(s, assets[sums_name]["browser_download_url"])
     response.raise_for_status()
     matches = []
     for line in response.text.splitlines():
@@ -700,7 +722,7 @@ def download_builder(s: "requests.Session", man: dict, out: Path, force: bool = 
 
 # ---------------------------------------------------------------- game
 def buzz_download_url(s: "requests.Session", page_url: str) -> tuple[str, str]:
-    page = s.get(page_url, headers={"accept": "text/html", "referer": "https://buzzheavier.com/"}, timeout=(10, 30))
+    page = metadata_get(s, page_url, headers={"accept": "text/html", "referer": "https://buzzheavier.com/"})
     page.raise_for_status()
     ident = page_url.rstrip("/").rsplit("/", 1)[-1]
     m = re.search(r'hx-get="(/' + re.escape(ident) + r'/download\?t=[^"]+)"', page.text)
@@ -734,8 +756,16 @@ def content_range_start(r) -> int | None:
 
 
 def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = None,
-              referer: str | None = None, max_retries: int = 6, part: Path | None = None,
+              referer: str | None = None, max_retries: int = 2, part: Path | None = None,
               progress=None, quiet: bool = False) -> int:
+    """Resumable streaming download with an isolated low-speed policy."""
+    if isinstance(s, requests.Session):
+        with stream_session(s) as client:
+            return _stream_to(client, url, dest, expect, referer, max_retries, part, progress, quiet)
+    return _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet)
+
+
+def _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet):
     """Resumable streaming download into dest (via `part`, default dest + '.part')."""
     part = part or Path(str(dest) + ".part")
     for attempt in range(1, max_retries + 1):
@@ -793,13 +823,14 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
                 r.close()
             if total and done < total and attempt < max_retries:
                 log(f"  short read ({done}/{total}), resuming...")
+                say('Connection stalled — retrying…')
                 continue
             break
         except Exception as e:  # noqa: BLE001
             if _is_local_disk_error(e) or attempt == max_retries:
                 raise   # a full disk or locked file never fixes itself by retrying
             log(f"  network hiccup ({type(e).__name__}: {e}), retry {attempt}/{max_retries} in 3 s")
-            say('Connection interrupted; retrying…')
+            say('Connection stalled — retrying…')
             note = getattr(getattr(progress, "__self__", None), "note", None)
             if note:
                 note(f"connection dropped, retrying ({attempt} of {max_retries})...")
@@ -884,37 +915,47 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
         temp.write_text(json.dumps(state), encoding='utf-8')
         os.replace(temp, side)
 
-    def worker(i, response=None):
+    def worker(i, response=None, retries_used=0):
         start, end = bounds[i]
-        if response is None:
-            if not hasattr(local, 'session'):
-                local.session = session_factory()
-            r = local.session.get(url, headers={'range': f'bytes={start}-{end-1}', 'accept': '*/*'}, stream=True, timeout=(10, 30))
-        else:
-            r = response
-        try:
-            expected_range = f'bytes {start}-{end-1}/{size}'
-            if r.status_code != 206 or (r.headers.get('content-range') or '').lower().strip() != expected_range:
-                raise ValueError('invalid chunk Content-Range')
+        for attempt in range(retries_used, 2):
+            r = None
             pos = start
-            digest = hashlib.sha256()
-            with part.open('r+b') as f:
-                f.seek(start)
-                for data in r.iter_content(1024 * 1024):
-                    if pos + len(data) > end:
-                        raise ValueError('chunk exceeds expected size')
-                    f.write(data)
-                    digest.update(data)
-                    pos += len(data)
-                    progress.add(len(data))
-            if pos != end:
-                raise ValueError('short chunk')
-            with lock:
-                state['hashes'][i] = digest.hexdigest()
-                state['done'][i] = True
-                save()
-        finally:
-            r.close()
+            try:
+                if response is None:
+                    if not hasattr(local, 'session'):
+                        local.session = session_factory()
+                    r = local.session.get(url, headers={'range': f'bytes={start}-{end-1}', 'accept': '*/*'}, stream=True, timeout=(10, 30))
+                else:
+                    r, response = response, None
+                expected_range = f'bytes {start}-{end-1}/{size}'
+                if r.status_code != 206 or (r.headers.get('content-range') or '').lower().strip() != expected_range:
+                    raise ValueError('invalid chunk Content-Range')
+                digest = hashlib.sha256()
+                with part.open('r+b') as f:
+                    f.seek(start)
+                    for data in r.iter_content(1024 * 1024):
+                        if pos + len(data) > end:
+                            raise ValueError('chunk exceeds expected size')
+                        f.write(data)
+                        digest.update(data)
+                        pos += len(data)
+                        progress.add(len(data))
+                if pos != end:
+                    raise ValueError('short chunk')
+                with lock:
+                    state['hashes'][i] = digest.hexdigest()
+                    state['done'][i] = True
+                    save()
+                return
+            except Exception as exc:
+                if pos > start:
+                    progress.add(start - pos)
+                if attempt or _is_local_disk_error(exc):
+                    raise
+                say('Connection stalled — retrying…')
+            finally:
+                if r is not None:
+                    r.close()
 
     pending = [i for i, done in enumerate(state['done']) if not done]
     if not pending:
@@ -925,7 +966,14 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
     first = pending[0]
     a, b = bounds[first]
     probe_session = session_factory()
-    probe = probe_session.get(url, headers={'range': f'bytes={a}-{b-1}', 'accept': '*/*'}, stream=True, timeout=(10, 30))
+    for attempt in range(2):
+        try:
+            probe = probe_session.get(url, headers={'range': f'bytes={a}-{b-1}', 'accept': '*/*'}, stream=True, timeout=(10, 30))
+            break
+        except Exception:
+            if attempt:
+                raise
+            say('Connection stalled — retrying…')
     if probe.status_code == 200:
         probe.close()
         part.unlink(missing_ok=True)
@@ -937,7 +985,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
             amount = min(n, remaining_credit)
             remaining_credit -= amount
             progress.add(amount)
-        stream_to(probe_session, url, dest, expect=size, progress=credit, quiet=True)
+        stream_to(probe_session, url, dest, expect=size, progress=credit, quiet=True, max_retries=2 - attempt)
         return
     if probe.status_code != 206 or (probe.headers.get('content-range') or '').lower().strip() != f'bytes {a}-{b-1}/{size}':
         probe.close()
@@ -949,7 +997,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
         save()
     with ThreadPoolExecutor(max_workers=max(1, streams - 1)) as pool:
         futures = [pool.submit(worker, i) for i in pending[1:]]
-        worker(first, probe)
+        worker(first, probe, attempt)
         for future in futures:
             future.result()
     _replace_with_retry(part, dest)
@@ -1298,17 +1346,26 @@ def _apply_update(target: Path, replacement: Path, parent: int, args: list[str])
 
 
 def fetch_update_checksum(s: "requests.Session", url: str) -> str:
-    response = s.get(url, stream=True, timeout=(10, 30))
-    try:
-        response.raise_for_status()
-        data = bytearray()
-        for chunk in response.iter_content(8192):
-            if len(data) + len(chunk) > 65536:
-                raise ValueError("checksum file too large")
-            data.extend(chunk)
-        return parse_update_checksum(data.decode('utf-8-sig'))
-    finally:
-        response.close()
+    for attempt in range(2):
+        response = None
+        try:
+            response = s.get(url, stream=True, timeout=(10, 60))
+            response.raise_for_status()
+            data = bytearray()
+            for chunk in response.iter_content(8192):
+                if len(data) + len(chunk) > 65536:
+                    raise ValueError("checksum file too large")
+                data.extend(chunk)
+            return parse_update_checksum(data.decode('utf-8-sig'))
+        except ValueError:
+            raise
+        except Exception:
+            if attempt:
+                raise
+            say('Connection stalled — retrying…')
+        finally:
+            if response is not None:
+                response.close()
 
 
 APP_TAG_RE = re.compile(r"v[0-9]+\.[0-9]+\.[0-9]+")
@@ -1319,8 +1376,8 @@ def latest_app_release(s: "requests.Session", repo: str) -> dict | None:
 
     Other releases on the same repo (e.g. 'game-v1') must never break updates.
     """
-    r = s.get(f"https://api.github.com/repos/{repo}/releases?per_page=30",
-              headers={"accept": "application/vnd.github+json"}, timeout=(10, 30))
+    r = metadata_get(s, f"https://api.github.com/repos/{repo}/releases?per_page=30",
+                     headers={"accept": "application/vnd.github+json"})
     r.raise_for_status()
     best, best_key = None, None
     for rel in r.json() or []:
@@ -1499,7 +1556,7 @@ def load_game_manifest(s, source: str) -> dict:
             except Exception:
                 if attempt:
                     raise
-                say('Retrying manifest fetch…')
+                say('Connection stalled — retrying…')
             finally:
                 if response is not None:
                     response.close()
@@ -1840,13 +1897,13 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 partial.unlink()
             url = GAME_ASSET_URL + quote(part['asset'])
             if part['size'] >= PARALLEL_THRESHOLD and download_streams() > 1:
-                parallel_download(session, url, dest, part['size'], part['sha256'], progress, download_streams())
+                parallel_download(stream_session, url, dest, part['size'], part['sha256'], progress, download_streams())
             else:
                 side = Path(str(partial) + '.json')
                 if side.exists():
                     partial.unlink(missing_ok=True)
                     side.unlink(missing_ok=True)
-                worker = session() if s is None else s
+                worker = stream_session() if s is None else s
                 stream_to(worker, url, dest, expect=part['size'], progress=progress.add, quiet=True)
             if sha256(dest) != part['sha256']:
                 dest.unlink(missing_ok=True)
@@ -2030,6 +2087,9 @@ def main() -> int:
     cli_requested = '--cli' in sys.argv[1:]
     if cli_requested:
         sys.argv.remove('--cli')
+    elif '--screenshot' in sys.argv[1:]:
+        import launcher
+        return launcher.main()
     elif '--self-test' in sys.argv[1:]:
         import launcher
         app = launcher.App(launcher.State.NOT_INSTALLED)
@@ -2154,7 +2214,8 @@ def self_update_step(s, a) -> int | None:
 def install_from_manifest(s, a, folder: Path) -> None:
     step("Game file list")
     try:
-        game_manifest = load_game_manifest(s, a.game_manifest)
+        with stream_session() as manifest_session:
+            game_manifest = load_game_manifest(manifest_session, a.game_manifest)
     except Exception:
         done("failed", "yellow")
         raise

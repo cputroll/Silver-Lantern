@@ -37,7 +37,7 @@ class SyncTests(unittest.TestCase):
             self.assertEqual(h.load_game_manifest(session, 'https://example.test/manifest'), manifest())
         self.assertEqual(session.get.call_count, 2)
         self.assertEqual(session.get.call_args.kwargs['timeout'], (10, 30))
-        self.assertIn('Retry', out.getvalue())
+        self.assertIn('Connection stalled - retrying...', out.getvalue())
         self.assertIn('Fetching manifest', out.getvalue())
 
     def test_bad_json(self):

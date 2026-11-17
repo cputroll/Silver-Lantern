@@ -8,6 +8,29 @@ from test_game_sync import h
 
 
 class ParallelDownloadTests(unittest.TestCase):
+    def test_interrupted_range_retries_once_without_double_counting(self):
+        from unittest.mock import Mock, patch
+        data = b'abcdefgh'
+        class Response:
+            status_code = 206
+            headers = {'content-range': 'bytes 0-7/8'}
+            def __init__(self, fail): self.fail = fail
+            def iter_content(self, size):
+                yield data[:4]
+                if self.fail: raise TimeoutError('stalled')
+                yield data[4:]
+            def close(self): pass
+        client = Mock()
+        client.get.side_effect = [Response(True), Response(False)]
+        with tempfile.TemporaryDirectory() as d, patch.object(h, 'say') as say:
+            progress = h.Progress('test', len(data), tty=False)
+            dest = Path(d) / 'asset'
+            h.parallel_download(lambda: client, 'https://example.test/a', dest, 8, hashlib.sha256(data).hexdigest(), progress, 1, chunk_min=1)
+            self.assertEqual(dest.read_bytes(), data)
+            self.assertEqual(progress.done, len(data))
+            self.assertEqual(client.get.call_count, 2)
+            say.assert_any_call('Connection stalled — retrying…')
+
     def test_ranges_and_integrity(self):
         data = b'abcdefgh' * (1024 * 1024)
         requests = []

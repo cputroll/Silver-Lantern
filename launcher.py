@@ -449,7 +449,7 @@ class LauncherUI:
         self.last_error = ''
         self.tool_update_available = False
         self.tool_handoff_started = False
-        if self.state == State.READY and getattr(sys, 'frozen', False):
+        if self.state == State.READY and getattr(sys, 'frozen', False) and '--screenshot' not in sys.argv:
             threading.Thread(target=self.shortcut_worker, daemon=True).start()
         self.check_updates()
 
@@ -468,26 +468,32 @@ class LauncherUI:
         def check():
             try:
                 self.events.publish('status', 'Fetching manifest…')
-                req = urllib.request.Request(game_manifest_url(), headers={'User-Agent': 'SilverLantern'})
+                from curl_cffi import requests as curl_requests, CurlOpt
+                options = {CurlOpt.CONNECTTIMEOUT_MS: 10000, CurlOpt.TIMEOUT_MS: 0,
+                           CurlOpt.LOW_SPEED_LIMIT: 1024, CurlOpt.LOW_SPEED_TIME: 30}
                 for attempt in range(2):
                     try:
-                        with urllib.request.urlopen(req, timeout=30) as response:
-                            total = int(response.headers.get('content-length') or 0)
-                            chunks, received = [], 0
-                            while True:
-                                chunk = response.read(1024 * 1024)
-                                if not chunk:
-                                    break
-                                chunks.append(chunk)
-                                received += len(chunk)
-                                self.events.publish('status', f'Fetching manifest… ({received / 1_000_000:.1f} of {total / 1_000_000:.1f} MB)' if total else f'Fetching manifest… ({received / 1_000_000:.1f} MB)')
-                            self.events.publish('status', 'Planning…')
-                            manifest = json.loads(b''.join(chunks))
+                        with curl_requests.Session(impersonate='chrome', curl_options=options) as client:
+                            response = client.get(game_manifest_url(), stream=True, timeout=(10, 30))
+                            try:
+                                response.raise_for_status()
+                                total = int(response.headers.get('content-length') or 0)
+                                chunks, received = [], 0
+                                for chunk in response.iter_content(1024 * 1024):
+                                    if not chunk:
+                                        continue
+                                    chunks.append(chunk)
+                                    received += len(chunk)
+                                    self.events.publish('status', f'Fetching manifest… ({received / 1_000_000:.1f} of {total / 1_000_000:.1f} MB)' if total else f'Fetching manifest… ({received / 1_000_000:.1f} MB)')
+                                self.events.publish('status', 'Planning…')
+                                manifest = json.loads(b''.join(chunks))
+                            finally:
+                                response.close()
                         break
                     except Exception:
                         if attempt:
                             raise
-                        self.events.publish('status', 'Retrying manifest fetch…')
+                        self.events.publish('status', 'Connection stalled — retrying…')
                 # TODO v1.5: cache the verified manifest hash after installation.
                 digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
                 self.events.publish('check', (manifest.get('revision'), digest))
@@ -495,9 +501,20 @@ class LauncherUI:
                 self.events.publish('offline', None)
             try:
                 self.events.publish('status', 'Checking for updates…')
-                req = urllib.request.Request('https://api.github.com/repos/cputroll/Silver-Lantern/releases/latest', headers={'User-Agent':'SilverLantern', 'Accept':'application/vnd.github+json'})
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    release = json.load(response)
+                from curl_cffi import requests as curl_requests
+                for attempt in range(2):
+                    try:
+                        response = curl_requests.get('https://api.github.com/repos/cputroll/Silver-Lantern/releases/latest', headers={'User-Agent':'SilverLantern', 'Accept':'application/vnd.github+json'}, timeout=(10, 60))
+                        try:
+                            response.raise_for_status()
+                            release = response.json()
+                        finally:
+                            response.close()
+                        break
+                    except Exception:
+                        if attempt:
+                            raise
+                        self.events.publish('status', 'Connection stalled — retrying…')
                 self.events.publish('tool_check', release.get('tag_name', 'unknown'))
                 if installed(self.folder):
                     result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-File', str(next((p for p in (BASE / 'Update-Game.ps1', BASE / 'support' / 'Update-Game.ps1') if p.is_file()), BASE / 'Update-Game.ps1')), '-DryRun', '-GameFolder', str(self.folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -704,7 +721,9 @@ class LauncherUI:
                 STATE_DIR.mkdir(parents=True, exist_ok=True)
                 with LOG.open('a', encoding='utf-8') as log: log.write('Shortcut: ' + str(exc) + '\n')
 
-    def run(self):
+    def run(self, screenshot=None):
+        if screenshot:
+            os.environ['SDL_VIDEODRIVER'] = 'dummy'
         if getattr(sys, 'frozen', False): os.environ['PYSDL2_DLL_PATH'] = str(ROOT)
         import sdl2 as s
         import sdl2.sdlttf as ttf
@@ -717,6 +736,9 @@ class LauncherUI:
         if not renderer: renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
         if not window or not renderer: raise RuntimeError('Could not create the launcher window')
         s.SDL_RenderSetLogicalSize(renderer, 1280, 720)
+        s.SDL_SetRenderDrawColor(renderer, 18, 26, 32, 255)
+        s.SDL_RenderClear(renderer)
+        s.SDL_RenderPresent(renderer)
         fontpath = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts' / 'segoeui.ttf'
         font = ttf.TTF_OpenFont(str(fontpath).encode(), 26)
         if not font: raise RuntimeError('Could not open the system font')
@@ -754,6 +776,11 @@ class LauncherUI:
                 s.SDL_DestroyTexture(texture); s.SDL_FreeSurface(surface)
         open_pads()
         event = s.SDL_Event()
+        capture_screens = iter(('main', 'progress', 'settings')) if screenshot else None
+        if screenshot:
+            self.screen = next(capture_screens)
+            self.state = State.READY
+            self.status = 'Ready to play.'
         try:
             while self.running:
                 self.drain()
@@ -800,19 +827,41 @@ class LauncherUI:
                     selected = i == self.focus
                     s.SDL_SetRenderDrawColor(renderer, *( (90, 108, 100, 255) if selected else (42, 54, 58, 255) ))
                     rect = s.SDL_Rect(250, 210 + i * spacing, 780, height); s.SDL_RenderFillRect(renderer, ctypes.byref(rect))
-                    text(label, 275, 220 + i * spacing, max_width=730)
-                if self.screen == 'error': text(self.last_error[:70], 65, 580, (255, 180, 160))
-                elif self.screen == 'progress': text(self.progress[:80], 65, 580)
-                else: text(self.status[:80], 65, 580)
+                    text(label, 275, 210 + i * spacing + (height - ttf.TTF_FontHeight(font)) // 2, max_width=730)
+                if self.screen == 'error': text(self.last_error, 65, 580, (255, 180, 160))
+                elif self.screen == 'progress':
+                    text(self.progress, 250, 330, max_width=780)
+                    match = re.search(r'(\d{1,3})%', self.progress)
+                    if match:
+                        s.SDL_SetRenderDrawColor(renderer, 42, 54, 58, 255)
+                        s.SDL_RenderFillRect(renderer, ctypes.byref(s.SDL_Rect(250, 380, 780, 16)))
+                        s.SDL_SetRenderDrawColor(renderer, 192, 166, 104, 255)
+                        s.SDL_RenderFillRect(renderer, ctypes.byref(s.SDL_Rect(250, 380, int(780 * min(100, int(match.group(1))) / 100), 16)))
+                else: text(self.status, 65, 570 if self.screen == 'settings' else 580)
                 if self.screen in ('folder', 'settings'):
-                    if self.screen == 'settings': text('Start menu + uninstall entry: created with install', 65, 610, (170, 180, 180))
-                    text(str(self.folder)[:85], 65, 630)
+                    text(str(self.folder), 65, 615 if self.screen == 'settings' else 630)
                     parent = self.folder
                     while not parent.exists() and parent != parent.parent: parent = parent.parent
                     try: text(f'{shutil.disk_usage(parent).free / 1e9:.1f} GB free (about 40 GB needed)', 65, 665, (170, 180, 180))
                     except OSError: pass
                 else:
                     text('A / Enter: Select   B / Esc: Back   Start / F1: Settings' if self.controllers else 'No controller found. Plug one in, or use the keyboard and mouse.', 65, 650, (170, 180, 180))
+                if screenshot:
+                    surface = s.SDL_CreateRGBSurfaceWithFormat(0, 1280, 720, 32, s.SDL_PIXELFORMAT_ARGB8888)
+                    if not surface or s.SDL_RenderReadPixels(renderer, None, s.SDL_PIXELFORMAT_ARGB8888, surface.contents.pixels, surface.contents.pitch) != 0:
+                        raise RuntimeError('Could not capture launcher frame')
+                    path = Path(screenshot)
+                    output = path.with_name(path.stem + '-' + self.screen + '.bmp')
+                    if s.SDL_SaveBMP(surface, str(output).encode()) != 0:
+                        raise RuntimeError('Could not save launcher frame')
+                    s.SDL_FreeSurface(surface)
+                    self.screen = next(capture_screens, None)
+                    if self.screen is None:
+                        break
+                    if self.screen == 'progress':
+                        self.progress = 'Downloading: 42% (14.0 GB of 33.0 GB)'
+                    elif self.screen == 'settings':
+                        self.folder = Path('C:/Games/' + 'Very Long Game Folder Name/' * 8 + 'Silver Lantern')
                 s.SDL_RenderPresent(renderer)
                 s.SDL_Delay(16)
         finally:
@@ -829,7 +878,18 @@ def main():
         app = App(State.NOT_INSTALLED); app.transition(State.DOWNLOADING); app.transition(State.READY)
         return 0
     try:
-        LauncherUI().run()
+        if '--screenshot' in sys.argv:
+            index = sys.argv.index('--screenshot')
+            if index + 1 >= len(sys.argv):
+                raise ValueError('--screenshot requires an output path')
+            original_check = LauncherUI.check_updates
+            try:
+                LauncherUI.check_updates = lambda self: None
+                LauncherUI().run(screenshot=sys.argv[index + 1])
+            finally:
+                LauncherUI.check_updates = original_check
+        else:
+            LauncherUI().run()
         return 0
     except Exception as exc:
         if os.name == 'nt': ctypes.windll.user32.MessageBoxW(None, str(exc) + '\nUse --cli for the console version.', 'Silver Lantern', 0x10)

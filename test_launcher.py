@@ -11,6 +11,15 @@ from launcher import App, IllegalTransition, State, InputMapper, resolve_folder,
 
 
 class StateTests(unittest.TestCase):
+    def test_screenshot_debug_renders_all_screens(self):
+        with tempfile.TemporaryDirectory() as d:
+            output = Path(d) / 'screen.bmp'
+            result = subprocess.run([sys.executable, str(Path(launcher.__file__)), '--screenshot', str(output)], capture_output=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+            for name in ('main', 'progress', 'settings'):
+                frame = output.with_name('screen-' + name + '.bmp')
+                self.assertGreater(frame.stat().st_size, 0)
+
     def test_tool_worker_invocation_and_success(self):
         events = ProgressEvents()
         with patch('launcher.subprocess.run') as run:
