@@ -6,7 +6,8 @@
 - [x] SHIPPED v1.4.0 (e31b907, release verified): 114 tests + CI green; zip SHA256 matches sums; both EXE names identical bytes; --version/--cli --version = 1.4.0; --self-test pass; REAL 1.3.0 -> 1.4.0 self-update swap + relaunch proven (updated exe answers 1.4.0); clean-profile friend simulation exit 0, 33.05 GiB, bin\HeyListen.exe sha256 matched manifest, temp install removed.
 - [x] v1.4.1 speed fix DONE (b8d66a8, lane ses_e182acbf3ffeMeMvIv7qOSRW0c): parallel ranged-chunk downloads, 6 streams default, preallocated .part + sidecar, 119 tests, live 800 MB bundle at 70.0 MB/s vs ~14 MB/s baseline.
 - [ ] v1.4.1 program presence (same lane): Start Menu shortcut (Programs, not a pin) + HKCU uninstall entry + --uninstall mode that removes game folder, shortcuts, registry, and the program folder (delayed self-delete). Owner: 'should show up in Start, uninstall like a normal program.'
-- [ ] SHIP v1.4.1 (shipper): bump/tag/release, CI green, verify assets, timed friend-sim vs 40-min baseline (expect ~8-10 min).
+- [ ] v1.4.1 no-extract zip-run (same lane, queued): transient-run detection (exe under %TEMP% from Explorer zip-run) -> self-install to %LOCALAPPDATA%\Programs\Silver Lantern with arg passthrough + relaunch; embedded sources.json URL fallback; locked-target relaunch; README leads with 'no extraction needed'.
+- [ ] SHIP v1.4.1 (shipper): bump/tag/release, CI green, verify assets, timed friend-sim vs 40-min baseline (expect ~8-10 min); also verify zip-run self-install path works from a real Explorer-style temp run.
 - [ ] After v1.4.1: final report and delete the goal scheduled task.
 Known/accepted: update zip+checksum share a trust source (unsigned); prebuilt game files and Nintendo art published in the program (owner's direction); public names stay neutral ('Silver Lantern').
 Backlog (v1.5.0): manifest hash-cache baseline; H4 retries/backoff; H2 signing; SmartScreen copy; UI polish leftovers (zip/.cmd cleanup, --preset-only).
