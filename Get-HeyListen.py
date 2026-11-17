@@ -1850,9 +1850,9 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
         part = assets[name]
         cached = cache / name
         partial = Path(str(cached) + '.part')
-        if cached.is_file() and cached.stat().st_size == part['size'] and sha256(cached) == part['sha256']:
+        if cached.is_file() and cached.stat().st_size == part['size'] and sha256(cached, progress=True) == part['sha256']:
             continue
-        if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists() and sha256(partial) == part['sha256']:
+        if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists() and sha256(partial, progress=True) == part['sha256']:
             continue
         # Count the entire asset: sparse/preallocated chunks may consume space
         # later, and a server may discard a partial when it ignores ranges.
@@ -1916,13 +1916,13 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             if part['asset'] in verified_assets and dest.is_file():
                 return
             verified_assets.discard(part['asset'])
-            if dest.is_file() and dest.stat().st_size == part['size'] and sha256(dest) == part['sha256']:
+            if dest.is_file() and dest.stat().st_size == part['size'] and sha256(dest, progress=True) == part['sha256']:
                 verified_assets.add(part['asset'])
                 return
             dest.unlink(missing_ok=True)
             partial = Path(str(dest) + '.part')
             if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists():
-                if sha256(partial) == part['sha256']:
+                if sha256(partial, progress=True) == part['sha256']:
                     partial.replace(dest)
                     verified_assets.add(part['asset'])
                     return
@@ -1937,7 +1937,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                     side.unlink(missing_ok=True)
                 worker = stream_session() if s is None else s
                 stream_to(worker, url, dest, expect=part['size'], progress=progress.add, quiet=True)
-            if sha256(dest) != part['sha256']:
+            if sha256(dest, progress=True) != part['sha256']:
                 dest.unlink(missing_ok=True)
                 raise ValueError(f"SHA-256 mismatch: {part['asset']}")
             verified_assets.add(part['asset'])
@@ -2100,7 +2100,8 @@ def run_game_update(folder: Path, dry_run: bool = False, force: bool = False, si
         UPDATE_LOG.parent.mkdir(parents=True, exist_ok=True)
         with UPDATE_LOG.open('a', encoding='utf-8', errors='replace') as output:
             proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1)
-            for line in proc.stdout:
+            import launcher
+            for line in launcher.child_output(proc, 'Game update'):
                 output.write(line)
                 output.flush()
                 parsed = parse_update_line(line)
@@ -2111,7 +2112,11 @@ def run_game_update(folder: Path, dry_run: bool = False, force: bool = False, si
                     if message:
                         _update_say(message)
                         shown = True
-            code = update_exit_code(proc.wait())
+            try:
+                code = update_exit_code(proc.wait(timeout=10))
+            except subprocess.TimeoutExpired:
+                launcher.stop_child(proc)
+                raise TimeoutError('Game update did not exit. Please retry and check the log.')
         if silent or (not shown and (fields.get('status') == 'error' or code)):
             message = render_update_status(fields) or 'Update failed: update check failed.'
             _update_say(message)
@@ -2516,7 +2521,11 @@ def run_builder_flow(s, a) -> int:
         say("Leave this window open. When you close the Builder, the graphics settings")
         say("are applied for you.")
         try:
-            proc.wait()
+            proc.wait(timeout=24 * 60 * 60)
+        except subprocess.TimeoutExpired:
+            log('Builder is still open after 24 hours; continuing without waiting.')
+            say('Builder is still open. Apply graphics settings after it closes.')
+            return 1
         except Exception as e:  # noqa: BLE001
             log(f"builder wait failed: {e}")
     if not a.builder_only and not a.no_preset:

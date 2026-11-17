@@ -315,7 +315,7 @@ def log_message(message):
         pass
 
 
-def powershell(script, wait=True, timeout=None):
+def powershell(script, wait=True, timeout=60):
     encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
     args = ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
@@ -843,6 +843,53 @@ def gui_child_text(text):
     return re.sub(r'\s*(?:\.\s*){3,}', lambda m: ' ' if m.start() and text[:m.start()].rstrip().endswith(':') else ': ', text).strip()
 
 
+CHILD_IDLE_TIMEOUT = 120
+
+
+def stop_child(process):
+    if process.poll() is None:
+        if os.name == 'nt':
+            try:
+                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            except (OSError, subprocess.SubprocessError):
+                pass
+        if process.poll() is None:
+            process.kill()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        raise TimeoutError('Could not stop the stalled installer process.')
+
+
+def child_output(process, phase, idle_timeout=CHILD_IDLE_TIMEOUT):
+    messages = queue.Queue()
+    def read_output():
+        try:
+            for line in process.stdout:
+                messages.put((line, None))
+        except Exception as exc:
+            messages.put((None, exc))
+        finally:
+            messages.put((None, None))
+    threading.Thread(target=read_output, daemon=True).start()
+    while True:
+        try:
+            line, error = messages.get(timeout=idle_timeout)
+        except queue.Empty:
+            stop_child(process)
+            raise TimeoutError(f'{phase} stopped responding for {idle_timeout:g} seconds. Please retry and check the log.')
+        if error is not None:
+            stop_child(process)
+            raise error
+        if line is None:
+            return
+        if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ')):
+            phase = line.strip()[:160]
+        yield line
+
+
 def worker_command(events, args):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -854,10 +901,7 @@ def worker_command(events, args):
         last_line = ''
         screen_lines = []
         with LOG.open('a', encoding='utf-8') as log:
-            while True:
-                line = process.stdout.readline()
-                if not line:
-                    break
+            for line in child_output(process, 'Game installation or update'):
                 log.write(line)
                 log.flush()
                 if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ')):
@@ -867,7 +911,11 @@ def worker_command(events, args):
                 if 'text' in progress:
                     progress['text'] = gui_child_text(progress['text'])
                 events.publish('progress', progress)
-        code = process.wait()
+        try:
+            code = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            stop_child(process)
+            raise TimeoutError('Game installation or update did not exit. Please retry and check the log.')
         if events.cancelled.is_set():
             events.publish('cancelled', code)
         elif code == 0:
@@ -887,13 +935,14 @@ def worker_command(events, args):
                 parts.append('No diagnostic output was provided.')
             events.publish('error', f'The operation failed (exit {code}). ' + ' '.join(parts) + ' See the log for full details.')
     except Exception as exc:
+        log_message(f'Game installation or update failed: {exc}')
         events.publish('error', str(exc))
 
 
 def tool_update_worker(events, args):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run([sys.executable, '--self-update', *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        result = subprocess.run([sys.executable, '--self-update', *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', timeout=300, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         output = result.stdout or ''
         with LOG.open('a', encoding='utf-8') as log:
             log.write(output)
@@ -903,6 +952,9 @@ def tool_update_worker(events, args):
             events.publish('tool_complete', 0)
         else:
             events.publish('tool_current', 0)
+    except subprocess.TimeoutExpired:
+        log_message('Tool update timed out after 300 seconds.')
+        events.publish('error', 'Tool update timed out. Please retry and check the log.')
     except Exception as exc:
         events.publish('error', str(exc))
 
@@ -912,7 +964,7 @@ def terminate_worker(events):
     process = getattr(events, 'process', None)
     if process and process.poll() is None:
         if os.name == 'nt':
-            subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         else:
             process.terminate()
 
