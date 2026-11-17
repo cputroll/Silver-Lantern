@@ -26,13 +26,6 @@ try {
   $spec = Join-Path $out 'spec'
   New-Item -ItemType Directory -Force -Path $out, $stage, $build, $spec | Out-Null
   Remove-Item (Join-Path $stage '*') -Recurse -Force -ErrorAction SilentlyContinue
-  python -m PyInstaller --noconfirm --clean --onefile --name HeyListen-Get --hidden-import curl_cffi --collect-all curl_cffi --distpath $stage --workpath $build --specpath $spec Get-HeyListen.py
-  if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)." }
-  $exe = Join-Path $stage 'HeyListen-Get.exe'
-  if (-not (Test-Path $exe -PathType Leaf)) { throw 'PyInstaller did not produce HeyListen-Get.exe.' }
-  $bakedVersion = (& $exe --version --manifest (Join-Path $here 'sources.json') | Out-String).Trim()
-  if ($LASTEXITCODE -ne 0) { throw "Executable version check failed ($LASTEXITCODE)." }
-  if ($bakedVersion -cne $version) { throw "Executable version $bakedVersion does not match $version in sources.json and tag $Tag." }
   $sdlZip = Join-Path $out 'SDL2-devel-2.30.10-VC.zip'
   $sdlDir = Join-Path $out 'SDL2-2.30.10'
   $sdlDll = Join-Path $sdlDir 'SDL2-2.30.10\lib\x64\SDL2.dll'
@@ -46,8 +39,13 @@ try {
   $sdlDll = (Resolve-Path $sdlDll).Path
   $ttfDll = (python -c "import pathlib,sdl2dll; print(pathlib.Path(sdl2dll.__file__).parent / 'dll' / 'SDL2_ttf.dll')").Trim()
   if (-not (Test-Path $ttfDll -PathType Leaf)) { throw 'SDL2_ttf.dll not found; install launcher-requirements.txt.' }
-  python -m PyInstaller --noconfirm --clean --onefile --windowed --name SilverLantern --icon $iconPath --add-binary "${sdlDll};." --add-binary "${ttfDll};." --distpath $stage --workpath $build --specpath $spec launcher.py
-  if ($LASTEXITCODE -ne 0) { throw "Launcher PyInstaller failed ($LASTEXITCODE)." }
+  python -m PyInstaller --noconfirm --clean --onefile --name SilverLantern --icon $iconPath --hidden-import launcher --hidden-import curl_cffi --collect-all curl_cffi --add-binary "${sdlDll};." --add-binary "${ttfDll};." --distpath $stage --workpath $build --specpath $spec Get-HeyListen.py
+  if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)." }
+  $exe = Join-Path $stage 'SilverLantern.exe'
+  if (-not (Test-Path $exe -PathType Leaf)) { throw 'PyInstaller did not produce SilverLantern.exe.' }
+  $bakedVersion = (& $exe --version --manifest (Join-Path $here 'sources.json') | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0) { throw "Executable version check failed ($LASTEXITCODE)." }
+  if ($bakedVersion -cne $version) { throw "Executable version $bakedVersion does not match $version in sources.json and tag $Tag." }
   Copy-Item $sdlDll $stage
   Copy-Item sources.json, README.md, Apply-HeyListen-Preset.ps1, SilverLantern-Get.cmd, SilverLantern-Preset.cmd, Update-Game.ps1, Watch-Game.ps1, SilverLantern-AutoUpdate.cmd $stage
   $zip = Join-Path $out 'HeyListen-Get.zip'

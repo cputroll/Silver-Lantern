@@ -27,7 +27,7 @@ MANIFEST_URL = 'https://raw.githubusercontent.com/cputroll/Silver-Lantern/main/g
 
 def cli_command(*args):
     if getattr(sys, 'frozen', False):
-        return [str(BASE / 'HeyListen-Get.exe'), *map(str, args)]
+        return [sys.executable, '--cli', *map(str, args)]
     return [sys.executable, str(BASE / 'Get-HeyListen.py'), *map(str, args)]
 
 

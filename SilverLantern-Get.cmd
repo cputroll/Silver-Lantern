@@ -2,10 +2,10 @@
 setlocal
 cd /d "%~dp0"
 title HeyListen Get
-if exist "%~dp0HeyListen-Get.exe" (
-  "%~dp0HeyListen-Get.exe" %*
+if exist "%~dp0SilverLantern.exe" (
+  "%~dp0SilverLantern.exe" --cli %*
 ) else (
-  echo HeyListen-Get.exe is missing. Extract the complete release archive first.
+  echo SilverLantern.exe is missing. Extract the complete release archive first.
   pause
   exit /b 1
 )

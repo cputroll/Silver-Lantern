@@ -4,11 +4,16 @@ from pathlib import Path
 from unittest.mock import patch
 import os
 import subprocess
-from launcher import create_shortcut
+from launcher import create_shortcut, cli_command
+import sys
 from launcher import App, IllegalTransition, State, InputMapper, resolve_folder, legacy_exists, ProgressEvents
 
 
 class StateTests(unittest.TestCase):
+    def test_frozen_cli_uses_same_executable(self):
+        with patch.object(sys, 'frozen', True, create=True):
+            self.assertEqual(cli_command('--version'), [sys.executable, '--cli', '--version'])
+
     def test_download_success(self):
         app = App(State.NOT_INSTALLED)
         app.transition(State.DOWNLOADING)

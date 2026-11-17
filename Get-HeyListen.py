@@ -395,7 +395,7 @@ def ui_init(plain: bool = False) -> None:
         temp = os.environ.get("TEMP", "").lower()
         if (temp and here.startswith(temp)) and (".zip" in here or "rar$" in here or "\\temp\\" in here):
             raise UserError("It looks like this was opened straight from the zip.",
-                            "Right-click the zip, choose Extract All, then run HeyListen-Get.exe "
+                            "Right-click the zip, choose Extract All, then run SilverLantern.exe "
                             "from the extracted folder.")
 
 
@@ -485,7 +485,7 @@ def friendly(exc: BaseException, resumable_bytes: int = 0) -> UserError:
         name = Path(getattr(exc, "filename", None) or "a file").name
         return UserError(f"Windows wouldn't let this tool use {name}. Usually antivirus is still scanning it.",
                          "Wait a minute and run this again. If it keeps happening, allow "
-                         "HeyListen-Get.exe in your antivirus.", "file in use", resumable_bytes)
+                         "SilverLantern.exe in your antivirus.", "file in use", resumable_bytes)
     status = _http_status(exc)
     if status in (403, 404, 410) or "no download link on" in str(exc):
         return UserError("All download links are currently unavailable.",
@@ -1539,6 +1539,21 @@ def run_game_update(folder: Path, dry_run: bool = False, force: bool = False, si
 
 
 def main() -> int:
+    if '--cli' in sys.argv[1:]:
+        sys.argv.remove('--cli')
+    elif '--self-test' in sys.argv[1:]:
+        import launcher
+        app = launcher.App(launcher.State.NOT_INSTALLED)
+        app.transition(launcher.State.DOWNLOADING)
+        app.transition(launcher.State.READY)
+        return 0
+    elif getattr(sys, 'frozen', False) and (len(sys.argv) == 1 or sys.argv[1:] == ['--gui']):
+        try:
+            import launcher
+            return launcher.main()
+        except ImportError:
+            if sys.argv[1:] == ['--gui']:
+                raise
     if len(sys.argv) >= 5 and sys.argv[1] == "--apply-update-internal":
         _apply_update(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5:])
         return 0
@@ -1732,7 +1747,7 @@ def run_builder_flow(s, a) -> int:
         done("failed", "yellow")
         log(f"manifest: {e}")
         raise UserError("This tool's files are incomplete.",
-                        "Extract the whole zip into a folder again and run HeyListen-Get.exe from there.")
+                        "Extract the whole zip into a folder again and run SilverLantern.exe from there.")
     done("up to date" if _MANIFEST_ORIGIN == "url" else "using saved copy",
          "green" if _MANIFEST_ORIGIN == "url" else "dim")
     tool = man.get("tool", {})
