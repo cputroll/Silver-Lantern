@@ -80,10 +80,10 @@ class StaleChannel(ValueError):
     """The channel is older than a previously verified revision."""
 
 
-def resolve(fetch, minimum_revision=0, expected_digest=None, pointer_data=None):
+def resolve_info(fetch, minimum_revision=0, expected_digest=None, pointer_data=None):
     pointer = json.loads(fetch(CHANNEL_URL) if pointer_data is None else pointer_data)
     revision = pointer.get('revision', 0)
-    if type(revision) is not int or revision < 0 or (minimum_revision and not revision):
+    if type(revision) is not int or revision < 1:
         raise ValueError('invalid game channel revision')
     if revision < minimum_revision:
         raise StaleChannel('stale game channel')
@@ -98,7 +98,11 @@ def resolve(fetch, minimum_revision=0, expected_digest=None, pointer_data=None):
     data = fetch(ASSET_BASE + name)
     if hashlib.sha256(data).hexdigest() != digest:
         raise ValueError('game channel manifest checksum mismatch')
-    return data
+    return data, revision, digest
+
+
+def resolve(fetch, minimum_revision=0, expected_digest=None, pointer_data=None):
+    return resolve_info(fetch, minimum_revision, expected_digest, pointer_data)[0]
 
 
 def resolve_with_fallback(fetch, minimum_revision=0, expected_digest=None):

@@ -9,7 +9,7 @@ import game_channel
 class GameChannelTests(unittest.TestCase):
     def pointer(self, content):
         return json.dumps({'version': 1, 'manifest': 'game-manifest-v041.json',
-                           'sha256': hashlib.sha256(content).hexdigest()}).encode()
+                           'sha256': hashlib.sha256(content).hexdigest(), 'revision': 1}).encode()
 
     def test_resolves_verified_immutable_manifest(self):
         content = b'{"version":2}'
@@ -26,8 +26,10 @@ class GameChannelTests(unittest.TestCase):
 
     def test_rejects_missing_revision_when_floor_exists(self):
         content = b'{"version":2}'
+        pointer = json.loads(self.pointer(content))
+        del pointer['revision']
         with self.assertRaises(ValueError):
-            game_channel.resolve(Mock(side_effect=[self.pointer(content), content]), minimum_revision=1)
+            game_channel.resolve(Mock(side_effect=[json.dumps(pointer).encode(), content]), minimum_revision=1)
 
     def test_rejects_same_revision_with_different_digest(self):
         content = b'{"version":2}'
@@ -103,6 +105,41 @@ class GameChannelTests(unittest.TestCase):
             low.wait(timeout=15)
             self.assertEqual(high.returncode, 0)
             self.assertEqual(game_channel.load_state(folder), (20, 'a' * 64))
+
+    def test_lock_contention_times_out(self):
+        import subprocess
+        import sys
+        import tempfile
+        import time
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            code = "import game_channel,sys,time,pathlib; exec('with game_channel.state_lock(pathlib.Path(sys.argv[1])):\\n print(\\\"ready\\\",flush=True)\\n time.sleep(2)')"
+            child = subprocess.Popen([sys.executable, '-c', code, tmp], stdout=subprocess.PIPE, text=True)
+            try:
+                deadline = time.monotonic() + 5
+                while not (directory / 'channel-state.lock').exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
+                time.sleep(.2)
+                with self.assertRaises(TimeoutError):
+                    with game_channel.state_lock(directory, timeout=.2):
+                        pass
+            finally:
+                child.wait(timeout=5)
+                child.stdout.close()
+
+    def test_missing_or_zero_revision_is_invalid_for_channel(self):
+        content = b'valid'
+        pointer = json.loads(self.pointer(content))
+        del pointer['revision']
+        with self.assertRaises(ValueError):
+            game_channel.resolve(Mock(side_effect=[json.dumps(pointer).encode(), content]))
+
+    def test_resolved_channel_returns_verified_revision_and_digest(self):
+        content = b'valid'
+        pointer = self.pointer(content)
+        data, revision, digest = game_channel.resolve_info(Mock(side_effect=[pointer, content]))
+        self.assertEqual((data, revision, digest), (content, 1, hashlib.sha256(content).hexdigest()))
 
     def test_rejects_hash_mismatch(self):
         fetch = Mock(side_effect=[self.pointer(b'expected'), b'altered'])
