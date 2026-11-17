@@ -192,7 +192,9 @@ def schedule_owned_cleanup():
     files = ','.join(ps_quote(folder / name) for name in OWNED_FILES)
     script = (f'$p=Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; '
               'if($p){$p.WaitForExit()}; '
-              f'@({files}) | ForEach-Object {{ Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }}; '
+              f'$files=@({files}); for($i=0;$i -lt 60;$i++) {{ '
+              '$files | ForEach-Object { Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }; '
+              'if(-not ($files | Where-Object { Test-Path -LiteralPath $_ })) { break }; Start-Sleep -Milliseconds 500 }; '
               f'try {{ [System.IO.Directory]::Delete({ps_quote(folder)}, $false) }} catch {{}}')
     powershell(script, wait=False)
 
