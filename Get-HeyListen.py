@@ -1377,10 +1377,17 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
         return
     if pending:
         # Retaining assets requires space for the full download as well as the files.
-        need = 40 * 1024 ** 3
-        if keep_assets:
-            need = max(need, download_bytes + sum(item['size'] for item in pending) + 1024 ** 3)
-        check_disk_space(root, need)
+        try:
+            minimum_gb = float(os.environ.get('SILVER_LANTERN_MIN_FREE_GB', '40'))
+            if not 0 <= minimum_gb < float('inf'):
+                raise ValueError
+        except ValueError:
+            raise UserError('SILVER_LANTERN_MIN_FREE_GB must be a non-negative number.', 'Correct the environment variable and try again.', 'configuration')
+        if minimum_gb:
+            need = int(minimum_gb * 1024 ** 3)
+            if keep_assets:
+                need = max(need, download_bytes + sum(item['size'] for item in pending) + 1024 ** 3)
+            check_disk_space(root, need)
     root.mkdir(parents=True, exist_ok=True)
     if pending:
         cache.mkdir(parents=True, exist_ok=True)

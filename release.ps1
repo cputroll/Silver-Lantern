@@ -46,6 +46,7 @@ try {
   $bakedVersion = (& $exe --version --manifest (Join-Path $here 'sources.json') | Out-String).Trim()
   if ($LASTEXITCODE -ne 0) { throw "Executable version check failed ($LASTEXITCODE)." }
   if ($bakedVersion -cne $version) { throw "Executable version $bakedVersion does not match $version in sources.json and tag $Tag." }
+  Copy-Item $exe (Join-Path $stage 'HeyListen-Get.exe')
   Copy-Item $sdlDll $stage
   Copy-Item sources.json, README.md, Apply-HeyListen-Preset.ps1, SilverLantern-Get.cmd, SilverLantern-Preset.cmd, Update-Game.ps1, Watch-Game.ps1, SilverLantern-AutoUpdate.cmd $stage
   $zip = Join-Path $out 'HeyListen-Get.zip'

@@ -20,8 +20,9 @@ class ReleaseTests(unittest.TestCase):
         with zipfile.ZipFile(archive) as z:
             names = z.namelist()
             self.assertEqual(names.count('SilverLantern.exe'), 1)
-            self.assertNotIn('HeyListen-Get.exe', names)
+            self.assertEqual(names.count('HeyListen-Get.exe'), 1)
             exe_bytes = z.read('SilverLantern.exe')
+            self.assertEqual(z.read('HeyListen-Get.exe'), exe_bytes)
             self.assertTrue(exe_bytes.startswith(b'MZ'))
             with tempfile.TemporaryDirectory() as temp:
                 exe = Path(temp) / 'SilverLantern.exe'

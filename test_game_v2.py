@@ -23,6 +23,11 @@ def sample():
 
 
 class V2Tests(unittest.TestCase):
+    def setUp(self):
+        disk = patch.object(h.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 100 * 1024 ** 3})())
+        disk.start()
+        self.addCleanup(disk.stop)
+
     def validate(self, m):
         return h.parse_game_manifest(json.dumps(m))
 

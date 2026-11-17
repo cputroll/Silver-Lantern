@@ -19,6 +19,11 @@ def manifest(data=b'abc'):
          'parts': [{'asset': 'g001.p1', 'size': len(data), 'sha256': digest}]}]}
 
 class SyncTests(unittest.TestCase):
+    def setUp(self):
+        disk = patch.object(h.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 100 * 1024 ** 3})())
+        disk.start()
+        self.addCleanup(disk.stop)
+
     def test_bad_json(self):
         with self.assertRaises(ValueError): h.parse_game_manifest('{')
     def test_missing_fields(self):

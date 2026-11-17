@@ -24,6 +24,11 @@ def fixture():
 
 
 class IncrementalTests(unittest.TestCase):
+    def setUp(self):
+        disk = patch.object(h.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 100 * 1024 ** 3})())
+        disk.start()
+        self.addCleanup(disk.stop)
+
     def test_shared_bundle_removed_only_after_last_file_before_next_fetch(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -42,6 +47,18 @@ class IncrementalTests(unittest.TestCase):
                 h.install_game(object(), fixture(), root)
             self.assertEqual(events, ['a', 'b'])
             self.assertEqual((root / 'three').read_bytes(), b'c')
+
+    def test_preflight_override_zero_disables_check(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict('os.environ', {'SILVER_LANTERN_MIN_FREE_GB': '0'}), patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to', side_effect=RuntimeError('stop')), redirect_stdout(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                h.install_game(object(), fixture(), Path(td))
+            check.assert_not_called()
+
+    def test_preflight_override_custom_threshold(self):
+        with tempfile.TemporaryDirectory() as td, patch.dict('os.environ', {'SILVER_LANTERN_MIN_FREE_GB': '2'}), patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to', side_effect=RuntimeError('stop')), redirect_stdout(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                h.install_game(object(), fixture(), Path(td))
+            self.assertEqual(check.call_args.args[1], 2 * 1024 ** 3)
 
     def test_plan_and_threshold(self):
         with tempfile.TemporaryDirectory() as td:
