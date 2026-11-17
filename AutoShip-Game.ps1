@@ -14,7 +14,10 @@ function Log([string]$Message) {
     Add-Content -LiteralPath $logPath -Value (('{0} {1}' -f [DateTime]::UtcNow.ToString('o'), $Message)) -Encoding UTF8
 }
 function Run([string]$Program, [string[]]$Arguments) {
-    & $Program @Arguments 2>&1 | ForEach-Object { Log ([string]$_) }
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & $Program @Arguments 2>&1 | ForEach-Object { Log ([string]$_) } }
+    finally { $ErrorActionPreference = $previous }
     if ($LASTEXITCODE -ne 0) { throw "$Program failed exit $LASTEXITCODE" }
 }
 function Version([string]$Tag) {
@@ -47,7 +50,8 @@ try {
         $work = Join-Path ([IO.Path]::GetTempPath()) ('silvership-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $work | Out-Null
 
-        git fetch origin main game-channel 2>&1 | ForEach-Object { Log ([string]$_) }
+        try { $fc = git fetch origin game-channel 2>&1; $fc | ForEach-Object { Log ([string]$_) } } catch { Log 'game-channel branch not present yet (first publication)' }
+        Run 'git' @('fetch', 'origin', 'main')
         Run 'git' @('pull', '--rebase', 'origin', 'main')
         $repoManifest = Join-Path $repo 'game-manifest.json'
         $revision = 1
@@ -57,7 +61,10 @@ try {
         }
         $prefix = "r$revision-"
         Log "Rebuilding game for revision $revision"
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'Update-Game.ps1') -GameFolder $GameFolder 2>&1 | ForEach-Object { Log ([string]$_) }
+        $updatePreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'Update-Game.ps1') -GameFolder $GameFolder 2>&1 | ForEach-Object { Log ([string]$_) } }
+        finally { $ErrorActionPreference = $updatePreference }
         if ($LASTEXITCODE -ne 10 -and $LASTEXITCODE -ne 0) { throw "update failed exit $LASTEXITCODE" }
         Run 'python' @((Join-Path $repo 'pack-game.py'), '--source', $GameFolder, '--out', $work, '--prefix', $prefix)
         $manifestPath = Join-Path $work 'game-manifest.json'
