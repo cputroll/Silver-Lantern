@@ -682,22 +682,28 @@ TYPE = {'display': ('segoeuib.ttf', 64), 'title': ('seguisb.ttf', 36), 'figure':
 MARGIN = 96
 
 
+def render_density(width, height):
+    """Physical pixels per logical pixel in SDL's aspect-preserving viewport."""
+    if width <= 0 or height <= 0:
+        return 1.0
+    return max(1.0, min(width / CANVAS[0], height / CANVAS[1]))
+
+
+def physical_span(span, scale, offset_x, offset_y):
+    x, y, w, h = span
+    left, top = round(x * scale), round(y * scale)
+    right, bottom = round((x + w) * scale), round((y + h) * scale)
+    return offset_x + left, offset_y + top, right - left, bottom - top
+
+
 class Painter:
     """Measured text, rounded shapes and the backdrop; every string is fitted, never clipped."""
 
     def __init__(self, s, ttf, renderer):
         self.s, self.ttf, self.r = s, ttf, renderer
-        fonts = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts'
         self.fonts, self.cache, self.backdrop = {}, {}, None
-        for role, (name, size) in TYPE.items():
-            font = None
-            for candidate in (name, 'segoeui.ttf'):
-                font = ttf.TTF_OpenFont(str(fonts / candidate).encode(), size)
-                if font:
-                    break
-            if not font:
-                raise RuntimeError('Could not open the system font')
-            self.fonts[role] = font
+        self.density = 0
+        self.set_density(1)
         art = ROOT / 'assets' / 'ui-backdrop.bmp'
         if art.is_file():
             surface = s.SDL_LoadBMP(str(art).encode())
@@ -705,6 +711,33 @@ class Painter:
                 self.backdrop = s.SDL_CreateTextureFromSurface(renderer, surface)
                 s.SDL_FreeSurface(surface)
         s.SDL_SetRenderDrawBlendMode(renderer, s.SDL_BLENDMODE_BLEND)
+
+    def set_density(self, density):
+        density = max(1.0, round(density, 3))
+        if density == self.density:
+            return
+        fonts = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts'
+        new_fonts = {}
+        try:
+            for role, (name, size) in TYPE.items():
+                font = None
+                for candidate in (name, 'segoeui.ttf'):
+                    font = self.ttf.TTF_OpenFont(str(fonts / candidate).encode(), max(1, round(size * density)))
+                    if font:
+                        break
+                if not font:
+                    raise RuntimeError('Could not open the system font')
+                new_fonts[role] = font
+        except Exception:
+            for font in new_fonts.values():
+                self.ttf.TTF_CloseFont(font)
+            raise
+        for texture, _, _ in self.cache.values():
+            self.s.SDL_DestroyTexture(texture)
+        self.cache.clear()
+        for font in self.fonts.values():
+            self.ttf.TTF_CloseFont(font)
+        self.fonts, self.density = new_fonts, density
 
     def close(self):
         for texture, _, _ in self.cache.values():
@@ -720,10 +753,10 @@ class Painter:
         w, h = ctypes.c_int(), ctypes.c_int()
         if self.ttf.TTF_SizeUTF8(self.fonts[role], str(value).encode('utf-8'), ctypes.byref(w), ctypes.byref(h)) != 0:
             return 10 ** 6, 0
-        return w.value, h.value
+        return w.value / self.density, h.value / self.density
 
     def height(self, role):
-        return self.ttf.TTF_FontHeight(self.fonts[role])
+        return self.ttf.TTF_FontHeight(self.fonts[role]) / self.density
 
     def fit(self, role, value, max_width):
         value = str(value)
@@ -788,13 +821,14 @@ class Painter:
             texture = s.SDL_CreateTextureFromSurface(self.r, surface)
             self.cache[key] = (texture, surface.contents.w, surface.contents.h)
             s.SDL_FreeSurface(surface)
-        texture, w, h = self.cache[key]
+        texture, pixel_w, pixel_h = self.cache[key]
+        w, h = pixel_w / self.density, pixel_h / self.density
         if align == 'center':
             x -= w // 2
         elif align == 'right':
             x -= w
         s.SDL_SetTextureAlphaMod(texture, alpha)
-        s.SDL_RenderCopy(self.r, texture, None, s.SDL_Rect(int(x), int(y), w, h))
+        s.SDL_RenderCopy(self.r, texture, None, s.SDL_Rect(int(x), int(y), int(round(w)), int(round(h))))
         return w
 
     # -- shapes
@@ -815,8 +849,18 @@ class Painter:
         if not spans:
             return
         s.SDL_SetRenderDrawColor(self.r, *color, int(max(0, min(255, alpha))))
-        rects = (s.SDL_Rect * len(spans))(*[s.SDL_Rect(*span) for span in spans])
+        width, height = ctypes.c_int(), ctypes.c_int()
+        if s.SDL_GetRendererOutputSize(self.r, ctypes.byref(width), ctypes.byref(height)) != 0:
+            return
+        scale = min(width.value / CANVAS[0], height.value / CANVAS[1])
+        if scale <= 0:
+            return
+        ox = round((width.value - CANVAS[0] * scale) / 2)
+        oy = round((height.value - CANVAS[1] * scale) / 2)
+        rects = (s.SDL_Rect * len(spans))(*[s.SDL_Rect(*physical_span(span, scale, ox, oy)) for span in spans])
+        s.SDL_RenderSetLogicalSize(self.r, 0, 0)
         s.SDL_RenderFillRects(self.r, rects, len(spans))
+        s.SDL_RenderSetLogicalSize(self.r, *CANVAS)
 
     def fill(self, x, y, w, h, color, alpha=255, radius=0):
         x, y, w, h = int(x), int(y), int(w), int(h)
@@ -1718,7 +1762,7 @@ class LauncherUI:
             if not match or not all(1 <= int(n) <= 4096 for n in match.groups()):
                 raise ValueError('Invalid screenshot size')
             size = tuple(map(int, match.groups()))
-        window = s.SDL_CreateWindow('Ocarina of Time'.encode('utf-8'), s.SDL_WINDOWPOS_CENTERED, s.SDL_WINDOWPOS_CENTERED, *size, s.SDL_WINDOW_RESIZABLE)
+        window = s.SDL_CreateWindow('Ocarina of Time'.encode('utf-8'), s.SDL_WINDOWPOS_CENTERED, s.SDL_WINDOWPOS_CENTERED, *size, s.SDL_WINDOW_RESIZABLE | s.SDL_WINDOW_ALLOW_HIGHDPI)
         renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_ACCELERATED | s.SDL_RENDERER_PRESENTVSYNC)
         if not renderer: renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
         if not window or not renderer: raise RuntimeError('Could not create the launcher window')
@@ -1785,6 +1829,9 @@ class LauncherUI:
                                 break
                 frame_now = time.monotonic()
                 dt, last = min(.1, frame_now - last), frame_now
+                output_w, output_h = ctypes.c_int(), ctypes.c_int()
+                if s.SDL_GetRendererOutputSize(renderer, ctypes.byref(output_w), ctypes.byref(output_h)) == 0:
+                    painter.set_density(render_density(output_w.value, output_h.value))
                 self.render(painter, dt)
                 if screenshot:
                     surface = s.SDL_CreateRGBSurfaceWithFormat(0, size[0], size[1], 32, s.SDL_PIXELFORMAT_ARGB8888)
