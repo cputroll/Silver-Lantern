@@ -43,6 +43,21 @@ class SegmentSchedulerTests(unittest.TestCase):
             self.assertFalse((root / 'file').exists())
             self.assertFalse(any((root / '.heylisten-parts').iterdir()))
 
+    def test_valve_recovers_one_blocked_bundle_and_preserves_order(self):
+        data = [b'a', b'b', b'c']
+        assets = {str(i): {'asset': str(i), 'size': 1, 'sha256': digest(data[i])} for i in range(3)}
+        item = {'path': 'file', 'size': 3, 'sha256': digest(b'cba'),
+                'segments': [{'asset': str(i), 'offset': 0, 'length': 1, 'sha256': digest(data[i])} for i in (2, 1, 0)]}
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            counts = []
+            def fetch(asset):
+                counts.append(len(list(root.iterdir())))
+                (root / asset['asset']).write_bytes(data[int(asset['asset'])])
+            h.assemble_segmented([item], assets, root, root, fetch, False)
+            self.assertEqual((root / 'file').read_bytes(), b'cba')
+            self.assertEqual(counts, [0, 1, 2])
+
     def test_valve_reports_unconsumable_segments(self):
         data = b'x'
         # Asset order intentionally contradicts segment order; call the scheduler
