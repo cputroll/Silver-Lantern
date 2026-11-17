@@ -154,7 +154,8 @@ OWNED_FILES = ('SilverLantern.exe', 'HeyListen-Get.exe', 'SDL2.dll', 'sources.js
                'README.md', 'Apply-HeyListen-Preset.ps1', 'SilverLantern-Get.cmd',
                'SilverLantern-Preset.cmd', 'Update-Game.ps1', 'Watch-Game.ps1',
                'SilverLantern-AutoUpdate.cmd', 'sources.cache.json', 'HeyListen-Get.log',
-               'SilverLantern.exe.update-backup', 'HeyListen-Get.exe.update-backup')
+               'SilverLantern.exe.update-backup', 'HeyListen-Get.exe.update-backup', 'Run Silver Lantern.exe')
+OWNED_FILES += tuple('support/' + name for name in OWNED_FILES if name not in ('Run Silver Lantern.exe',))
 
 
 def register_install(folder):
@@ -207,6 +208,7 @@ def schedule_owned_cleanup():
               f'$files=@({files}); for($i=0;$i -lt 60;$i++) {{ '
               '$files | ForEach-Object { Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }; '
               'if(-not ($files | Where-Object { Test-Path -LiteralPath $_ })) { break }; Start-Sleep -Milliseconds 500 }; '
+              f'try {{ [System.IO.Directory]::Delete({ps_quote(folder / "support")}, $false) }} catch {{}}; '
               f'try {{ [System.IO.Directory]::Delete({ps_quote(folder)}, $false) }} catch {{}}')
     powershell(script, wait=False)
 
@@ -436,7 +438,7 @@ class LauncherUI:
         self.screen = 'main' if self.config else 'folder'
         self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
         self.focus = 0
-        self.status = 'Ready to play.' if self.state == State.READY else 'The game is not installed yet.'
+        self.status = 'Checking for updates…'
         self.progress = ''
         self.events = ProgressEvents()
         self.mapper = InputMapper()
@@ -446,6 +448,7 @@ class LauncherUI:
         self.running = True
         self.last_error = ''
         self.tool_update_available = False
+        self.tool_handoff_started = False
         if self.state == State.READY and getattr(sys, 'frozen', False):
             threading.Thread(target=self.shortcut_worker, daemon=True).start()
         self.check_updates()
@@ -464,21 +467,40 @@ class LauncherUI:
     def check_updates(self):
         def check():
             try:
+                self.events.publish('status', 'Fetching manifest…')
                 req = urllib.request.Request(game_manifest_url(), headers={'User-Agent': 'SilverLantern'})
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    manifest = json.load(response)
+                for attempt in range(2):
+                    try:
+                        with urllib.request.urlopen(req, timeout=30) as response:
+                            total = int(response.headers.get('content-length') or 0)
+                            chunks, received = [], 0
+                            while True:
+                                chunk = response.read(1024 * 1024)
+                                if not chunk:
+                                    break
+                                chunks.append(chunk)
+                                received += len(chunk)
+                                self.events.publish('status', f'Fetching manifest… ({received / 1_000_000:.1f} of {total / 1_000_000:.1f} MB)' if total else f'Fetching manifest… ({received / 1_000_000:.1f} MB)')
+                            self.events.publish('status', 'Planning…')
+                            manifest = json.loads(b''.join(chunks))
+                        break
+                    except Exception:
+                        if attempt:
+                            raise
+                        self.events.publish('status', 'Retrying manifest fetch…')
                 # TODO v1.5: cache the verified manifest hash after installation.
                 digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
                 self.events.publish('check', (manifest.get('revision'), digest))
             except Exception:
                 self.events.publish('offline', None)
             try:
+                self.events.publish('status', 'Checking for updates…')
                 req = urllib.request.Request('https://api.github.com/repos/cputroll/Silver-Lantern/releases/latest', headers={'User-Agent':'SilverLantern', 'Accept':'application/vnd.github+json'})
                 with urllib.request.urlopen(req, timeout=10) as response:
                     release = json.load(response)
                 self.events.publish('tool_check', release.get('tag_name', 'unknown'))
                 if installed(self.folder):
-                    result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-File', str(BASE / 'Update-Game.ps1'), '-DryRun', '-GameFolder', str(self.folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                    result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-File', str(next((p for p in (BASE / 'Update-Game.ps1', BASE / 'support' / 'Update-Game.ps1') if p.is_file()), BASE / 'Update-Game.ps1')), '-DryRun', '-GameFolder', str(self.folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                     self.events.publish('upstream_check', result.returncode)
             except Exception:
                 self.events.publish('offline', None)
@@ -511,6 +533,8 @@ class LauncherUI:
         self.progress = 'Updating Silver Lantern…'
         self.set_screen('progress')
         args = [arg for arg in sys.argv[1:] if arg not in ('--self-update', '--no-self-update')]
+        if not args:
+            args = ['--gui']
         threading.Thread(target=tool_update_worker, args=(self.events, args), daemon=True).start()
 
     def start_operation(self, update=False):
@@ -524,6 +548,7 @@ class LauncherUI:
             self.set_screen('error')
             return
         self.operation = 'update' if update else 'download'
+        self.progress = 'Checking for updates…' if update else 'Fetching manifest…'
         self.state = State.UPDATING if update else State.DOWNLOADING
         self.events = ProgressEvents()
         args = ['--no-self-update', '--update-game' if update else '--install-game', str(self.folder)]
@@ -619,7 +644,8 @@ class LauncherUI:
         while True:
             try: kind, value = self.events.queue.get_nowait()
             except queue.Empty: break
-            if kind == 'progress': self.progress = value.get('text', str(value))
+            if kind == 'status': self.status = str(value)
+            elif kind == 'progress': self.progress = value.get('text', str(value))
             elif kind == 'complete':
                 self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
                 self.status = 'Ready to play.' if self.state == State.READY else 'Installation completed but game files were not found.'
@@ -651,8 +677,12 @@ class LauncherUI:
                 if match and tuple(map(int, match.groups())) > tuple(map(int, APP_VERSION.split('.'))):
                     self.tool_update_available = True
                     self.status = 'Silver Lantern update available: ' + value
-                    if self.config.get('auto_tool_update', True) and self.screen != 'progress':
+                    if self.config.get('auto_tool_update', True) and self.screen != 'progress' and '--no-self-update' not in sys.argv and not self.tool_handoff_started:
+                        self.tool_handoff_started = True
                         self.start_tool_update()
+                elif match:
+                    self.tool_update_available = False
+                    self.status = 'Silver Lantern is up to date.'
             elif kind == 'tool_complete':
                 # The child must exit first; its helper then waits for this GUI to exit before swapping.
                 self.running = False
@@ -699,8 +729,24 @@ class LauncherUI:
                         ident = s.SDL_JoystickInstanceID(joystick)
                         if ident in self.controllers: s.SDL_GameControllerClose(p)
                         else: self.controllers[ident] = p
-        def text(value, x, y, color=(230, 234, 238)):
-            surface = ttf.TTF_RenderUTF8_Blended(font, str(value).encode('utf-8'), s.SDL_Color(*color, 255))
+        def text(value, x, y, color=(230, 234, 238), max_width=None):
+            value = str(value)
+            max_width = max_width if max_width is not None else 1215 - x
+            width, height = ctypes.c_int(), ctypes.c_int()
+            def fits(text):
+                return ttf.TTF_SizeUTF8(font, text.encode('utf-8'), ctypes.byref(width), ctypes.byref(height)) == 0 and width.value <= max_width
+            if not fits(value):
+                lo, hi = 0, len(value)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if fits(value[:mid] + '…'):
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                value = value[:lo] + '…' if fits('…') else ''
+            if not value:
+                return
+            surface = ttf.TTF_RenderUTF8_Blended(font, value.encode('utf-8'), s.SDL_Color(*color, 255))
             if surface:
                 texture = s.SDL_CreateTextureFromSurface(renderer, surface)
                 rect = s.SDL_Rect(x, y, surface.contents.w, surface.contents.h)
@@ -754,7 +800,7 @@ class LauncherUI:
                     selected = i == self.focus
                     s.SDL_SetRenderDrawColor(renderer, *( (90, 108, 100, 255) if selected else (42, 54, 58, 255) ))
                     rect = s.SDL_Rect(250, 210 + i * spacing, 780, height); s.SDL_RenderFillRect(renderer, ctypes.byref(rect))
-                    text(label, 275, 220 + i * spacing)
+                    text(label, 275, 220 + i * spacing, max_width=730)
                 if self.screen == 'error': text(self.last_error[:70], 65, 580, (255, 180, 160))
                 elif self.screen == 'progress': text(self.progress[:80], 65, 580)
                 else: text(self.status[:80], 65, 580)

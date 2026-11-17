@@ -46,9 +46,14 @@ try {
   $bakedVersion = (& $exe --version --manifest (Join-Path $here 'sources.json') | Out-String).Trim()
   if ($LASTEXITCODE -ne 0) { throw "Executable version check failed ($LASTEXITCODE)." }
   if ($bakedVersion -cne $version) { throw "Executable version $bakedVersion does not match $version in sources.json and tag $Tag." }
-  Copy-Item $exe (Join-Path $stage 'HeyListen-Get.exe')
-  Copy-Item $sdlDll $stage
-  Copy-Item sources.json, README.md, Apply-HeyListen-Preset.ps1, SilverLantern-Get.cmd, SilverLantern-Preset.cmd, Update-Game.ps1, Watch-Game.ps1, SilverLantern-AutoUpdate.cmd $stage
+  $support = Join-Path $stage 'support'
+  New-Item -ItemType Directory -Force -Path $support | Out-Null
+  Copy-Item $exe (Join-Path $stage 'Run Silver Lantern.exe')
+  Move-Item $exe (Join-Path $support 'SilverLantern.exe')
+  Copy-Item (Join-Path $support 'SilverLantern.exe') (Join-Path $support 'HeyListen-Get.exe')
+  Copy-Item $sdlDll $support
+  Copy-Item sources.json, README.md, Apply-HeyListen-Preset.ps1, SilverLantern-Get.cmd, SilverLantern-Preset.cmd, Update-Game.ps1, Watch-Game.ps1, SilverLantern-AutoUpdate.cmd $support
+  [System.IO.File]::WriteAllText((Join-Path $stage 'Read me.txt'), "Double-click Run Silver Lantern.exe to start.`r`nMore information is in the support folder.`r`n", [System.Text.UTF8Encoding]::new($false))
   $zip = Join-Path $out 'HeyListen-Get.zip'
   Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
   $sha = [System.Security.Cryptography.SHA256]::Create()

@@ -613,7 +613,7 @@ def load_manifest(manifest_arg: str | None) -> dict:
             elif kind == "cache":
                 data = json.loads(Path(label).read_text(encoding="utf-8-sig"))
             else:
-                r = session().get(label, headers={"accept": "application/json"}, timeout=45)
+                r = session().get(label, headers={"accept": "application/json"}, timeout=(10, 30))
                 r.raise_for_status()
                 data = r.json()
             if "game" not in data or "builder" not in data:
@@ -636,7 +636,7 @@ def load_manifest(manifest_arg: str | None) -> dict:
 # ---------------------------------------------------------------- builder
 def latest_release(s: "requests.Session", repo: str) -> dict:
     r = s.get(f"https://api.github.com/repos/{repo}/releases/latest",
-              headers={"accept": "application/vnd.github+json"}, timeout=60)
+              headers={"accept": "application/vnd.github+json"}, timeout=(10, 30))
     r.raise_for_status()
     return r.json()
 
@@ -657,7 +657,7 @@ def download_builder(s: "requests.Session", man: dict, out: Path, force: bool = 
 
     if sums_name not in assets:
         raise RuntimeError(f"{repo} {tag} has no {sums_name}")
-    response = s.get(assets[sums_name]["browser_download_url"], timeout=60)
+    response = s.get(assets[sums_name]["browser_download_url"], timeout=(10, 30))
     response.raise_for_status()
     matches = []
     for line in response.text.splitlines():
@@ -700,7 +700,7 @@ def download_builder(s: "requests.Session", man: dict, out: Path, force: bool = 
 
 # ---------------------------------------------------------------- game
 def buzz_download_url(s: "requests.Session", page_url: str) -> tuple[str, str]:
-    page = s.get(page_url, headers={"accept": "text/html", "referer": "https://buzzheavier.com/"}, timeout=60)
+    page = s.get(page_url, headers={"accept": "text/html", "referer": "https://buzzheavier.com/"}, timeout=(10, 30))
     page.raise_for_status()
     ident = page_url.rstrip("/").rsplit("/", 1)[-1]
     m = re.search(r'hx-get="(/' + re.escape(ident) + r'/download\?t=[^"]+)"', page.text)
@@ -747,7 +747,7 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
         if have:
             headers["range"] = f"bytes={have}-"
         try:
-            r = s.get(url, headers=headers, stream=True, timeout=120)
+            r = s.get(url, headers=headers, stream=True, timeout=(10, 30))
             if r.status_code == 416 and expect and have >= expect:
                 r.close()
                 break
@@ -799,6 +799,7 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
             if _is_local_disk_error(e) or attempt == max_retries:
                 raise   # a full disk or locked file never fixes itself by retrying
             log(f"  network hiccup ({type(e).__name__}: {e}), retry {attempt}/{max_retries} in 3 s")
+            say('Connection interrupted; retrying…')
             note = getattr(getattr(progress, "__self__", None), "note", None)
             if note:
                 note(f"connection dropped, retrying ({attempt} of {max_retries})...")
@@ -888,7 +889,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
         if response is None:
             if not hasattr(local, 'session'):
                 local.session = session_factory()
-            r = local.session.get(url, headers={'range': f'bytes={start}-{end-1}', 'accept': '*/*'}, stream=True, timeout=120)
+            r = local.session.get(url, headers={'range': f'bytes={start}-{end-1}', 'accept': '*/*'}, stream=True, timeout=(10, 30))
         else:
             r = response
         try:
@@ -924,7 +925,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
     first = pending[0]
     a, b = bounds[first]
     probe_session = session_factory()
-    probe = probe_session.get(url, headers={'range': f'bytes={a}-{b-1}', 'accept': '*/*'}, stream=True, timeout=120)
+    probe = probe_session.get(url, headers={'range': f'bytes={a}-{b-1}', 'accept': '*/*'}, stream=True, timeout=(10, 30))
     if probe.status_code == 200:
         probe.close()
         part.unlink(missing_ok=True)
@@ -1189,7 +1190,7 @@ def stage_executable(zpath: Path, directory: Path, name: str) -> Path:
         entries = archive.infolist()
         if len(entries) > 256:
             raise ValueError("too many archive entries")
-        candidates = []
+        candidates = {}
         for entry in entries:
             path = entry.filename.replace('\\', '/')
             parts = path.split('/')
@@ -1197,12 +1198,20 @@ def stage_executable(zpath: Path, directory: Path, name: str) -> Path:
                 raise ValueError("unsafe archive path")
             if (entry.external_attr >> 16) & 0o170000 == 0o120000:
                 raise ValueError("archive symlink rejected")
-            if not entry.is_dir() and parts[-1].lower() == name.lower():
-                candidates.append(entry)
-        if len(candidates) != 1 or not 0 < candidates[0].file_size <= MAX_UPDATE_BYTES:
+            if not entry.is_dir():
+                candidates.setdefault(parts[-1].casefold(), []).append(entry)
+        selected = None
+        for candidate in (name, 'SilverLantern.exe', 'HeyListen-Get.exe'):
+            matches = candidates.get(candidate.casefold(), [])
+            if matches:
+                if len(matches) != 1:
+                    raise ValueError("release must contain exactly one bounded executable")
+                selected = matches[0]
+                break
+        if selected is None or not 0 < selected.file_size <= MAX_UPDATE_BYTES:
             raise ValueError("release must contain exactly one bounded executable")
         dest = directory / 'replacement.exe'
-        with archive.open(candidates[0]) as src, dest.open('xb') as out:
+        with archive.open(selected) as src, dest.open('xb') as out:
             remaining = MAX_UPDATE_BYTES
             while True:
                 block = src.read(min(1024 * 1024, remaining + 1))
@@ -1289,7 +1298,7 @@ def _apply_update(target: Path, replacement: Path, parent: int, args: list[str])
 
 
 def fetch_update_checksum(s: "requests.Session", url: str) -> str:
-    response = s.get(url, stream=True, timeout=60)
+    response = s.get(url, stream=True, timeout=(10, 30))
     try:
         response.raise_for_status()
         data = bytearray()
@@ -1311,7 +1320,7 @@ def latest_app_release(s: "requests.Session", repo: str) -> dict | None:
     Other releases on the same repo (e.g. 'game-v1') must never break updates.
     """
     r = s.get(f"https://api.github.com/repos/{repo}/releases?per_page=30",
-              headers={"accept": "application/vnd.github+json"}, timeout=60)
+              headers={"accept": "application/vnd.github+json"}, timeout=(10, 30))
     r.raise_for_status()
     best, best_key = None, None
     for rel in r.json() or []:
@@ -1370,8 +1379,8 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
             rest = [arg for arg in args if arg != '--self-update']
         else:
             rest = list(args)
-            if '--no-self-update' not in rest:
-                rest.append('--no-self-update')
+        if '--no-self-update' not in rest:
+            rest.append('--no-self-update')
         subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), *rest], cwd=str(target.parent))
         _self_update_started = True
     except BaseException:
@@ -1472,14 +1481,32 @@ def parse_game_manifest(text: str) -> dict:
 
 def load_game_manifest(s, source: str) -> dict:
     if urlparse(source).scheme in ('https', 'http'):
-        response = s.get(source, timeout=120)
-        try:
-            response.raise_for_status()
-            text = response.text
-        finally:
-            response.close()
+        for attempt in range(2):
+            response = None
+            try:
+                say('Fetching manifest…')
+                response = s.get(source, stream=True, timeout=(10, 30))
+                response.raise_for_status()
+                total = int(response.headers.get('content-length') or 0)
+                chunks, received = [], 0
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        chunks.append(chunk)
+                        received += len(chunk)
+                        say(f'Fetching manifest… ({received / 1_000_000:.1f} of {total / 1_000_000:.1f} MB)' if total else f'Fetching manifest… ({received / 1_000_000:.1f} MB)')
+                text = b''.join(chunks).decode('utf-8-sig')
+                break
+            except Exception:
+                if attempt:
+                    raise
+                say('Retrying manifest fetch…')
+            finally:
+                if response is not None:
+                    response.close()
     else:
+        say('Fetching manifest…')
         text = Path(source).expanduser().read_text(encoding='utf-8')
+    say('Planning…')
     return parse_game_manifest(text)
 
 
@@ -1934,7 +1961,7 @@ def _update_say(message: str) -> None:
 
 
 def run_game_update(folder: Path, dry_run: bool = False, force: bool = False, silent: bool = False) -> int:
-    script = next((p for p in (HERE / 'Update-Game.ps1', Path.cwd() / 'Update-Game.ps1') if p.is_file()), None)
+    script = next((p for p in (HERE / 'Update-Game.ps1', HERE / 'support' / 'Update-Game.ps1', Path.cwd() / 'Update-Game.ps1') if p.is_file()), None)
     if script is None:
         _update_say('Update failed: Update-Game.ps1 not found.')
         return 1
@@ -2009,7 +2036,7 @@ def main() -> int:
         app.transition(launcher.State.DOWNLOADING)
         app.transition(launcher.State.READY)
         return 0
-    elif getattr(sys, 'frozen', False) and (len(sys.argv) == 1 or sys.argv[1:] == ['--gui']):
+    elif getattr(sys, 'frozen', False) and (len(sys.argv) == 1 or sys.argv[1:] in (['--gui'], ['--gui', '--no-self-update'])):
         try:
             import launcher
             return launcher.main()

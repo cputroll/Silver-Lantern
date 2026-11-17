@@ -47,6 +47,24 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(start.called, auto)
                 if not auto: self.assertIn('Update now', ui.buttons())
 
+    def test_equal_tool_version_does_not_handoff(self):
+        with patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.events.publish('tool_check', 'v' + launcher.APP_VERSION)
+            with patch.object(ui, 'start_tool_update') as start:
+                ui.drain()
+            start.assert_not_called()
+            self.assertIn('up to date', ui.status.lower())
+
+    def test_newer_tool_version_handoffs_once(self):
+        with patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.events.publish('tool_check', 'v999.0.0')
+            ui.events.publish('tool_check', 'v999.0.0')
+            with patch.object(ui, 'start_tool_update') as start:
+                ui.drain()
+            start.assert_called_once()
+
     def test_tool_error_opens_retry_screen(self):
         with patch.object(LauncherUI, 'check_updates'):
             ui = LauncherUI()

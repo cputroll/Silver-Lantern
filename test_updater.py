@@ -52,14 +52,27 @@ class UpdaterTests(unittest.TestCase):
         launch.assert_not_called()
         log.assert_called_with('Updated to v999.0.0. Run the tool again to continue.')
 
+    def test_archive_falls_back_to_support_executable(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            archive = root / 'update.zip'
+            with zipfile.ZipFile(archive, 'w') as z:
+                z.writestr('support/SilverLantern.exe', b'executable')
+            self.assertEqual(app.stage_executable(archive, root, 'Run Silver Lantern.exe').read_bytes(), b'executable')
+
+    def test_equal_release_never_handoffs(self):
+        with mock.patch.object(sys, 'frozen', True, create=True), mock.patch.object(app, '_self_update_started', False), mock.patch.object(app, 'latest_app_release', return_value={'tag_name': 'v' + app.APP_VERSION}), mock.patch.object(app.subprocess, 'Popen') as launch:
+            app.check_self_update(mock.Mock(), {}, ['--self-update'])
+            launch.assert_not_called()
+
     def test_self_update_relaunches_with_original_args(self):
         command = self._run_update(['--self-update', '--no-launch'])
         self.assertEqual(command[1], '--apply-update-internal')
-        self.assertEqual(command[5:], ['--no-launch'])
+        self.assertEqual(command[5:], ['--no-launch', '--no-self-update'])
         with mock.patch.object(app, 'wait_for_parent'), mock.patch.object(app, 'replace_transactionally'), \
              mock.patch.object(app, 'cleanup_stage'), mock.patch.object(app.subprocess, 'Popen') as launch:
             app._apply_update(Path('app.exe'), Path('stage/new.exe'), 123, command[5:])
-        launch.assert_called_once_with(['app.exe', '--no-launch'], cwd='.')
+        launch.assert_called_once_with(['app.exe', '--no-launch', '--no-self-update'], cwd='.')
 
     def test_version_is_not_manifest_controlled(self):
         self.assertNotEqual(app.local_version({'tool': {'version': '999.0.0'}}), '999.0.0')

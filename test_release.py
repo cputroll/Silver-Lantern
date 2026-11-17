@@ -19,10 +19,11 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn(hashlib.sha256(archive.read_bytes()).hexdigest() + '  HeyListen-Get.zip', sums)
         with zipfile.ZipFile(archive) as z:
             names = z.namelist()
-            self.assertEqual(names.count('SilverLantern.exe'), 1)
-            self.assertEqual(names.count('HeyListen-Get.exe'), 1)
-            exe_bytes = z.read('SilverLantern.exe')
-            self.assertEqual(z.read('HeyListen-Get.exe'), exe_bytes)
+            self.assertEqual({n for n in names if '/' not in n}, {'Run Silver Lantern.exe', 'Read me.txt'})
+            exe_bytes = z.read('Run Silver Lantern.exe')
+            self.assertEqual(z.read('support/SilverLantern.exe'), exe_bytes)
+            self.assertEqual(z.read('support/HeyListen-Get.exe'), exe_bytes)
+            self.assertEqual(len(z.read('Read me.txt').decode('utf-8').splitlines()), 2)
             self.assertTrue(exe_bytes.startswith(b'MZ'))
             with tempfile.TemporaryDirectory() as temp:
                 exe = Path(temp) / 'SilverLantern.exe'
@@ -32,11 +33,8 @@ class ReleaseTests(unittest.TestCase):
                 result = subprocess.run([str(exe), '--cli', '--version'], capture_output=True, text=True, check=True)
                 self.assertEqual(result.stdout.strip(), version)
                 subprocess.run([str(exe), '--self-test'], capture_output=True, text=True, check=True)
-            self.assertIn('SilverLantern-Get.cmd', names)
-            self.assertIn('SilverLantern-Preset.cmd', names)
-            # The game updater and watcher must ship beside the EXE (it looks for Update-Game.ps1 there).
-            for name in ('Update-Game.ps1', 'Watch-Game.ps1', 'SilverLantern-AutoUpdate.cmd', 'Apply-HeyListen-Preset.ps1'):
-                self.assertIn(name, names)
+            for name in ('SilverLantern-Get.cmd', 'SilverLantern-Preset.cmd', 'Update-Game.ps1', 'Watch-Game.ps1', 'SilverLantern-AutoUpdate.cmd', 'Apply-HeyListen-Preset.ps1', 'sources.json', 'SDL2.dll', 'README.md'):
+                self.assertIn('support/' + name, names)
 
 
 if __name__ == '__main__':

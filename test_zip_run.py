@@ -8,7 +8,7 @@ from test_game_sync import h
 class ZipRunTests(unittest.TestCase):
     def test_transient_relaunch_preserves_arguments(self):
         with tempfile.TemporaryDirectory() as d:
-            root = Path(d); temp = root / 'temp'; temp.mkdir(); source = temp / 'x' / 'SilverLantern.exe'; source.parent.mkdir(); source.write_bytes(b'exe')
+            root = Path(d); temp = root / 'temp'; temp.mkdir(); source = temp / 'x' / 'Run Silver Lantern.exe'; source.parent.mkdir(); source.write_bytes(b'exe')
             target = root / 'local' / 'Programs' / 'Silver Lantern' / 'SilverLantern.exe'
             with patch.object(h.sys, 'frozen', True, create=True), patch.object(h.sys, 'executable', str(source)), patch.object(h.sys, 'argv', [str(source), '--version']), patch.dict(h.os.environ, {'TEMP': str(temp), 'LOCALAPPDATA': str(root / 'local')}), patch.object(h.subprocess, 'Popen') as popen:
                 self.assertTrue(h.relocate_transient())

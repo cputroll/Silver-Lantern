@@ -24,6 +24,22 @@ class SyncTests(unittest.TestCase):
         disk.start()
         self.addCleanup(disk.stop)
 
+    def test_manifest_stream_reports_progress_and_retries(self):
+        from unittest.mock import Mock
+        payload = json.dumps(manifest()).encode()
+        response = Mock()
+        response.headers = {'content-length': str(len(payload))}
+        response.iter_content.return_value = [payload[:10], payload[10:]]
+        session = Mock()
+        session.get.side_effect = [TimeoutError('slow'), response]
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(h.load_game_manifest(session, 'https://example.test/manifest'), manifest())
+        self.assertEqual(session.get.call_count, 2)
+        self.assertEqual(session.get.call_args.kwargs['timeout'], (10, 30))
+        self.assertIn('Retry', out.getvalue())
+        self.assertIn('Fetching manifest', out.getvalue())
+
     def test_bad_json(self):
         with self.assertRaises(ValueError): h.parse_game_manifest('{')
     def test_missing_fields(self):
