@@ -513,6 +513,7 @@ def worker_command(events, args):
         events.process = process
         if events.cancelled.is_set():
             terminate_worker(events)
+        last_line = ''
         with LOG.open('a', encoding='utf-8') as log:
             while True:
                 line = process.stdout.readline()
@@ -520,9 +521,17 @@ def worker_command(events, args):
                     break
                 log.write(line)
                 log.flush()
+                if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ')):
+                    last_line = line.strip()
                 events.publish('progress', parse_progress(line) or {'text': line.strip()})
         code = process.wait()
-        events.publish('cancelled' if events.cancelled.is_set() else ('complete' if code == 0 else 'error'), code)
+        if events.cancelled.is_set():
+            events.publish('cancelled', code)
+        elif code == 0:
+            events.publish('complete', code)
+        else:
+            detail = f'Last output: {last_line}' if last_line else 'No diagnostic output was provided.'
+            events.publish('error', f'The operation failed (exit {code}). {detail} See the log for full details.')
     except Exception as exc:
         events.publish('error', str(exc))
 
@@ -982,6 +991,7 @@ class LauncherUI:
 
     def set_screen(self, screen):
         self.screen, self.focus = screen, 0
+        self.settings_first = 0
 
     # ---------------------------------------------------------------- graphics
     GFX_ACTIONS = ('Recommended for this PC', 'Reset to game defaults', 'Back')
@@ -1491,7 +1501,12 @@ class LauncherUI:
         top = 172
         buttons = self.buttons()
         if self.screen == 'settings':
-            self.draw_rows(p, buttons, x, top, w, 52, 8, dt)
+            visible = 7
+            first = min(getattr(self, 'settings_first', 0), max(0, len(buttons) - visible))
+            first = max(0, min(first, self.focus))
+            first = max(first, self.focus - visible + 1)
+            self.settings_first = first
+            self.draw_rows(p, buttons[first:first + visible], x, top, w, 52, 8, dt, first=first)
             p.text('caption', self.free_space_text(), x, 604, INK_FAINT, max_width=w)
         elif self.screen == 'folder':
             p.fill(x, top, w, 66, SURFACE_HI, 200, 10)
@@ -1673,6 +1688,7 @@ class LauncherUI:
                   progress='Downloading: 63% — ' + str(long / 'data' / 'textures' / 'kokiri_forest_hd_pack_part_07.pak')),
             scene('tool-update', 'progress', State.READY, operation='tool', progress_info={}, progress='Updating Silver Lantern…'),
             scene('settings', 'settings', State.READY, 'Silver Lantern is up to date.', focus=2, folder=long),
+            scene('settings-back', 'settings', State.READY, 'Silver Lantern is up to date.', focus=7, folder=long),
             scene('folder', 'folder', State.NOT_INSTALLED, '', focus=1, folder=long),
             scene('update', 'update', State.UPDATE_AVAILABLE),
             scene('error', 'error', State.ERROR, operation='download', last_error='Could not reach the update server. The connection stalled three times while downloading whole-07.bin from objects.githubusercontent.com; check your network and try again.'),
@@ -1696,7 +1712,13 @@ class LauncherUI:
         s.SDL_SetHint(b'SDL_GAMECONTROLLER_USE_BUTTON_LABELS', b'1')
         if s.SDL_Init(s.SDL_INIT_VIDEO | s.SDL_INIT_GAMECONTROLLER) != 0: raise RuntimeError(s.SDL_GetError().decode())
         if ttf.TTF_Init() != 0: raise RuntimeError('SDL_ttf initialization failed')
-        window = s.SDL_CreateWindow('Ocarina of Time'.encode('utf-8'), s.SDL_WINDOWPOS_CENTERED, s.SDL_WINDOWPOS_CENTERED, 1280, 720, s.SDL_WINDOW_RESIZABLE)
+        size = CANVAS
+        if screenshot and os.environ.get('HEYLISTEN_SCREENSHOT_SIZE'):
+            match = re.fullmatch(r'(\d{1,4})x(\d{1,4})', os.environ['HEYLISTEN_SCREENSHOT_SIZE'])
+            if not match or not all(1 <= int(n) <= 4096 for n in match.groups()):
+                raise ValueError('Invalid screenshot size')
+            size = tuple(map(int, match.groups()))
+        window = s.SDL_CreateWindow('Ocarina of Time'.encode('utf-8'), s.SDL_WINDOWPOS_CENTERED, s.SDL_WINDOWPOS_CENTERED, *size, s.SDL_WINDOW_RESIZABLE)
         renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_ACCELERATED | s.SDL_RENDERER_PRESENTVSYNC)
         if not renderer: renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
         if not window or not renderer: raise RuntimeError('Could not create the launcher window')
@@ -1749,7 +1771,7 @@ class LauncherUI:
                     elif typ == s.SDL_KEYDOWN and not event.key.repeat:
                         action = {s.SDLK_UP:'up',s.SDLK_w:'up',s.SDLK_DOWN:'down',s.SDLK_s:'down',s.SDLK_LEFT:'left',s.SDLK_a:'left',s.SDLK_RIGHT:'right',s.SDLK_d:'right',s.SDLK_RETURN:'accept',s.SDLK_SPACE:'accept',s.SDLK_ESCAPE:'back',s.SDLK_BACKSPACE:'back',s.SDLK_F1:'menu',s.SDLK_TAB:'menu'}.get(event.key.keysym.sym)
                         if action: self.action(action)
-                    elif typ == s.SDL_MOUSEWHEEL and self.screen == 'graphics':
+                    elif typ == s.SDL_MOUSEWHEEL and self.screen in ('graphics', 'settings'):
                         for _ in range(min(5, abs(event.wheel.y))): self.action('up' if event.wheel.y > 0 else 'down')
                     elif typ in (s.SDL_MOUSEMOTION, s.SDL_MOUSEBUTTONUP):
                         mx = event.motion.x if typ == s.SDL_MOUSEMOTION else event.button.x
@@ -1765,7 +1787,8 @@ class LauncherUI:
                 dt, last = min(.1, frame_now - last), frame_now
                 self.render(painter, dt)
                 if screenshot:
-                    surface = s.SDL_CreateRGBSurfaceWithFormat(0, CANVAS[0], CANVAS[1], 32, s.SDL_PIXELFORMAT_ARGB8888)
+                    surface = s.SDL_CreateRGBSurfaceWithFormat(0, size[0], size[1], 32, s.SDL_PIXELFORMAT_ARGB8888)
+                    s.SDL_RenderSetLogicalSize(renderer, 0, 0)
                     if not surface or s.SDL_RenderReadPixels(renderer, None, s.SDL_PIXELFORMAT_ARGB8888, surface.contents.pixels, surface.contents.pitch) != 0:
                         raise RuntimeError('Could not capture launcher frame')
                     path = Path(screenshot)
@@ -1773,6 +1796,7 @@ class LauncherUI:
                     if s.SDL_SaveBMP(surface, str(output).encode()) != 0:
                         raise RuntimeError('Could not save launcher frame')
                     s.SDL_FreeSurface(surface)
+                    s.SDL_RenderSetLogicalSize(renderer, *CANVAS)
                     nxt = next(scenes, None)
                     if nxt is None:
                         self.operation = None

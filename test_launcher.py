@@ -33,6 +33,69 @@ class StateTests(unittest.TestCase):
                 # A full 1280x720x32 BMP; an empty or missing frame fails here.
                 self.assertGreater(frame.stat().st_size, 1280 * 720 * 3, name)
 
+    def test_screenshot_debug_supports_resized_output(self):
+        import struct
+        for width, height in ((1296, 759), (640, 360)):
+            with self.subTest(size=(width, height)), tempfile.TemporaryDirectory() as d:
+                env = dict(os.environ, HEYLISTEN_SCREENSHOT_SIZE=f'{width}x{height}')
+                result = subprocess.run([sys.executable, str(Path(launcher.__file__)), '--screenshot', str(Path(d) / 'screen.bmp')], env=env, capture_output=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
+                data = (Path(d) / 'screen-settings-back.bmp').read_bytes()
+                self.assertEqual(struct.unpack_from('<ii', data, 18), (width, height))
+
+    def test_settings_rows_stay_above_footer_and_follow_selection(self):
+        from unittest.mock import MagicMock
+        ui = LauncherUI()
+        ui.screen = 'settings'
+        ui.snap = True
+        painter = MagicMock()
+        painter.height.return_value = 20
+        painter.fit_middle.side_effect = lambda role, value, width: value
+        painter.measure.return_value = (20, 20)
+        for index in range(len(ui.buttons())):
+            ui.focus = index
+            ui.hits = []
+            ui.draw_panel(painter, 0)
+            self.assertIn(index, [hit[4] for hit in ui.hits])
+            self.assertTrue(all(y + h <= 594 for _, y, _, h, _ in ui.hits))
+        self.assertEqual(ui.hits[-1][4], len(ui.buttons()) - 1)
+        ui.focus = 5  # Hovering a visible row must not shift it under the pointer.
+        ui.hits = []
+        ui.draw_panel(painter, 0)
+        self.assertEqual(ui.hits[0][4], 1)
+        for _ in range(8): ui.action('up')
+        ui.hits = []
+        ui.draw_panel(painter, 0)
+        self.assertEqual(ui.hits[0][4], 0)
+
+    def test_worker_failure_includes_exit_code_and_child_diagnostic(self):
+        import io
+        from unittest.mock import MagicMock
+        events = launcher.ProgressEvents()
+        proc = MagicMock()
+        proc.stdout = io.StringIO('Downloading...\nDisk unavailable\n')
+        proc.wait.return_value = 1
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'LOG', Path(d) / 'log'), patch.object(launcher.subprocess, 'Popen', return_value=proc):
+            launcher.worker_command(events, [])
+            messages = []
+            while not events.queue.empty(): messages.append(events.queue.get_nowait())
+            error = [value for kind, value in messages if kind == 'error'][0]
+            self.assertIn('exit 1', str(error))
+            self.assertIn('Disk unavailable', error)
+            self.assertIn('Disk unavailable', (Path(d) / 'log').read_text())
+
+    def test_worker_failure_without_output_identifies_exit_code(self):
+        import io
+        from unittest.mock import MagicMock
+        events = launcher.ProgressEvents()
+        proc = MagicMock(stdout=io.StringIO(''), **{'wait.return_value': 7})
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'LOG', Path(d) / 'log'), patch.object(launcher.subprocess, 'Popen', return_value=proc):
+            launcher.worker_command(events, [])
+        kind, error = events.queue.get_nowait()
+        self.assertEqual(kind, 'error')
+        self.assertIn('exit 7', error)
+        self.assertIn('No diagnostic output', error)
+
     def test_settings_speed_action_reports_result(self):
         ui = launcher.LauncherUI()
         ui.screen = 'settings'
