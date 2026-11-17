@@ -15,6 +15,10 @@ import time
 import urllib.request
 import hashlib
 import base64
+try:
+    import winreg
+except ImportError:
+    winreg = None
 
 ROOT = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 BASE = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
@@ -49,7 +53,7 @@ def probe_writable(folder):
 
 
 def shortcut_path():
-    return Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Desktop' / 'Silver Lantern.lnk'
+    return Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Desktop' / (GAME_NAME + '.lnk')
 
 
 def create_shortcut(folder, enabled=True):
@@ -60,11 +64,127 @@ def create_shortcut(folder, enabled=True):
     target = folder / 'HeyListen.exe'
     if not target.exists():
         target = Path(sys.executable) if getattr(sys, 'frozen', False) else BASE / 'SilverLantern.exe'
-    def quote(value):
-        return "'" + str(value).replace("'", "''") + "'"
-    script = '$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut(' + quote(link) + '); $l.TargetPath=' + quote(target) + '; $l.WorkingDirectory=' + quote(folder) + '; $l.Save()'
+    create_link(link, target, folder)
+
+
+def ps_quote(value):
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def powershell(script, wait=True):
     encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
-    subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], check=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    args = ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]
+    flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+    if wait:
+        return subprocess.run(args, check=True, creationflags=flags)
+    return subprocess.Popen(args, creationflags=flags, close_fds=True)
+
+
+def create_link(link, target, working_dir):
+    script = '$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut(' + ps_quote(link) + '); $l.TargetPath=' + ps_quote(target) + '; $l.WorkingDirectory=' + ps_quote(working_dir) + '; $l.Save()'
+    powershell(script)
+
+
+def start_menu_path():
+    return Path(os.environ.get('APPDATA', str(Path.home()))) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / (GAME_NAME + '.lnk')
+
+
+UNINSTALL_KEY = r'Software\Microsoft\Windows\CurrentVersion\Uninstall\SilverLantern'
+OWNED_FILES = ('SilverLantern.exe', 'HeyListen-Get.exe', 'SDL2.dll', 'sources.json',
+               'README.md', 'Apply-HeyListen-Preset.ps1', 'SilverLantern-Get.cmd',
+               'SilverLantern-Preset.cmd', 'Update-Game.ps1', 'Watch-Game.ps1',
+               'SilverLantern-AutoUpdate.cmd', 'sources.cache.json', 'HeyListen-Get.log',
+               'SilverLantern.exe.update-backup', 'HeyListen-Get.exe.update-backup')
+
+
+def register_install(folder):
+    if winreg is None:
+        return
+    exe = Path(sys.executable)
+    link = start_menu_path()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    create_link(link, exe, exe.parent)
+    size = 0
+    for base, dirs, files in os.walk(folder, followlinks=False):
+        for name in files:
+            try:
+                size += (Path(base) / name).stat().st_size
+            except OSError:
+                pass
+    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
+        for name, value, kind in (
+            ('DisplayName', GAME_NAME, winreg.REG_SZ), ('DisplayIcon', str(exe), winreg.REG_SZ),
+            ('InstallLocation', str(exe.parent), winreg.REG_SZ),
+            ('UninstallString', '"' + str(exe) + '" --uninstall', winreg.REG_SZ),
+            ('NoModify', 1, winreg.REG_DWORD), ('NoRepair', 1, winreg.REG_DWORD),
+            ('EstimatedSize', min((size + 1023) // 1024, 0xffffffff), winreg.REG_DWORD)):
+            winreg.SetValueEx(key, name, 0, kind, value)
+
+
+def remove_registration():
+    if winreg is not None:
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
+        except FileNotFoundError:
+            pass
+
+
+def load_game_folder():
+    try:
+        value = json.loads(CONFIG.read_text(encoding='utf-8')).get('game_dir')
+        return Path(value).expanduser() if value else None
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def schedule_owned_cleanup():
+    if not getattr(sys, 'frozen', False):
+        return
+    folder = Path(sys.executable).resolve().parent
+    files = ','.join(ps_quote(folder / name) for name in OWNED_FILES)
+    script = (f'$p=Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; '
+              'if($p){$p.WaitForExit()}; '
+              f'@({files}) | ForEach-Object {{ Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }}; '
+              f'try {{ [System.IO.Directory]::Delete({ps_quote(folder)}, $false) }} catch {{}}')
+    powershell(script, wait=False)
+
+
+def uninstall(keep_saves=False):
+    folder = load_game_folder()
+    print('This removes the entire game folder and all its contents' + (' except the user saves directory' if keep_saves else ', including saves') + ', shortcuts, launcher files and settings.')
+    print('Game folder:', folder or '(not configured)')
+    if input('Continue? [y/N] ').strip().lower() != 'y':
+        print('Uninstall cancelled.')
+        return False
+    if folder and folder.exists():
+        game = folder.resolve()
+        home = Path.home().resolve()
+        state = STATE_DIR.resolve()
+        if game == Path(game.anchor) or home == game or home.is_relative_to(game) or state == game or state.is_relative_to(game):
+            raise RuntimeError('Refusing to remove an unsafe game folder.')
+        if getattr(sys, 'frozen', False):
+            program = Path(sys.executable).resolve().parent
+            game = folder.resolve()
+            if program == game or program.is_relative_to(game):
+                raise RuntimeError('Cannot safely remove a game folder containing the launcher; move the launcher first.')
+        if keep_saves:
+            for child in folder.iterdir():
+                if child.name.casefold() == 'user':
+                    continue
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
+        else:
+            shutil.rmtree(folder)
+    shortcut_path().unlink(missing_ok=True)
+    shortcut_path().with_name('Silver Lantern.lnk').unlink(missing_ok=True)
+    start_menu_path().unlink(missing_ok=True)
+    remove_registration()
+    if STATE_DIR.exists():
+        shutil.rmtree(STATE_DIR)
+    schedule_owned_cleanup()
+    return True
 
 
 def parse_progress(line):
@@ -247,6 +367,8 @@ class LauncherUI:
         self.running = True
         self.last_error = ''
         self.tool_update_available = False
+        if self.state == State.READY and getattr(sys, 'frozen', False):
+            threading.Thread(target=self.shortcut_worker, daemon=True).start()
         self.check_updates()
 
     def save(self):
@@ -416,7 +538,7 @@ class LauncherUI:
             elif kind == 'complete':
                 self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
                 self.status = 'Ready to play.' if self.state == State.READY else 'Installation completed but game files were not found.'
-                if self.state == State.READY and self.config.get('shortcut', True):
+                if self.state == State.READY:
                     threading.Thread(target=self.shortcut_worker, daemon=True).start()
                 self.set_screen('main')
             elif kind == 'cancelled':
@@ -458,10 +580,14 @@ class LauncherUI:
                 self.status = 'An upstream builder update is available.'
 
     def shortcut_worker(self):
-        try: create_shortcut(self.folder)
-        except Exception as exc:
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
-            with LOG.open('a', encoding='utf-8') as log: log.write('Shortcut: ' + str(exc) + '\n')
+        actions = ([lambda: create_shortcut(self.folder)] if self.config.get('shortcut', True) else [])
+        actions.append(lambda: register_install(self.folder))
+        for action in actions:
+            try:
+                action()
+            except Exception as exc:
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                with LOG.open('a', encoding='utf-8') as log: log.write('Shortcut: ' + str(exc) + '\n')
 
     def run(self):
         if getattr(sys, 'frozen', False): os.environ['PYSDL2_DLL_PATH'] = str(ROOT)
@@ -544,6 +670,7 @@ class LauncherUI:
                 elif self.screen == 'progress': text(self.progress[:80], 65, 580)
                 else: text(self.status[:80], 65, 580)
                 if self.screen in ('folder', 'settings'):
+                    if self.screen == 'settings': text('Start menu + uninstall entry: created with install', 65, 610, (170, 180, 180))
                     text(str(self.folder)[:85], 65, 630)
                     parent = self.folder
                     while not parent.exists() and parent != parent.parent: parent = parent.parent

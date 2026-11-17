@@ -1,4 +1,5 @@
 import unittest
+import launcher
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -127,9 +128,9 @@ class StateTests(unittest.TestCase):
             (folder / 'HeyListen.exe').touch()
             with patch.dict(os.environ, {'USERPROFILE': str(profile)}):
                 create_shortcut(folder)
-                self.assertTrue((profile / 'Desktop' / 'Silver Lantern.lnk').is_file())
+                self.assertTrue((profile / 'Desktop' / (launcher.GAME_NAME + '.lnk')).is_file())
                 create_shortcut(folder, False)
-                self.assertFalse((profile / 'Desktop' / 'Silver Lantern.lnk').exists())
+                self.assertFalse((profile / 'Desktop' / (launcher.GAME_NAME + '.lnk')).exists())
 
     def test_cancellation(self):
         events = ProgressEvents()

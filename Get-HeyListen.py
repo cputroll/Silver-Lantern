@@ -590,6 +590,8 @@ def load_manifest(manifest_arg: str | None) -> dict:
     if manifest_arg:
         kind = "url" if manifest_arg.startswith(("http://", "https://")) else "file"
         candidates.append((manifest_arg, kind))
+    if not manifest_arg and not MANIFEST_LOCAL.exists():
+        candidates.append(('https://raw.githubusercontent.com/cputroll/Silver-Lantern/main/sources.json', 'url'))
     if MANIFEST_LOCAL.exists():
         try:
             local = json.loads(MANIFEST_LOCAL.read_text(encoding="utf-8-sig"))
@@ -1677,7 +1679,36 @@ def run_game_update(folder: Path, dry_run: bool = False, force: bool = False, si
         return 1
 
 
+def relocate_transient() -> bool:
+    """Move Explorer ZIP launches to a stable per-user executable before startup."""
+    if not getattr(sys, 'frozen', False) or not os.environ.get('TEMP'):
+        return False
+    source = Path(sys.executable).resolve()
+    temp = Path(os.environ['TEMP']).resolve()
+    if not source.is_relative_to(temp):
+        return False
+    target = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Programs' / 'Silver Lantern' / 'SilverLantern.exe'
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix='SilverLantern-', suffix='.tmp', dir=target.parent, delete=False) as stream:
+            staging = Path(stream.name)
+            with source.open('rb') as original:
+                shutil.copyfileobj(original, stream, 1024 * 1024)
+        os.replace(staging, target)
+    except PermissionError:
+        if not target.is_file():
+            raise
+    finally:
+        if staging:
+            staging.unlink(missing_ok=True)
+    subprocess.Popen([str(target), *sys.argv[1:]], close_fds=True)
+    return True
+
+
 def main() -> int:
+    if relocate_transient():
+        return 0
     if '--cli' in sys.argv[1:]:
         sys.argv.remove('--cli')
     elif '--self-test' in sys.argv[1:]:
@@ -1727,10 +1758,15 @@ def main() -> int:
     ap.add_argument('--update-on-launch', action='store_true')
     ap.add_argument('--builder-flow', action='store_true',
                     help='old flow: download the game dump + HeyListenBuilder and open the Builder')
+    ap.add_argument('--uninstall', action='store_true', help='Remove the installed game and launcher')
+    ap.add_argument('--keep-saves', action='store_true', help='Keep the game user saves when uninstalling')
     ap.add_argument('--no-pause', action='store_true', help="don't wait for Enter before closing")
     ap.add_argument('--plain', action='store_true', help='no colors')
     a = ap.parse_args()
 
+    if a.uninstall:
+        import launcher
+        return 0 if launcher.uninstall(keep_saves=a.keep_saves) else 1
     if a.update_game is not None:
         return run_game_update(Path(a.update_game).expanduser(), dry_run=a.update_dry_run, force=a.force_update)
     if a.version:

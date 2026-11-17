@@ -10,8 +10,8 @@ Silver Lantern installs the game for you and keeps it up to date.
 
 ## Install
 
-1. Download the latest release ZIP and extract it anywhere you can write files.
-2. Double-click `SilverLantern.exe` in the extracted folder.
+1. Download the latest release ZIP. No extraction needed - open `SilverLantern.exe` directly from the ZIP; it installs itself to your user Programs folder.
+2. Alternatively, extract the ZIP anywhere you can write files and double-click `SilverLantern.exe` in the extracted folder.
 3. If Windows SmartScreen appears, select **More info -> Run anyway**. This warning can appear for a small app; only run a copy you trust.
 4. Choose a folder and select **Download**. The first download is about 33 GB. Downloaded bundles are cleaned up automatically as installation proceeds.
 5. When installation finishes, select **Play**.
