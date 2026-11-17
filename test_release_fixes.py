@@ -35,7 +35,8 @@ class PresetTests(unittest.TestCase):
             game.mkdir(parents=True)
             ini = game / 'hookshot_options.ini'
             ini.write_text('pad_a=3\ndlss=0\n# comment\nsharpness=10\ndlss=2\nkey_jump=space\n', encoding='ascii')
-            with mock.patch.object(app, 'log'):
+            with mock.patch.object(app, 'log'), \
+                 mock.patch.object(app, 'choose_preset', return_value=(app.PRESET_DLSS, 'test')):
                 result = app.apply_preset(game)
             self.assertEqual(result, ini)
             lines = ini.read_text(encoding='ascii').splitlines()
@@ -47,9 +48,9 @@ class PresetTests(unittest.TestCase):
     def test_apply_preset_creates_folder(self):
         with tempfile.TemporaryDirectory() as td:
             game = Path(td) / 'new' / 'game'
-            with mock.patch.object(app, 'log'):
+            with mock.patch.object(app, 'log'), mock.patch.object(app, 'detect_gpu_name', return_value=None):
                 ini = app.apply_preset(game)
-            self.assertEqual(ini.read_text(encoding='ascii').splitlines(), [f'{k}={v}' for k, v in app.PRESET.items()])
+            self.assertEqual(ini.read_text(encoding='ascii').splitlines(), [f'{k}={v}' for k, v in app.PRESET_FSR.items()])
 
     def _run_main(self, td, *extra):
         argv = ['app', '--no-self-update', '--no-launch', '--out', td, '--game-dir', str(Path(td) / 'g'), *extra]
@@ -65,6 +66,109 @@ class PresetTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             self._run_main(td).assert_called_once_with(Path(td) / 'g')
             self._run_main(td, '--no-preset').assert_not_called()
+
+
+class GpuPresetTests(unittest.TestCase):
+    RTX = 'NVIDIA GeForce RTX 4070 Ti'
+    GTX = 'NVIDIA GeForce GTX 1660 SUPER'
+    AMD = 'AMD Radeon RX 7900 XTX'
+    INTEL = 'Intel(R) UHD Graphics 770'
+
+    def test_gpu_name_parsing(self):
+        self.assertTrue(app.is_dlss_gpu(self.RTX))
+        self.assertTrue(app.is_dlss_gpu('nvidia rtx a4000'))
+        self.assertFalse(app.is_dlss_gpu(self.GTX))
+        self.assertFalse(app.is_dlss_gpu(self.AMD))
+        self.assertFalse(app.is_dlss_gpu(self.INTEL))
+        self.assertFalse(app.is_dlss_gpu(''))
+        self.assertFalse(app.is_dlss_gpu(None))
+
+    def test_detect_gpu_name_reads_first_line(self):
+        done = mock.Mock(returncode=0, stdout=self.RTX + '\r\n')
+        with mock.patch.object(app.subprocess, 'run', return_value=done) as run:
+            self.assertEqual(app.detect_gpu_name(), self.RTX)
+        cmd = run.call_args.args[0]
+        self.assertEqual(cmd[0], 'powershell')
+        self.assertIn('Win32_VideoController', cmd[-1])
+        self.assertIn('AdapterRAM -Descending', cmd[-1])
+
+    def test_detect_gpu_name_empty_or_failed(self):
+        for done in (mock.Mock(returncode=0, stdout='  \n'), mock.Mock(returncode=1, stdout=self.RTX)):
+            with mock.patch.object(app.subprocess, 'run', return_value=done):
+                self.assertIsNone(app.detect_gpu_name())
+
+    def _choose(self, gpu_name, dll):
+        with tempfile.TemporaryDirectory() as td:
+            game = Path(td)
+            if dll:
+                (game / 'ngx').mkdir()
+                (game / 'ngx' / 'nvngx_dlss.dll').write_bytes(b'MZ')
+            done = mock.Mock(returncode=0, stdout=gpu_name + '\n')
+            with mock.patch.object(app.subprocess, 'run', return_value=done):
+                return app.choose_preset(game)
+
+    def test_decision_matrix(self):
+        for gpu in (self.RTX, self.GTX, self.AMD, self.INTEL):
+            for dll in (True, False):
+                with self.subTest(gpu=gpu, dll=dll):
+                    preset, why = self._choose(gpu, dll)
+                    if gpu == self.RTX and dll:
+                        self.assertIs(preset, app.PRESET_DLSS)
+                        self.assertIn('NVIDIA RTX with DLSS build', why)
+                        self.assertIn('DLSS Performance', why)
+                    else:
+                        self.assertIs(preset, app.PRESET_FSR)
+                        self.assertIn('No RTX/DLSS build', why)
+                        self.assertIn('FSR 3.1 Performance', why)
+
+    def test_preset_values(self):
+        self.assertEqual(app.PRESET_DLSS['dlss'], '1')
+        self.assertEqual(app.PRESET_DLSS['reflex'], '1')
+        self.assertEqual(app.PRESET_FSR['dlss'], '3')
+        self.assertEqual(app.PRESET_FSR['reflex'], '0')
+        for p in (app.PRESET_DLSS, app.PRESET_FSR):
+            self.assertEqual((p['resolution'], p['sharpness'], p['pace'], p['framegen']), ('4', '80', '1', '1'))
+
+    def test_detection_failures_fall_back_to_fsr(self):
+        for err in (FileNotFoundError('powershell'), app.subprocess.TimeoutExpired('powershell', 30), OSError('x')):
+            with self.subTest(err=type(err).__name__), tempfile.TemporaryDirectory() as td:
+                with mock.patch.object(app.subprocess, 'run', side_effect=err):
+                    preset, why = app.choose_preset(Path(td))
+                self.assertIs(preset, app.PRESET_FSR)
+                self.assertIn('FSR 3.1', why)
+
+    def test_apply_preset_writes_chosen_preset_and_logs_reason(self):
+        with tempfile.TemporaryDirectory() as td:
+            game = Path(td) / 'g'
+            (game / 'ngx').mkdir(parents=True)
+            (game / 'ngx' / 'nvngx_dlss.dll').write_bytes(b'MZ')
+            (game / 'hookshot_options.ini').write_text('pad_a=3\ndlss=0\n', encoding='ascii')
+            with mock.patch.object(app, 'detect_gpu_name', return_value=self.RTX), \
+                 mock.patch.object(app, 'log') as log:
+                ini = app.apply_preset(game)
+            lines = ini.read_text(encoding='ascii').splitlines()
+            self.assertEqual(lines[:2], ['pad_a=3', 'dlss=1'])
+            self.assertIn('reflex=1', lines)
+            self.assertIn('DLSS Performance', log.call_args_list[0].args[0])
+
+            with mock.patch.object(app, 'detect_gpu_name', side_effect=RuntimeError('boom')), \
+                 mock.patch.object(app, 'log') as log:
+                app.apply_preset(game)
+            lines = ini.read_text(encoding='ascii').splitlines()
+            self.assertEqual(lines[:2], ['pad_a=3', 'dlss=3'])
+            self.assertIn('reflex=0', lines)
+            self.assertIn('detection failed', log.call_args_list[0].args[0])
+
+    def test_ps1_parses(self):
+        ps1 = Path(__file__).with_name('Apply-HeyListen-Preset.ps1')
+        cmd = ("$e=$null; $null=[System.Management.Automation.Language.Parser]::ParseFile("
+               f"'{ps1}', [ref]$null, [ref]$e); exit $e.Count")
+        try:
+            r = app.subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', cmd],
+                                   capture_output=True, text=True, timeout=60)
+        except (FileNotFoundError, app.subprocess.TimeoutExpired):
+            self.skipTest('PowerShell not available')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
 
 class DownloadTests(unittest.TestCase):

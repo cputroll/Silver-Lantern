@@ -6,7 +6,7 @@ HeyListen Get — one-click downloader for HeyListen + the game dump.
     comes from. Edit that manifest and every run picks the new links up — no code change.
   * Fetches the latest HeyListen release from GitHub and keeps HeyListenBuilder.exe current.
   * Downloads the Ocarina of Time (Switch 2) .nup, resumable, size/hash verified.
-  * Seeds the DLSS Performance preset and can launch the Builder.
+  * Seeds a Performance preset (DLSS on NVIDIA RTX + DLSS builds, else FSR 3.1) and can launch the Builder.
 
 Usage:
   python Get-HeyListen.py
@@ -45,7 +45,7 @@ VERSION_FILE = HERE / "VERSION"
 UPDATE_ASSET = "HeyListen-Get.zip"
 SUMS_ASSET = "SHA256SUMS.txt"
 
-PRESET = {              # engine/gpu/vk/vk_menu.cpp ini_key names
+PRESET_DLSS = {         # engine/gpu/vk/vk_menu.cpp ini_key names
     "dlss": "1",        # 1 = NVIDIA DLSS
     "resolution": "4",  # 4 = 50% = DLSS Performance
     "sharpness": "80",
@@ -54,6 +54,19 @@ PRESET = {              # engine/gpu/vk/vk_menu.cpp ini_key names
     "framegen": "1",
     "options_version": "3",
 }
+PRESET_FSR = {
+    "dlss": "3",        # 3 = AMD FSR 3.1 (compiled into every build)
+    "resolution": "4",  # 4 = 50% = FSR Performance
+    "sharpness": "80",
+    "reflex": "0",      # Reflex is NVIDIA-only
+    "pace": "1",
+    "framegen": "1",
+    "options_version": "3",
+}
+PRESET = PRESET_DLSS    # kept for backwards compatibility
+DLSS_DLL = Path("ngx") / "nvngx_dlss.dll"
+GPU_QUERY = ("Get-CimInstance Win32_VideoController | Sort-Object AdapterRAM -Descending | "
+             "Select-Object -First 1 -ExpandProperty Name")
 
 
 def log(msg: str) -> None:
@@ -340,9 +353,45 @@ def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool =
     return dest
 
 
+def is_dlss_gpu(name: str | None) -> bool:
+    """True for an NVIDIA RTX adapter name (the only GPUs that run DLSS)."""
+    n = (name or "").upper()
+    return "NVIDIA" in n and "RTX" in n
+
+
+def detect_gpu_name() -> str | None:
+    """Name of the primary GPU (largest adapter RAM), or None if it can't be read."""
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", GPU_QUERY],
+                       capture_output=True, text=True, timeout=30, creationflags=flags)
+    name = (r.stdout or "").strip().splitlines()
+    return name[0].strip() if r.returncode == 0 and name and name[0].strip() else None
+
+
+def choose_preset(game_dir: Path) -> tuple[dict, str]:
+    """Pick the DLSS or FSR 3.1 preset for this PC + build. Never raises."""
+    try:
+        gpu = detect_gpu_name()
+    except Exception as e:
+        return PRESET_FSR, f"GPU detection failed ({e.__class__.__name__}) -> FSR 3.1 Performance"
+    if gpu is None:
+        return PRESET_FSR, "GPU could not be identified -> FSR 3.1 Performance"
+    try:
+        has_dll = (Path(game_dir) / DLSS_DLL).is_file()
+    except Exception:
+        has_dll = False
+    if is_dlss_gpu(gpu) and has_dll:
+        return PRESET_DLSS, f"NVIDIA RTX with DLSS build ({gpu}) -> DLSS Performance"
+    if is_dlss_gpu(gpu):
+        return PRESET_FSR, f"No RTX/DLSS build ({gpu}, but {DLSS_DLL} missing) -> FSR 3.1 Performance"
+    return PRESET_FSR, f"No RTX/DLSS build ({gpu}) -> FSR 3.1 Performance"
+
+
 def apply_preset(game_dir: Path) -> Path:
-    """Merge PRESET into game_dir/hookshot_options.ini, keeping every line we do not own."""
+    """Merge the auto-chosen preset into game_dir/hookshot_options.ini, keeping every line we do not own."""
     game_dir = Path(game_dir)
+    preset, why = choose_preset(game_dir)
+    log(why)
     game_dir.mkdir(parents=True, exist_ok=True)
     ini = game_dir / "hookshot_options.ini"
     lines = ini.read_text(encoding="ascii", errors="replace").splitlines() if ini.exists() else []
@@ -351,15 +400,16 @@ def apply_preset(game_dir: Path) -> Path:
     for line in lines:
         eq = line.find("=")
         key = line[:eq].strip() if eq > 0 else None
-        if key in PRESET:
+        if key in preset:
             if key not in seen:
-                out.append(f"{key}={PRESET[key]}")
+                out.append(f"{key}={preset[key]}")
                 seen.add(key)
         else:
             out.append(line)
-    out.extend(f"{k}={v}" for k, v in PRESET.items() if k not in seen)
+    out.extend(f"{k}={v}" for k, v in preset.items() if k not in seen)
     ini.write_text("\n".join(out) + "\n", encoding="ascii", errors="replace")
-    log(f"DLSS preset written: {ini}")
+    label = "DLSS" if preset is PRESET_DLSS else "FSR 3.1"
+    log(f"{label} preset written: {ini}")
     return ini
 
 
@@ -601,9 +651,9 @@ def main() -> int:
     ap.add_argument("--skip-hash", action="store_true", help="skip the 25 GB SHA-256 check")
     ap.add_argument("--force", action="store_true", help="re-download even if present")
     ap.add_argument("--no-launch", action="store_true", help="don't open HeyListenBuilder.exe")
-    ap.add_argument("--no-preset", action="store_true", help="don't write the DLSS preset ini")
+    ap.add_argument("--no-preset", action="store_true", help="don't write the upscaler preset ini")
     ap.add_argument("--game-dir", default=str(Path.home() / "Games" / "HeyListen"),
-                    help="built game folder for the DLSS preset")
+                    help="built game folder for the upscaler preset")
     ap.add_argument("--print-sources", action="store_true", help="show the manifest and exit")
     ap.add_argument("--version", action="store_true", help="print the installed version and exit")
     ap.add_argument("--no-self-update", action="store_true",
