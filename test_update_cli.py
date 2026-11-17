@@ -19,6 +19,16 @@ class UpdateCliTests(unittest.TestCase):
         self.assertEqual(cli.parse_update_line('garbage'), {})
         self.assertEqual(cli.parse_update_line('HLUPDATE nonsense'), {})
         self.assertEqual(cli.parse_update_line('HLUPDATE future=value'), {'future': 'value'})
+        cases = [
+            ('HLUPDATE status=current installed=v0.4.0 latest=v0.4.0', {'status': 'current', 'installed': 'v0.4.0', 'latest': 'v0.4.0'}),
+            ('HLUPDATE status=available installed=v0.4.0 latest=v0.5.0', {'status': 'available', 'installed': 'v0.4.0', 'latest': 'v0.5.0'}),
+            ('HLUPDATE status=updated from=v0.4.0 installed=v0.4.0 to=v0.5.0 latest=v0.5.0 seconds=12', {'status': 'updated', 'from': 'v0.4.0', 'installed': 'v0.4.0', 'to': 'v0.5.0', 'latest': 'v0.5.0', 'seconds': '12'}),
+            ('HLUPDATE status=error reason=builder-running', {'status': 'error', 'reason': 'builder-running'}),
+            ('HLUPDATE garbage', {}),
+        ]
+        for line, expected in cases:
+            with self.subTest(line=line):
+                self.assertEqual(cli.parse_update_line(line), expected)
 
     def test_friendly_statuses(self):
         fields = {'installed': 'v1', 'latest': 'v2', 'total': '12', 'error': 'bad file'}

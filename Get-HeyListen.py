@@ -838,10 +838,7 @@ def parse_update_line(line: str) -> dict:
     if not line.startswith('HLUPDATE '):
         return {}
     payload = line[len('HLUPDATE '):].strip()
-    if payload.startswith('times '):
-        return dict(re.findall(r'([A-Za-z_][\w-]*)=([^\s]+)', payload))
-    key, sep, value = payload.partition('=')
-    return {key: value.strip()} if sep and re.fullmatch(r'[A-Za-z_][\w-]*', key) else {}
+    return dict(re.findall(r'([A-Za-z_][\w-]*)=([^\s]+)', payload))
 
 
 def render_update_status(fields: dict) -> str | None:
