@@ -33,6 +33,22 @@ try {
   $bakedVersion = (& $exe --version --manifest (Join-Path $here 'sources.json') | Out-String).Trim()
   if ($LASTEXITCODE -ne 0) { throw "Executable version check failed ($LASTEXITCODE)." }
   if ($bakedVersion -cne $version) { throw "Executable version $bakedVersion does not match $version in sources.json and tag $Tag." }
+  $sdlZip = Join-Path $out 'SDL2-devel-2.30.10-VC.zip'
+  $sdlDir = Join-Path $out 'SDL2-2.30.10'
+  $sdlDll = Join-Path $sdlDir 'SDL2-2.30.10\lib\x64\SDL2.dll'
+  if (-not (Test-Path $sdlDll -PathType Leaf)) {
+    if (-not (Test-Path $sdlZip -PathType Leaf)) {
+      Invoke-WebRequest -Uri 'https://github.com/libsdl-org/SDL/releases/download/release-2.30.10/SDL2-devel-2.30.10-VC.zip' -OutFile $sdlZip
+    }
+    Expand-Archive -Path $sdlZip -DestinationPath $sdlDir -Force
+  }
+  $iconPath = (Resolve-Path (Join-Path $here 'assets\silver-lantern.ico')).Path
+  $sdlDll = (Resolve-Path $sdlDll).Path
+  $ttfDll = (python -c "import pathlib,sdl2dll; print(pathlib.Path(sdl2dll.__file__).parent / 'dll' / 'SDL2_ttf.dll')").Trim()
+  if (-not (Test-Path $ttfDll -PathType Leaf)) { throw 'SDL2_ttf.dll not found; install launcher-requirements.txt.' }
+  python -m PyInstaller --noconfirm --clean --onefile --windowed --name SilverLantern --icon $iconPath --add-binary "${sdlDll};." --add-binary "${ttfDll};." --distpath $stage --workpath $build --specpath $spec launcher.py
+  if ($LASTEXITCODE -ne 0) { throw "Launcher PyInstaller failed ($LASTEXITCODE)." }
+  Copy-Item $sdlDll $stage
   Copy-Item sources.json, README.md, Apply-HeyListen-Preset.ps1, SilverLantern-Get.cmd, SilverLantern-Preset.cmd, Update-Game.ps1, Watch-Game.ps1, SilverLantern-AutoUpdate.cmd $stage
   $zip = Join-Path $out 'HeyListen-Get.zip'
   Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
