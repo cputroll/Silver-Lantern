@@ -113,6 +113,18 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(start.called, auto)
                 if not auto: self.assertIn('Update now', ui.buttons())
 
+    def test_auto_update_deferred_during_game_operation(self):
+        for operation in ('game', 'download', 'update'):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'LOG', Path(d) / 'test.log'), patch.object(LauncherUI, 'check_updates'):
+                ui = LauncherUI()
+                ui.operation = operation
+                ui.screen = 'main'
+                ui.events.publish('tool_check', 'v999.0.0')
+                with patch.object(ui, 'start_tool_update') as start:
+                    ui.drain()
+                start.assert_not_called()
+                self.assertTrue(ui.tool_update_available)
+
     def test_startup_check_failure_shows_retry_and_rechecks(self):
         with patch.object(LauncherUI, 'check_updates'):
             ui = LauncherUI()

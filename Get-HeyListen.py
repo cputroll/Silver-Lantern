@@ -47,7 +47,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -2187,6 +2187,7 @@ def main() -> int:
         _apply_update(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5:])
         return 0
     ap = argparse.ArgumentParser(description="One-click HeyListen + game downloader")
+    ap.add_argument('--gui', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument("--manifest", help="sources.json path or URL (default: next to this script)")
     ap.add_argument("--out", default=None,
                     help="folder for the .nup and builder (default: Downloads)")

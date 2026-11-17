@@ -40,7 +40,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.5.2')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.5.3')
 
 
 def cli_command(*args):
@@ -944,7 +944,14 @@ class LauncherUI:
                 if match and tuple(map(int, match.groups())) > tuple(map(int, APP_VERSION.split('.'))):
                     self.tool_update_available = True
                     self.status = 'Silver Lantern update available: ' + value
-                    if self.config.get('auto_tool_update', True) and self.screen != 'progress' and '--no-self-update' not in sys.argv and not self.tool_handoff_started:
+                    if self.operation in ('game', 'download', 'update'):
+                        try:
+                            STATE_DIR.mkdir(parents=True, exist_ok=True)
+                            with LOG.open('a', encoding='utf-8') as log:
+                                log.write('Automatic tool update deferred during game operation.\n')
+                        except OSError:
+                            pass
+                    elif self.config.get('auto_tool_update', True) and self.screen != 'progress' and '--no-self-update' not in sys.argv and not self.tool_handoff_started:
                         self.tool_handoff_started = True
                         self.start_tool_update()
                 elif match:
