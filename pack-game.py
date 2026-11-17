@@ -7,7 +7,7 @@ import tarfile
 import tempfile
 import unittest
 
-LIMIT = 1_900_000_000
+LIMIT = 1536 * 1024 * 1024
 BLOCK = 8 * 1024 * 1024
 
 
@@ -45,6 +45,8 @@ class PackTest(unittest.TestCase):
 
 
 def pack(source, out, limit=LIMIT):
+    if not 0 < limit < 2 * 1024**3:
+        raise ValueError('bundle limit must be positive and below 2 GiB')
     source = source.resolve(); out = out.resolve()
     if not source.is_dir() or source == out or source in out.parents:
         raise ValueError('source must be a directory and output must be outside it')
@@ -57,7 +59,7 @@ def pack(source, out, limit=LIMIT):
                 raise ValueError('symlinks are not supported')
         paths.extend(Path(root) / n for n in files if not n.lower().endswith('.log'))
     paths.sort(key=lambda p: p.relative_to(source).as_posix())
-    manifest = {'version': 2, 'build': 'game-v1', 'total_bytes': 0, 'files': [], 'assets': []}
+    manifest = {'version': 2, 'build': 'game-v1', 'layout': 'whole', 'total_bytes': 0, 'files': [], 'assets': []}
     bundle = None; bundle_path = None; bundle_index = 0; chunk_index = 0
 
     def finish_bundle():
@@ -78,7 +80,7 @@ def pack(source, out, limit=LIMIT):
             with path.open('rb') as src:
                 remaining = size
                 while remaining:
-                    chunk_index += 1; name = f'chunk-{chunk_index:03d}.bin'; dest = out / name
+                    chunk_index += 1; name = f'whole-chunk-{chunk_index:03d}.bin'; dest = out / name
                     h = hashlib.sha256(); length = min(limit, remaining); left = length
                     with dest.open('wb') as dst:
                         while left:
@@ -92,7 +94,7 @@ def pack(source, out, limit=LIMIT):
             if bundle and ((bundle.tell() + needed) // 10240 + 1) * 10240 > limit:
                 finish_bundle()
             if not bundle:
-                bundle_index += 1; bundle_path = out / f'bundle-{bundle_index:03d}.tar'; bundle = bundle_path.open('wb')
+                bundle_index += 1; bundle_path = out / f'whole-bundle-{bundle_index:03d}.tar'; bundle = bundle_path.open('wb')
             bundle.write(header); offset = bundle.tell(); h = hashlib.sha256()
             with path.open('rb') as src:
                 left = size
