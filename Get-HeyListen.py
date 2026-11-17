@@ -1368,25 +1368,35 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
         done("up to date")
     else:
         done(f"{len(pending)} to download ({human(download_bytes)})", None)
+    if pending:
+        say("Needs about 40 GB free; the game itself takes about 33 GB.")
+        say("Bundles are cleaned as files are installed; resume may re-fetch cleaned bundles.")
     if dry_run:
         return
     if pending:
-        # Downloaded assets plus the assembled files live side by side until cleanup.
-        assemble = sum(item['size'] for item in pending)
-        check_disk_space(root, download_bytes + assemble + 1024 ** 3)
+        # Retaining assets requires space for the full download as well as the files.
+        need = 40 * 1024 ** 3
+        if keep_assets:
+            need = max(need, download_bytes + sum(item['size'] for item in pending) + 1024 ** 3)
+        check_disk_space(root, need)
     root.mkdir(parents=True, exist_ok=True)
     if pending:
         cache.mkdir(parents=True, exist_ok=True)
         progress = GameProgress(download_bytes)
+        verified_assets = set()
         def fetch(part):
             dest = cache / part['asset']
+            if part['asset'] in verified_assets:
+                return
             if dest.is_file() and dest.stat().st_size == part['size'] and sha256(dest) == part['sha256']:
+                verified_assets.add(part['asset'])
                 return
             dest.unlink(missing_ok=True)
             partial = Path(str(dest) + '.part')
             if partial.is_file() and partial.stat().st_size == part['size']:
                 if sha256(partial) == part['sha256']:
                     partial.replace(dest)
+                    verified_assets.add(part['asset'])
                     return
                 partial.unlink()
             # Each worker owns its HTTP session; sessions are not shared between threads.
@@ -1395,10 +1405,17 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             if sha256(dest) != part['sha256']:
                 dest.unlink(missing_ok=True)
                 raise ValueError(f"SHA-256 mismatch: {part['asset']}")
-        with ThreadPoolExecutor(max_workers=3) as pool:
-            list(pool.map(fetch, (assets[name] for name in sorted(needed))))
-        progress.finish()
+            verified_assets.add(part['asset'])
+        remaining_uses = {name: 0 for name in needed}
         for item in pending:
+            for name in {part['asset'] for part in item['segments' if v2 else 'parts']}:
+                remaining_uses[name] += 1
+        for item in pending:
+            # Fetch only assets this file needs, in manifest order. Shared assets stay
+            # until their final pending file is fully assembled and verified.
+            names = list(dict.fromkeys(part['asset'] for part in item['segments' if v2 else 'parts']))
+            for name in names:
+                fetch(assets[name])
             target = game_path(root, item['path'])
             target.parent.mkdir(parents=True, exist_ok=True)
             temp = target.with_name(target.name + '.heylisten-new')
@@ -1423,6 +1440,12 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 temp.replace(target)
             finally:
                 temp.unlink(missing_ok=True)
+            for name in names:
+                remaining_uses[name] -= 1
+                if remaining_uses[name] == 0 and not keep_assets:
+                    (cache / name).unlink(missing_ok=True)
+                    Path(str(cache / name) + '.part').unlink(missing_ok=True)
+        progress.finish()
     if not keep_assets and cache.exists():
         shutil.rmtree(cache)
     if prune:

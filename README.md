@@ -13,7 +13,7 @@ Silver Lantern installs the game for you and keeps it up to date.
 1. Download the latest release ZIP and extract it anywhere you can write files.
 2. Double-click `HeyListen-Get.exe` in the extracted folder.
 3. If Windows SmartScreen appears, select **More info -> Run anyway**. This warning can appear for a small app; only run a copy you trust.
-4. Wait for the progress bar while the game downloads. The first download is about 33 GB.
+4. Wait for the progress bar while the game downloads. The first download is about 33 GB. Downloaded bundles are cleaned up automatically as installation proceeds.
 5. When installation finishes, the game opens automatically.
 
 ## Keeping it up to date
