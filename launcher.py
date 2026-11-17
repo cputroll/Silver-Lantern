@@ -1126,6 +1126,19 @@ class LauncherUI:
         elif choice in ('Back', 'Later'): self.set_screen('main')
         elif choice == 'Cancel': terminate_worker(self.events)
         elif choice == 'Retry':
+            if self.operation == 'startup':
+                try:
+                    self.folder = resolve_game_folder()
+                    if relocate_launcher(self.folder):
+                        self.running = False
+                    else:
+                        self.operation = None
+                        self.set_screen('main' if self.config else 'folder')
+                        self.check_updates()
+                except Exception as exc:
+                    self.last_error = str(exc)
+                    log_message(f'Startup retry: {exc}')
+                return
             if self.operation == 'check':
                 self.operation = None
                 self.status = 'Checking for updates…'
@@ -1767,6 +1780,7 @@ def show_startup_error(exc):
     try:
         ui = LauncherUI(startup_error=exc)
         ui.last_error = str(exc)
+        ui.operation = 'startup'
         ui.set_screen('error')
         ui.run()
     except Exception as screen_error:

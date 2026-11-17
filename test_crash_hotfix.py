@@ -46,6 +46,13 @@ class CrashHotfixTests(unittest.TestCase):
             self.assertEqual(launcher.show_startup_error(OSError('failed')), 1)
             run.assert_called_once()
 
+    def test_startup_error_retry_retries_startup(self):
+        with patch.object(launcher, 'resolve_game_folder', return_value=Path('game')), patch.object(launcher.LauncherUI, 'check_updates'), patch.object(launcher, 'relocate_launcher', return_value=True) as relocate:
+            ui = launcher.LauncherUI(startup_error=OSError('failed'))
+            ui.operation = 'startup'; ui.set_screen('error'); ui.focus = 0
+            ui.activate()
+            relocate.assert_called_once()
+
     def test_error_screen_state(self):
         ui = MagicMock()
         with patch.object(launcher, 'LauncherUI', return_value=ui), patch.object(launcher, 'log_message'):
