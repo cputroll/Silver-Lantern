@@ -16,6 +16,23 @@ class StallPolicyTests(unittest.TestCase):
         self.assertEqual(client.get.call_count, 2)
         say.assert_called_once_with('Connection stalled — retrying…')
 
+    def test_checksum_uses_metadata_total_deadline(self):
+        from unittest.mock import Mock
+        from curl_cffi import CurlOpt
+        response = Mock()
+        response.iter_content.return_value = [(b'a' * 64) + b'  HeyListen-Get.zip']
+        client = Mock()
+        client.get.return_value = response
+        with patch.object(h, 'checksum_session') as factory:
+            factory.return_value.__enter__.return_value = client
+            self.assertEqual(h.fetch_update_checksum(h.session(), 'https://example.test/sums'), 'a' * 64)
+        self.assertEqual(client.get.call_args.kwargs['timeout'], (10, 60))
+        with patch.object(h.requests, 'Session') as session:
+            h.checksum_session()
+        options = session.call_args.kwargs['curl_options']
+        self.assertEqual(options[CurlOpt.TIMEOUT_MS], 60000)
+        self.assertEqual(options[CurlOpt.MAXFILESIZE_LARGE], 65536)
+
     def test_metadata_retries_once_with_visible_message(self):
         from unittest.mock import Mock
         client = Mock()

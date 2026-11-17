@@ -498,7 +498,7 @@ class LauncherUI:
                 digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
                 self.events.publish('check', (manifest.get('revision'), digest))
             except Exception:
-                self.events.publish('offline', None)
+                self.events.publish('offline', 'Could not reach the update server')
             try:
                 self.events.publish('status', 'Checking for updates…')
                 from curl_cffi import requests as curl_requests
@@ -520,7 +520,7 @@ class LauncherUI:
                     result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-File', str(next((p for p in (BASE / 'Update-Game.ps1', BASE / 'support' / 'Update-Game.ps1') if p.is_file()), BASE / 'Update-Game.ps1')), '-DryRun', '-GameFolder', str(self.folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                     self.events.publish('upstream_check', result.returncode)
             except Exception:
-                self.events.publish('offline', None)
+                self.events.publish('offline', 'Could not reach the update server')
         threading.Thread(target=check, daemon=True).start()
 
     def buttons(self):
@@ -598,7 +598,12 @@ class LauncherUI:
         elif choice in ('Back', 'Later'): self.set_screen('main')
         elif choice == 'Cancel': terminate_worker(self.events)
         elif choice == 'Retry':
-            if self.operation == 'tool': self.start_tool_update()
+            if self.operation == 'check':
+                self.operation = None
+                self.status = 'Checking for updates…'
+                self.set_screen('main')
+                self.check_updates()
+            elif self.operation == 'tool': self.start_tool_update()
             else: self.start_operation(self.operation == 'update')
         elif choice == 'View log':
             STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -681,7 +686,11 @@ class LauncherUI:
                 self.state = State.READY
                 self.status = 'Ready to play.'
                 self.check_updates()
-            elif kind == 'offline': self.status = "Couldn't check for updates. You can still play."
+            elif kind == 'offline':
+                if self.operation not in ('download', 'update', 'tool'):
+                    self.last_error = str(value or 'Could not reach the update server')
+                    self.operation = 'check'
+                    self.set_screen('error')
             elif kind == 'check':
                 revision, digest = value
                 self.latest_manifest_hash = digest

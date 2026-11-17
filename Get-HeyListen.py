@@ -592,6 +592,16 @@ def stream_session(source=None) -> "requests.Session":
         CurlOpt.LOW_SPEED_LIMIT: 1024, CurlOpt.LOW_SPEED_TIME: 30})
 
 
+def checksum_session(source=None):
+    from curl_cffi import CurlOpt
+    options = {}
+    if source is not None:
+        options = {key: getattr(source, key) for key in ('headers', 'cookies', 'auth', 'proxies', 'verify', 'trust_env', 'impersonate') if hasattr(source, key)}
+    options.setdefault('impersonate', 'chrome')
+    return requests.Session(**options, curl_options={CurlOpt.CONNECTTIMEOUT_MS: 10000,
+                            CurlOpt.TIMEOUT_MS: 60000, CurlOpt.MAXFILESIZE_LARGE: 65536})
+
+
 def metadata_get(client, url, **kwargs):
     kwargs['timeout'] = (10, 60)
     for attempt in range(2):
@@ -1346,6 +1356,13 @@ def _apply_update(target: Path, replacement: Path, parent: int, args: list[str])
 
 
 def fetch_update_checksum(s: "requests.Session", url: str) -> str:
+    if isinstance(s, requests.Session):
+        with checksum_session(s) as client:
+            return _fetch_update_checksum(client, url)
+    return _fetch_update_checksum(s, url)
+
+
+def _fetch_update_checksum(s, url):
     for attempt in range(2):
         response = None
         try:

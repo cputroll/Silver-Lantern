@@ -56,6 +56,20 @@ class StateTests(unittest.TestCase):
                 self.assertEqual(start.called, auto)
                 if not auto: self.assertIn('Update now', ui.buttons())
 
+    def test_startup_check_failure_shows_retry_and_rechecks(self):
+        with patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.events.publish('offline', 'Could not reach the update server')
+            ui.drain()
+            self.assertEqual(ui.screen, 'error')
+            self.assertIn('Could not reach the update server', ui.last_error)
+            self.assertIn('Retry', ui.buttons())
+            ui.focus = ui.buttons().index('Retry')
+            with patch.object(ui, 'check_updates') as check, patch.object(ui, 'start_operation') as install:
+                ui.activate()
+            check.assert_called_once()
+            install.assert_not_called()
+
     def test_equal_tool_version_does_not_handoff(self):
         with patch.object(LauncherUI, 'check_updates'):
             ui = LauncherUI()
