@@ -153,6 +153,40 @@ class StateTests(unittest.TestCase):
         self.assertIn('exit 7', error)
         self.assertIn('No diagnostic output', error)
 
+    def test_worker_failure_surfaces_child_problem_and_action(self):
+        import io
+        from unittest.mock import MagicMock
+        events = launcher.ProgressEvents()
+        child = (
+            'Preparing install\n'
+            '  Problem: Not enough free space on C:. The download\n'
+            '  needs 33.2 GB, and 13.4 GB is free.\n'
+            '  What to do: Free up about 19.8 GB, then run this again.\n'
+            '  Details were saved to: C:\\temp\\HeyListen-Get.log\n'
+        )
+        proc = MagicMock()
+        proc.stdout = io.StringIO(child)
+        proc.wait.return_value = 1
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'LOG', Path(d) / 'log'), patch.object(launcher.subprocess, 'Popen', return_value=proc):
+            launcher.worker_command(events, [])
+            messages = []
+            while not events.queue.empty(): messages.append(events.queue.get_nowait())
+        error = str([value for kind, value in messages if kind == 'error'][0])
+        self.assertIn('exit 1', error)
+        self.assertIn('Not enough free space on C:', error)
+        self.assertIn('needs 33.2 GB', error)          # wrapped continuation is joined
+        self.assertIn('Free up about 19.8 GB', error)
+        self.assertIn('Details were saved to:', error)
+
+    def test_friendly_blocks_prefers_the_last_problem(self):
+        lines = ['  Problem: first problem', '  What to do: first action',
+                 '  Problem: second problem', '  What to do: second action',
+                 '  Details were saved to: /tmp/x.log']
+        problem, action, details = launcher.friendly_blocks(lines)
+        self.assertEqual(problem, 'second problem')
+        self.assertEqual(action, 'second action')
+        self.assertEqual(details, '/tmp/x.log')
+
     def test_settings_speed_action_reports_result(self):
         ui = launcher.LauncherUI()
         ui.screen = 'settings'

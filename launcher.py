@@ -561,6 +561,43 @@ def parse_progress(line):
     return None
 
 
+def _strip_ansi(text):
+    return re.sub(r'\x1b\[[0-9;]*m', '', text)
+
+
+def friendly_blocks(lines):
+    """Extract the child's last Problem / What to do blocks and its details line.
+
+    The installer prints friendly, wrapped ``Problem:`` and ``What to do:`` prose
+    followed by ``Details were saved to: <path>``. The GUI error screen should show
+    that prose instead of only the final ``Details were saved to`` line.
+    """
+    problem, action, details = [], [], None
+    target = None
+    for raw in lines:
+        line = _strip_ansi(str(raw)).strip()
+        if line.startswith('Problem:'):
+            problem, action = [line[len('Problem:'):].strip()], []
+            target = 'problem'
+            continue
+        if line.startswith('What to do:'):
+            action = [line[len('What to do:'):].strip()]
+            target = 'action'
+            continue
+        if line.startswith('Details were saved to:'):
+            details = line[len('Details were saved to:'):].strip()
+            target = None
+            continue
+        if not line:
+            target = None
+            continue
+        if target == 'problem':
+            problem.append(line)
+        elif target == 'action':
+            action.append(line)
+    return ' '.join(x for x in problem if x).strip(), ' '.join(x for x in action if x).strip(), details
+
+
 def worker_command(events, args):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -570,6 +607,7 @@ def worker_command(events, args):
         if events.cancelled.is_set():
             terminate_worker(events)
         last_line = ''
+        screen_lines = []
         with LOG.open('a', encoding='utf-8') as log:
             while True:
                 line = process.stdout.readline()
@@ -579,6 +617,7 @@ def worker_command(events, args):
                 log.flush()
                 if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ')):
                     last_line = line.strip()
+                    screen_lines.append(line.strip())
                 events.publish('progress', parse_progress(line) or {'text': line.strip()})
         code = process.wait()
         if events.cancelled.is_set():
@@ -586,8 +625,19 @@ def worker_command(events, args):
         elif code == 0:
             events.publish('complete', code)
         else:
-            detail = f'Last output: {last_line}' if last_line else 'No diagnostic output was provided.'
-            events.publish('error', f'The operation failed (exit {code}). {detail} See the log for full details.')
+            problem, action, details = friendly_blocks(screen_lines)
+            parts = []
+            if problem:
+                parts.append('Problem: ' + problem)
+            if action:
+                parts.append('What to do: ' + action)
+            if details:
+                parts.append('Details were saved to: ' + details)
+            elif last_line:
+                parts.append('Last output: ' + last_line)
+            if not parts:
+                parts.append('No diagnostic output was provided.')
+            events.publish('error', f'The operation failed (exit {code}). ' + ' '.join(parts) + ' See the log for full details.')
     except Exception as exc:
         events.publish('error', str(exc))
 
