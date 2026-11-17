@@ -41,6 +41,20 @@ class UpdaterTests(unittest.TestCase):
         command = self._run_update(['--no-launch', '--out', 'folder'])
         self.assertEqual(command[5:], ['--no-launch', '--out', 'folder', '--no-self-update'])
 
+    def test_double_click_update_relaunches_the_window(self):
+        command = self._run_update([])
+        self.assertEqual(command[5:], ['--gui', '--no-self-update'])
+
+    def test_explicit_self_update_stays_console(self):
+        command = self._run_update(['--self-update'])
+        self.assertEqual(command[5:], ['--no-self-update'])
+
+    def test_say_survives_windowed_missing_stdout(self):
+        with mock.patch.object(sys, 'stdout', None):
+            app.say('updating')
+            app.warn('still fine')
+
+
     def test_update_only_helper_replaces_without_relaunch(self):
         command = ['helper', '--apply-update-internal', 'app.exe', 'new.exe', '123', '--update-only-internal', 'v999.0.0']
         with mock.patch.object(app, 'wait_for_parent'), \
@@ -107,6 +121,35 @@ class UpdaterTests(unittest.TestCase):
             self.assertFalse((Path(td).parent / 'evil.exe').exists())
 
     def test_transaction_rolls_back(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / 'app.exe'
+            target.write_bytes(b'old')
+            new = Path(td) / 'new.exe'
+            new.write_bytes(b'new')
+            original = app.os.replace
+            def fail_second(src, dst):
+                if Path(dst) == target and Path(src) == new:
+                    raise OSError('simulated failure')
+                original(src, dst)
+            with mock.patch.object(app.os, 'replace', side_effect=fail_second):
+                with self.assertRaises(OSError):
+                    app.replace_transactionally(target, new)
+            self.assertEqual(target.read_bytes(), b'old')
+
+    def test_stale_backup_is_recovered_not_fatal(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); target = root / 'app.exe'; backup = root / 'app.exe.update-backup'
+            target.write_bytes(b'current'); backup.write_bytes(b'older')
+            replacement = root / 'new.exe'; replacement.write_bytes(b'new')
+            app.replace_transactionally(target, replacement)
+            self.assertEqual(target.read_bytes(), b'new')
+            self.assertFalse(backup.exists())
+            # second recovery shape: target lost, backup holds the only copy
+            target.unlink(); backup.write_bytes(b'rescued')
+            replacement.write_bytes(b'newer')
+            app.replace_transactionally(target, replacement)
+            self.assertEqual(target.read_bytes(), b'newer')
+
         with tempfile.TemporaryDirectory() as td:
             target = Path(td) / 'app.exe'
             target.write_bytes(b'old')

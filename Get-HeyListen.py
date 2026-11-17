@@ -47,7 +47,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.6.4"
+APP_VERSION = "1.6.5"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -114,6 +114,8 @@ def _paint(text: str, tone: str | None) -> str:
 
 
 def _write(text: str) -> None:
+    if sys.stdout is None:
+        return
     try:
         sys.stdout.write(text)
         sys.stdout.flush()
@@ -1255,7 +1257,12 @@ def stage_executable(zpath: Path, directory: Path, name: str) -> Path:
 def replace_transactionally(target: Path, replacement: Path) -> None:
     backup = target.with_name(target.name + '.update-backup')
     if backup.exists():
-        raise RuntimeError("update backup already exists; manual recovery required")
+        # An earlier update was interrupted mid-swap. Recover instead of refusing:
+        # with the target present the backup is stale; without it, restore the backup.
+        if target.exists():
+            backup.unlink()
+        else:
+            os.replace(backup, target)
     os.replace(target, backup)
     try:
         os.replace(replacement, target)
@@ -1419,12 +1426,17 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
         replacement = stage_executable(zp, stage, target.name)
         helper = stage / 'update-helper.exe'
         shutil.copy2(target, helper)
+        gui_relaunch = not args
         if '--self-update' in args:
             rest = [arg for arg in args if arg != '--self-update']
         else:
             rest = list(args)
         if '--no-self-update' not in rest:
             rest.append('--no-self-update')
+        if gui_relaunch:
+            # Launched by double-click (GUI): the restart must open the app window,
+            # not a console-mode run that would die with no stdout attached.
+            rest = ['--gui', '--no-self-update']
         subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), *rest], cwd=str(target.parent))
         _self_update_started = True
     except BaseException:
@@ -1432,7 +1444,8 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
         raise
     # The helper relaunches in this same console (no CREATE_NEW_CONSOLE, on purpose).
     if '--self-update' in args:
-        print('SILVERLANTERN_UPDATE_HANDOFF', flush=True)
+        if sys.stdout is not None:
+            print('SILVERLANTERN_UPDATE_HANDOFF', flush=True)
     done(f"updating to {remote.lstrip('vV')}, restarting...")
     say()
     sys.exit(0)
