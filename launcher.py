@@ -105,12 +105,12 @@ def launcher_target(folder):
     return Path(folder) / 'Ocarina of Time.exe'
 
 
-def create_shortcut(folder, enabled=True):
+def create_shortcut(folder, enabled=True, exe=None):
     link = shortcut_path()
     if not enabled:
         link.unlink(missing_ok=True)
         return
-    target = launcher_target(folder)
+    target = exe or launcher_target(folder)
     create_link(link, target, target.parent)
 
 
@@ -193,11 +193,11 @@ OWNED_FILES = ('SilverLantern.exe', 'HeyListen-Get.exe', 'SDL2.dll', 'sources.js
 OWNED_FILES += tuple('support/' + name for name in OWNED_FILES if name not in ('Run Silver Lantern.exe',))
 
 
-def register_install(folder):
+def register_install(folder, exe=None):
     if winreg is None:
         return
-    exe = launcher_target(folder)
-    create_shortcut(Path(folder))
+    exe = exe or launcher_target(folder)
+    create_shortcut(Path(folder), exe=exe)
     link = start_menu_path()
     link.parent.mkdir(parents=True, exist_ok=True)
     create_link(link, exe, exe.parent)
@@ -324,7 +324,7 @@ def relocate_launcher(folder):
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOG.open('a', encoding='utf-8') as log:
         log.write(f'Launcher relocation: {target}\n')
-    register_install(destination)
+    register_install(destination, exe=target)
     subprocess.Popen([str(target), *sys.argv[1:]], close_fds=False)
     return True
 
