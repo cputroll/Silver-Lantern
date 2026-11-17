@@ -44,4 +44,7 @@ def make_pointer(old, revision, asset, digest):
         raise ValueError('invalid manifest asset')
     if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
         raise ValueError('invalid manifest digest')
-    return {'version': 1, 'revision': revision, 'manifest': asset, 'sha256': digest}
+    pointer = {'version': 1, 'revision': revision, 'manifest': asset, 'sha256': digest}
+    if old is not None:
+        pointer['previous'] = {key: old[key] for key in ('version', 'revision', 'manifest', 'sha256')}
+    return pointer

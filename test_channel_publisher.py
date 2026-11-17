@@ -77,6 +77,11 @@ class ChannelPublisherTests(unittest.TestCase):
         upload.assert_not_called()
         advance.assert_not_called()
 
+    def test_pointer_keeps_previous_asset_for_rollback(self):
+        old = {'version': 1, 'revision': 3, 'manifest': 'game-manifest-old.json', 'sha256': 'a' * 64}
+        pointer = channel_publisher.make_pointer(old, 4, 'game-manifest-new.json', 'b' * 64)
+        self.assertEqual(pointer['previous'], old)
+
     def test_pointer_rejects_bad_asset(self):
         with self.assertRaises(ValueError):
             channel_publisher.make_pointer(None, 1, '../bad', 'a' * 64)
