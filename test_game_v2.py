@@ -38,6 +38,12 @@ class V2Tests(unittest.TestCase):
     def test_length_mismatch(self):
         m = sample(); m['files'][0]['segments'][0]['length'] = 2
         with self.assertRaises(ValueError): self.validate(m)
+    def test_out_of_order_segments_rejected(self):
+        m = sample()
+        m['files'][0]['segments'].reverse()
+        with self.assertRaisesRegex(Exception, 'segments must be packed in bundle order'):
+            self.validate(m)
+
     def test_segment_beyond_asset(self):
         m = sample(); m['files'][0]['segments'][0]['offset'] = 5
         with self.assertRaises(ValueError): self.validate(m)

@@ -1389,6 +1389,17 @@ GAME_MANIFEST_URL = "https://raw.githubusercontent.com/cputroll/Silver-Lantern/m
 GAME_ASSET_URL = "https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/"
 
 
+def validate_bundle_order(man):
+    if man.get('version') != 2:
+        return
+    order = {asset['asset']: i for i, asset in enumerate(man['assets'])}
+    for item in man['files']:
+        segments = item['segments']
+        for first, second in zip(segments, segments[1:]):
+            if order[first['asset']] >= order[second['asset']]:
+                raise UserError(f"{item['path']}: segments must be packed in bundle order ({first['asset']} -> {second['asset']})", 'Use a correctly packed game manifest.', 'manifest')
+
+
 def parse_game_manifest(text: str) -> dict:
     try:
         man = json.loads(text)
@@ -1452,6 +1463,7 @@ def parse_game_manifest(text: str) -> dict:
                 raise ValueError('part sizes do not match file')
         if size(man['total_bytes']) != sum(f['size'] for f in files):
             raise ValueError('total size mismatch')
+        validate_bundle_order(man)
         return man
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError('invalid game manifest') from exc
@@ -1486,6 +1498,7 @@ def game_path(root: Path, relative: str) -> Path:
 
 def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = False,
                  manifest_path: Path | None = None, keep_assets: bool = False) -> None:
+    validate_bundle_order(man)
     root = root.expanduser()
     pending = []
     kept = 0
