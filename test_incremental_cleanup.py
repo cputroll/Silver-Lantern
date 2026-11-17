@@ -113,14 +113,62 @@ class IncrementalTests(unittest.TestCase):
                 h.install_game(object(), fixture(), Path(td))
             self.assertEqual(check.call_args.args[1], 2 * 1024 ** 3)
 
+    def test_resume_uses_remaining_files_and_full_required_assets(self):
+        with tempfile.TemporaryDirectory() as td, redirect_stdout(io.StringIO()):
+            root = Path(td)
+            (root / 'one').write_bytes(b'a')
+            (root / 'two').write_bytes(b'b')
+            with patch.dict('os.environ', {}, clear=False), patch.object(h, 'check_disk_space') as check, \
+                 patch.object(h, 'stream_to', side_effect=RuntimeError('stop')):
+                import os
+                os.environ.pop('SILVER_LANTERN_MIN_FREE_GB', None)
+                with self.assertRaises(RuntimeError):
+                    h.install_game(object(), fixture(), root)
+            self.assertEqual(check.call_args.args[1], 1024 ** 3 + 2)
+
+    def test_scheduler_budget_covers_three_bundles_and_keep_assets_all(self):
+        man = fixture()
+        man['assets'].extend([{'asset': 'c', 'size': 4, 'sha256': digest(b'dddd')},
+                              {'asset': 'd', 'size': 5, 'sha256': digest(b'eeeee')}])
+        for name, data in [('c', b'dddd'), ('d', b'eeeee')]:
+            man['files'].append({'path': name, 'size': len(data), 'sha256': digest(data),
+                                 'segments': [{'asset': name, 'offset': 0, 'length': len(data), 'sha256': digest(data)}]})
+        with tempfile.TemporaryDirectory() as td, redirect_stdout(io.StringIO()):
+            for keep, budget in [(False, 11), (True, 12)]:
+                with patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to', side_effect=RuntimeError('stop')):
+                    with self.assertRaises(RuntimeError):
+                        h.install_game(object(), man, Path(td), keep_assets=keep)
+                self.assertEqual(check.call_args.args[1], 1024 ** 3 + 12 + budget)
+
+    def test_verified_cache_is_not_charged_again(self):
+        with tempfile.TemporaryDirectory() as td, redirect_stdout(io.StringIO()):
+            root = Path(td)
+            cache = root / '.heylisten-parts'
+            cache.mkdir()
+            (cache / 'a').write_bytes(b'ab')
+            with patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to', side_effect=RuntimeError('stop')):
+                with self.assertRaises(RuntimeError):
+                    h.install_game(object(), fixture(), root)
+            self.assertEqual(check.call_args.args[1], 1024 ** 3 + 3 + 1)
+
+    def test_partial_cache_is_conservatively_charged_in_full(self):
+        with tempfile.TemporaryDirectory() as td, redirect_stdout(io.StringIO()):
+            root = Path(td)
+            cache = root / '.heylisten-parts'
+            cache.mkdir()
+            (cache / 'a.part').write_bytes(b'a')
+            with patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to', side_effect=RuntimeError('stop')):
+                with self.assertRaises(RuntimeError):
+                    h.install_game(object(), fixture(), root)
+            self.assertEqual(check.call_args.args[1], 1024 ** 3 + 6)
+
     def test_plan_and_threshold(self):
         with tempfile.TemporaryDirectory() as td:
             out = io.StringIO()
             with patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to', side_effect=RuntimeError('stop')), redirect_stdout(out):
                 with self.assertRaises(RuntimeError):
                     h.install_game(object(), fixture(), Path(td))
-            self.assertEqual(check.call_args.args[1], 44 * 1024 ** 3)
-            self.assertIn('Needs about 44 GB free; the game itself takes about 33 GB', out.getvalue())
+            self.assertEqual(check.call_args.args[1], 1024 ** 3 + 6)
             self.assertIn('resume', out.getvalue().lower())
             self.assertIn('bundle', out.getvalue().lower())
 

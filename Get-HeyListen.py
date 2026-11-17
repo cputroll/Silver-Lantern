@@ -1819,6 +1819,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
         p['asset']: p for f in man['files'] for p in f['parts']}
     needed = {p['asset'] for f in pending for p in f['segments' if v2 else 'parts']}
     download_bytes = 0
+    uncached_asset_sizes = []
     for name in needed:
         part = assets[name]
         cached = cache / name
@@ -1827,6 +1828,9 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             continue
         if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists() and sha256(partial) == part['sha256']:
             continue
+        # Count the entire asset: sparse/preallocated chunks may consume space
+        # later, and a server may discard a partial when it ignores ranges.
+        uncached_asset_sizes.append(part['size'])
         if part['size'] >= PARALLEL_THRESHOLD and download_streams() > 1:
             state = chunk_state(cached, part['size'], download_streams())
             have = sum(b - a for (a, b), done in zip(state['bounds'], state['done']) if done)
@@ -1841,22 +1845,34 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     else:
         done(f"{len(pending)} to download ({human(download_bytes)})", None)
     if pending:
-        say("Needs about 44 GB free; the game itself takes about 33 GB.")
         say("Bundles are cleaned as files are installed; resume may re-fetch cleaned bundles.")
     if dry_run:
         return
     if pending:
-        # Retaining assets requires space for the full download as well as the files.
-        try:
-            minimum_gb = float(os.environ.get('SILVER_LANTERN_MIN_FREE_GB', '44'))
-            if not 0 <= minimum_gb < float('inf'):
-                raise ValueError
-        except ValueError:
-            raise UserError('SILVER_LANTERN_MIN_FREE_GB must be a non-negative number.', 'Correct the environment variable and try again.', 'configuration')
-        if minimum_gb:
-            need = int(minimum_gb * 1024 ** 3)
-            if keep_assets:
-                need = max(need, download_bytes + sum(item['size'] for item in pending) + 1024 ** 3)
+        # Bound additional allocation, not total installation size. Three bundles
+        # may overlap in the segmented scheduler; older layouts fetch all assets
+        # for one file at a time. Cached verified assets already occupy disk.
+        if keep_assets:
+            asset_budget = sum(uncached_asset_sizes)
+        elif v2:
+            asset_budget = sum(sorted(uncached_asset_sizes, reverse=True)[:3])
+        else:
+            # Shared legacy bundles can remain live across multiple files.
+            asset_budget = sum(uncached_asset_sizes)
+        need = sum(item['size'] for item in pending) + asset_budget + 1024 ** 3
+        override = os.environ.get('SILVER_LANTERN_MIN_FREE_GB')
+        if override is not None:
+            try:
+                minimum_gb = float(override)
+                if not 0 <= minimum_gb < float('inf'):
+                    raise ValueError
+            except ValueError:
+                raise UserError('SILVER_LANTERN_MIN_FREE_GB must be a non-negative number.', 'Correct the environment variable and try again.', 'configuration')
+            if minimum_gb == 0:
+                need = 0
+            else:
+                need = max(need, int(minimum_gb * 1024 ** 3))
+        if need:
             check_disk_space(root, need)
     root.mkdir(parents=True, exist_ok=True)
     if pending:

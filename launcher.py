@@ -1325,7 +1325,7 @@ class LauncherUI:
             return cached[2]
         parent = self.folder
         while not parent.exists() and parent != parent.parent: parent = parent.parent
-        try: value = f'{shutil.disk_usage(parent).free / 1e9:.1f} GB free · about 40 GB needed'
+        try: value = f'{shutil.disk_usage(parent).free / 1e9:.1f} GB free · space needed is checked before download'
         except OSError: value = ''
         self._free_cache = (self.folder, now, value)
         return value
