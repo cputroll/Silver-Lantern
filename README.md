@@ -1,6 +1,6 @@
 # Silver Lantern
 
-Silver Lantern installs the game for you and keeps it up to date.
+Silver Lantern installs the game for you and keeps it up to date. The app installs itself into the game folder as Ocarina of Time.exe.
 
 ## What you need
 
@@ -10,7 +10,7 @@ Silver Lantern installs the game for you and keeps it up to date.
 
 ## Install
 
-1. Download the latest release ZIP. No extraction needed - open `Run Silver Lantern.exe` directly from the ZIP; it installs itself to your user Programs folder.
+1. Download the latest release ZIP. No extraction needed - open `Run Silver Lantern.exe` directly from the ZIP; it installs itself into the game folder.
 2. Alternatively, extract the ZIP anywhere you can write files and double-click `Run Silver Lantern.exe` in the extracted folder. Support files are in `support/`.
 3. If Windows SmartScreen appears, select **More info -> Run anyway**. This warning can appear for a small app; only run a copy you trust.
 4. Choose a folder and select **Download**. The first download is about 33 GB. Downloaded bundles are cleaned up automatically as installation proceeds.
