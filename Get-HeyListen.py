@@ -2164,7 +2164,7 @@ def ensure_cli_console():
 
 
 def main() -> int:
-    if getattr(sys, 'frozen', False) and not any(arg in sys.argv[1:] for arg in ('--cli', '--apply-update-internal', '--uninstall', '--self-test', '--screenshot')):
+    if getattr(sys, 'frozen', False) and (not sys.argv[1:] or sys.argv[1:] in (['--gui'], ['--gui', '--no-self-update'])):
         import launcher
         if launcher.relocate_launcher(launcher.resolve_game_folder()):
             return 0
