@@ -5,6 +5,14 @@ import launcher
 
 
 class RenderDensityTests(unittest.TestCase):
+    def test_screenshot_renderer_uses_software_without_accelerated_attempt(self):
+        s = mock.MagicMock()
+        s.SDL_RENDERER_SOFTWARE = 1
+        s.SDL_RENDERER_ACCELERATED = 2
+        s.SDL_RENDERER_PRESENTVSYNC = 4
+        launcher.create_renderer(s, 'window', screenshot=True)
+        s.SDL_CreateRenderer.assert_called_once_with('window', -1, 1)
+
     def test_output_density_tracks_letterboxed_drawable_size(self):
         self.assertEqual(launcher.render_density(1280, 720), 1)
         self.assertEqual(launcher.render_density(2560, 1440), 2)

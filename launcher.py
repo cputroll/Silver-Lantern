@@ -70,6 +70,13 @@ def windows_animations_enabled():
     return True
 
 
+def create_renderer(s, window, screenshot=False):
+    if screenshot:
+        return s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
+    renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_ACCELERATED | s.SDL_RENDERER_PRESENTVSYNC)
+    return renderer or s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
+
+
 def tip_offset(t, snap=False):
     return 0 if snap else round(3 * math.sin(t * math.tau / 2))
 
@@ -1792,8 +1799,7 @@ class LauncherUI:
                 raise ValueError('Invalid screenshot size')
             size = tuple(map(int, match.groups()))
         window = s.SDL_CreateWindow('Ocarina of Time'.encode('utf-8'), s.SDL_WINDOWPOS_CENTERED, s.SDL_WINDOWPOS_CENTERED, *size, s.SDL_WINDOW_RESIZABLE | s.SDL_WINDOW_ALLOW_HIGHDPI)
-        renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_ACCELERATED | s.SDL_RENDERER_PRESENTVSYNC)
-        if not renderer: renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
+        renderer = create_renderer(s, window, screenshot=bool(screenshot))
         if not window or not renderer: raise RuntimeError('Could not create the launcher window')
         s.SDL_RenderSetLogicalSize(renderer, 1280, 720)
         s.SDL_SetRenderDrawColor(renderer, *SURFACE, 255)
