@@ -41,7 +41,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.5.4')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.6.0')
 
 
 def cli_command(*args):

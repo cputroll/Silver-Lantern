@@ -1,3 +1,6 @@
-# Silver Lantern 1.5.4
+# Silver Lantern 1.6.0
 
-- Shortcut now appears on the visible desktop on machines with OneDrive folder redirection; the game now starts fullscreen by default.
+- Installs into the game folder and becomes the default way to launch.
+- A full graphics settings screen exposes every game option.
+- Fixed preset values that the game previously ignored.
+- The game's own menu opens with F1.
