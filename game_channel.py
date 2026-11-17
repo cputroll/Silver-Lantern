@@ -109,6 +109,39 @@ def resolve(fetch, minimum_revision=0, expected_digest=None, pointer_data=None):
     return resolve_info(fetch, minimum_revision, expected_digest, pointer_data)[0]
 
 
+def fetch_bytes(session, url, max_bytes=None):
+    limit = max_bytes if max_bytes is not None else (16384 if url == CHANNEL_URL else 128 * 1024 * 1024)
+    response = session.get(url, stream=True, timeout=(10, 30))
+    try:
+        if response.status_code == 404:
+            raise FileNotFoundError('channel resource not found')
+        response.raise_for_status()
+        chunks = []
+        total = 0
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            total += len(chunk)
+            if total > limit:
+                raise ValueError('channel response exceeds size limit')
+            chunks.append(chunk)
+        return b''.join(chunks)
+    finally:
+        response.close()
+
+
+def fetch_for_folder(folder, fetch, validate):
+    minimum_revision, expected_digest = load_state(folder)
+    try:
+        pointer = fetch(CHANNEL_URL)
+    except FileNotFoundError:
+        if minimum_revision:
+            raise
+        return validate(fetch(LEGACY_URL))
+    data, revision, digest = resolve_info(fetch, minimum_revision, expected_digest, pointer)
+    result = validate(data)
+    save_state(folder, revision, digest)
+    return result
+
+
 def resolve_with_fallback(fetch, minimum_revision=0, expected_digest=None):
     try:
         pointer = fetch(CHANNEL_URL)

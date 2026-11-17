@@ -49,6 +49,14 @@ class SyncTests(unittest.TestCase):
                 with self.assertRaisesRegex(h.UserError, 'Another game installation'):
                     h.install_from_manifest(None, args, Path(d))
 
+    def test_default_manifest_uses_channel_resolver(self):
+        import game_channel
+        from types import SimpleNamespace
+        args = SimpleNamespace(game_manifest=None, dry_run=False, prune=False, keep_assets=False)
+        with tempfile.TemporaryDirectory() as d, patch.object(h, 'stream_session') as session, patch.object(game_channel, 'fetch_for_folder', return_value=manifest()) as fetch, patch.object(h, 'install_game'), patch.object(h, 'keep_awake'):
+            h.install_from_manifest(None, args, Path(d))
+            fetch.assert_called_once()
+
     def test_bad_json(self):
         with self.assertRaises(ValueError): h.parse_game_manifest('{')
     def test_missing_fields(self):

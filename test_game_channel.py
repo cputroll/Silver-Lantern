@@ -153,6 +153,41 @@ class GameChannelTests(unittest.TestCase):
                 self.assertNotEqual(child.returncode, 0)
                 self.assertIn(b'TimeoutError', child.stderr)
 
+    def test_fetch_for_folder_validates_before_recording_revision(self):
+        import tempfile
+        from pathlib import Path
+        content = b'invalid manifest'
+        fetch = Mock(side_effect=[self.pointer(content), content])
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(ValueError):
+                game_channel.fetch_for_folder(Path(tmp), fetch, lambda _: (_ for _ in ()).throw(ValueError('invalid')))
+            self.assertEqual(game_channel.load_state(Path(tmp)), (0, None))
+
+    def test_fetch_for_folder_records_verified_revision(self):
+        import tempfile
+        from pathlib import Path
+        content = b'valid manifest'
+        fetch = Mock(side_effect=[self.pointer(content), content])
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(game_channel.fetch_for_folder(Path(tmp), fetch, lambda x: x), content)
+            self.assertEqual(game_channel.load_state(Path(tmp)), (1, hashlib.sha256(content).hexdigest()))
+
+    def test_fetch_rejects_oversize_response(self):
+        response = Mock(status_code=200, headers={}, iter_content=Mock(return_value=[b'x' * 10]))
+        session = Mock()
+        session.get.return_value = response
+        with self.assertRaises(ValueError):
+            game_channel.fetch_bytes(session, game_channel.CHANNEL_URL, max_bytes=5)
+        response.close.assert_called_once()
+
+    def test_gui_channel_fetch_uses_shared_resolver(self):
+        import launcher
+        from pathlib import Path
+        from unittest.mock import patch
+        with patch.object(game_channel, 'fetch_for_folder', return_value={'files': []}) as fetch:
+            self.assertEqual(launcher.fetch_channel_manifest(Path('game'), Mock()), {'files': []})
+            fetch.assert_called_once()
+
     def test_rejects_hash_mismatch(self):
         fetch = Mock(side_effect=[self.pointer(b'expected'), b'altered'])
         with self.assertRaises(ValueError):

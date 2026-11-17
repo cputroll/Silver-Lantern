@@ -2228,7 +2228,7 @@ def main() -> int:
                     help="install a release zip from a local path (testing)")
     ap.add_argument('--install-game', nargs='?', const=str(Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Games' / 'HeyListen'), metavar='FOLDER')
     import launcher
-    ap.add_argument('--game-manifest', default=launcher.game_manifest_url(), metavar='PATH_OR_URL')
+    ap.add_argument('--game-manifest', default=None, metavar='PATH_OR_URL')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--keep-assets', action='store_true', help='Keep downloaded game assets after installation')
     ap.add_argument('--prune', action='store_true')
@@ -2344,14 +2344,18 @@ def _install_from_manifest_locked(s, a, folder: Path) -> None:
     step("Game file list")
     try:
         with stream_session() as manifest_session:
-            game_manifest = load_game_manifest(manifest_session, a.game_manifest)
+            if a.game_manifest is None:
+                import game_channel
+                game_manifest = game_channel.fetch_for_folder(folder, lambda url: game_channel.fetch_bytes(manifest_session, url), lambda data: parse_game_manifest(data.decode('utf-8-sig')))
+            else:
+                game_manifest = load_game_manifest(manifest_session, a.game_manifest)
     except Exception:
         done("failed", "yellow")
         raise
     done("up to date")
     if not a.dry_run:
         cache_game_manifest(folder, game_manifest)
-    local_manifest = None if urlparse(a.game_manifest).scheme in ('http', 'https') else Path(a.game_manifest).expanduser()
+    local_manifest = None if a.game_manifest is None or urlparse(a.game_manifest).scheme in ('http', 'https') else Path(a.game_manifest).expanduser()
     with keep_awake():
         install_game(None, game_manifest, folder, a.dry_run, a.prune, local_manifest, a.keep_assets)
 

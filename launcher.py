@@ -305,6 +305,18 @@ def cache_game_manifest(folder, manifest):
     os.replace(temp, cache)
 
 
+def fetch_channel_manifest(folder, session):
+    import game_channel
+    import importlib.util
+    parser = sys.modules.get('__main__')
+    if not hasattr(parser, 'parse_game_manifest'):
+        spec = importlib.util.spec_from_file_location('silver_manifest_parser', ROOT / 'Get-HeyListen.py')
+        parser = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(parser)
+    with game_channel.install_lock(folder):
+        return game_channel.fetch_for_folder(folder, lambda url: game_channel.fetch_bytes(session, url), lambda data: parser.parse_game_manifest(data.decode('utf-8-sig')))
+
+
 def fetch_ownership_manifest():
     with urllib.request.urlopen(game_manifest_url(), timeout=10) as response:
         return json.load(response)
@@ -990,21 +1002,8 @@ class LauncherUI:
                 for attempt in range(2):
                     try:
                         with curl_requests.Session(impersonate='chrome', curl_options=options) as client:
-                            response = client.get(game_manifest_url(), stream=True, timeout=(10, 30))
-                            try:
-                                response.raise_for_status()
-                                total = int(response.headers.get('content-length') or 0)
-                                chunks, received = [], 0
-                                for chunk in response.iter_content(1024 * 1024):
-                                    if not chunk:
-                                        continue
-                                    chunks.append(chunk)
-                                    received += len(chunk)
-                                    self.events.publish('status', f'Fetching manifest… ({received / 1_000_000:.1f} of {total / 1_000_000:.1f} MB)' if total else f'Fetching manifest… ({received / 1_000_000:.1f} MB)')
-                                self.events.publish('status', 'Planning…')
-                                manifest = json.loads(b''.join(chunks))
-                            finally:
-                                response.close()
+                            manifest = fetch_channel_manifest(self.folder, client)
+                            self.events.publish('status', 'Planning…')
                         break
                     except Exception:
                         if attempt:
