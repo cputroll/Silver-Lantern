@@ -170,13 +170,16 @@ def log_message(message):
         pass
 
 
-def powershell(script, wait=True):
+def powershell(script, wait=True, timeout=None):
     encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
     args = ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     if wait:
-        return subprocess.run(args, check=True, creationflags=flags, stderr=subprocess.PIPE)
+        return subprocess.run(args, check=True, creationflags=flags, stderr=subprocess.PIPE, timeout=timeout)
     return subprocess.Popen(args, creationflags=flags, close_fds=True)
+
+
+DEFENDER_TIMEOUT = 75  # seconds to wait for the UAC consent prompt before giving up
 
 
 def defender_elevated(folder, enable):
@@ -187,9 +190,10 @@ def defender_elevated(folder, enable):
     script = ("$ErrorActionPreference='Stop'; try { $p=Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden "
               "-ArgumentList '-NoProfile -NonInteractive -EncodedCommand " + encoded + "'; if ($null -eq $p) { exit 1 }; exit $p.ExitCode } catch { exit 1 }")
     try:
-        powershell(script)
+        powershell(script, timeout=DEFENDER_TIMEOUT)
         return True
     except (OSError, subprocess.SubprocessError):
+        # Timeout, denial, or a failure: the exclusion is only an optimization. Never fatal.
         return False
 
 
@@ -203,16 +207,22 @@ def defender_config():
 def optimize_defender(folder):
     config = defender_config()
     folder = Path(folder).resolve()
-    if config.get('defender_state') == 'on':
+    state = config.get('defender_state')
+    if state == 'on':
         if config.get('defender_path') == str(folder):
             return True
         # Never lose track of an exclusion when the game folder changes.
         return False
-    log_message('Optimizing for a faster install — click Yes if Windows asks.')
+    if state in ('unknown', 'declined'):
+        # Previously denied or timed out; don't nag every run. Clear the config to ask again.
+        return False
+    log_message('Waiting for Windows permission… click Yes if Windows asks.')
     success = defender_elevated(folder, True)
-    config['defender_state'] = 'on' if success else 'unknown'
+    config['defender_state'] = 'on' if success else 'declined'
     if success:
         config['defender_path'] = str(folder)
+    else:
+        log_message('Continuing without optimizing.')
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     tmp = CONFIG.with_suffix('.tmp')
     tmp.write_text(json.dumps(config), encoding='utf-8')
@@ -1634,7 +1644,8 @@ class LauncherUI:
         if pct is not None:
             p.text('figure', f'{pct}%', x - 2, 204, INK)
         else:
-            p.text('body', 'Please wait — this usually takes under a minute.' if tool else 'Getting things ready…', x, 250, INK_DIM, max_width=bar_w)
+            body = 'Please wait — this usually takes under a minute.' if tool else (self.progress or 'Getting things ready…')
+            p.text('body', body, x, 250, INK_DIM, max_width=bar_w)
         p.fill(x, 300, bar_w, 12, (255, 255, 255), 30, 6)
         if pct is not None:
             fill = self.ease('bar', bar_w * max(0, min(100, pct)) / 100, dt, rate=.12)
@@ -1655,8 +1666,9 @@ class LauncherUI:
                 right += ('  ·  ' if right else '') + fmt_eta((total - done) / speed) + ' left'
             if right:
                 p.text('body', right, x + bar_w, 326, INK_DIM, align='right')
-        detail = self.progress if not tool else "The launcher restarts by itself when it's done."
-        p.text('caption', detail, x, 364, INK_FAINT, max_width=bar_w, middle=True)
+        if pct is not None or tool:
+            detail = self.progress if not tool else "The launcher restarts by itself when it's done."
+            p.text('caption', detail, x, 364, INK_FAINT, max_width=bar_w, middle=True)
         buttons = self.buttons()
         if buttons:
             self.draw_rows(p, buttons, x, 420, 240, 50, 10, dt)
