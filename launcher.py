@@ -220,6 +220,55 @@ def remove_registration():
             pass
 
 
+def cache_game_manifest(folder, manifest):
+    cache = folder / '.heylisten-get' / 'game-manifest.json'
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    temp = cache.with_suffix('.tmp')
+    temp.write_text(json.dumps(manifest), encoding='utf-8')
+    os.replace(temp, cache)
+
+
+def fetch_ownership_manifest():
+    with urllib.request.urlopen(game_manifest_url(), timeout=10) as response:
+        return json.load(response)
+
+
+def ownership_manifest(folder):
+    try:
+        with (folder / '.heylisten-get' / 'game-manifest.json').open(encoding='utf-8') as stream:
+            manifest = json.load(stream)
+        if not isinstance(manifest.get('files'), list):
+            raise ValueError('invalid manifest')
+        return manifest
+    except (OSError, ValueError, AttributeError):
+        try:
+            manifest = fetch_ownership_manifest()
+            return manifest if isinstance(manifest.get('files'), list) else None
+        except (OSError, ValueError, AttributeError):
+            return None
+
+
+def manifest_owned_files(folder, manifest):
+    result = []
+    root = folder.resolve()
+    for item in (manifest or {}).get('files', []):
+        try:
+            name = item['path']
+            if not isinstance(name, str) or '\\' in name or ':' in name:
+                continue
+            parts = name.split('/')
+            if any(part in ('', '.', '..') or part.casefold() == 'user' for part in parts):
+                continue
+            path = folder.joinpath(*parts)
+            if path.is_symlink() or not path.resolve().is_relative_to(root):
+                continue
+            if path.is_file() and path.stat().st_size == item['size']:
+                result.append(path)
+        except (OSError, KeyError, TypeError):
+            continue
+    return result
+
+
 def load_game_folder():
     try:
         value = json.loads(CONFIG.read_text(encoding='utf-8')).get('game_dir')
@@ -754,6 +803,11 @@ class LauncherUI:
                         if attempt:
                             raise
                         self.events.publish('status', 'Connection stalled — retrying…')
+                if isinstance(manifest.get('files'), list):
+                    try:
+                        cache_game_manifest(self.folder, manifest)
+                    except OSError:
+                        pass
                 # TODO v1.5: cache the verified manifest hash after installation.
                 digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
                 self.events.publish('check', (manifest.get('revision'), digest))

@@ -1965,7 +1965,10 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             if not path.is_file() or path.is_symlink():
                 continue
             relative = path.relative_to(root)
-            if any(x.casefold() == 'user' for x in relative.parts[:-1]) or (keep_assets and relative.parts[0].casefold() == '.heylisten-parts'):
+            if (relative.as_posix().casefold() == 'ocarina of time.exe'
+                    or relative.parts[0].casefold() == '.heylisten-get'
+                    or any(x.casefold() == 'user' for x in relative.parts[:-1])
+                    or (keep_assets and relative.parts[0].casefold() == '.heylisten-parts')):
                 continue
             if relative.as_posix().casefold() in wanted or path.name.casefold() == 'game-manifest.json' or (manifest_resolved and path.resolve() == manifest_resolved):
                 continue
@@ -2303,6 +2306,14 @@ def self_update_step(s, a) -> int | None:
     return None
 
 
+def cache_game_manifest(folder: Path, manifest: dict) -> None:
+    cache = folder / '.heylisten-get' / 'game-manifest.json'
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    temporary = cache.with_suffix('.tmp')
+    temporary.write_text(json.dumps(manifest), encoding='utf-8')
+    os.replace(temporary, cache)
+
+
 def install_from_manifest(s, a, folder: Path) -> None:
     step("Game file list")
     try:
@@ -2312,6 +2323,8 @@ def install_from_manifest(s, a, folder: Path) -> None:
         done("failed", "yellow")
         raise
     done("up to date")
+    if not a.dry_run:
+        cache_game_manifest(folder, game_manifest)
     local_manifest = None if urlparse(a.game_manifest).scheme in ('http', 'https') else Path(a.game_manifest).expanduser()
     with keep_awake():
         install_game(None, game_manifest, folder, a.dry_run, a.prune, local_manifest, a.keep_assets)
