@@ -1,6 +1,6 @@
 # Silver Lantern
 
-Silver Lantern installs the game for you and keeps it up to date. The app installs itself into the game folder as Ocarina of Time.exe.
+Silver Lantern installs the game for you and keeps it up to date. The app installs itself into the game folder.
 
 ## What you need
 
