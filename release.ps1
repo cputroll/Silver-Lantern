@@ -12,9 +12,13 @@ try {
   $version = (Get-Content sources.json -Raw | ConvertFrom-Json).tool.version
   if ($Tag -cne "v$version") { throw "Tag $Tag does not match v$version in sources.json." }
 
-  # The packaging test invokes this script, so run only the non-packaging suite here.
-  python -m unittest test_updater
-  if ($LASTEXITCODE -ne 0) { throw "Updater tests failed ($LASTEXITCODE)." }
+  # Discover every fast test module; test_release invokes this script to package.
+  $testModules = @(Get-ChildItem -Path $here -Filter 'test*.py' -File |
+    Where-Object { $_.BaseName -ne 'test_release' } |
+    Sort-Object Name | ForEach-Object { $_.BaseName })
+  if ($testModules.Count -eq 0) { throw 'No fast test modules were found.' }
+  python -m unittest @testModules
+  if ($LASTEXITCODE -ne 0) { throw "Tests failed ($LASTEXITCODE)." }
 
   $out = Join-Path $here 'dist-release'
   $stage = Join-Path $out 'stage'

@@ -2,4 +2,10 @@
 - [x] Establish goal-mode scheduling in this session (hourly task b1ca7e29-46b5-41da-9282-c649424d97e9).
 - [x] Repair updater with safe staging, versioning, verification and rollback.
 - [x] Test failure cases and real packaged EXE update. Packaged helper replacement/relaunch and missing-replacement rollback passed; mocked release-to-relaunch passed. Fresh suite: 15 tests OK. Live GitHub update remains untested until release.
-- [ ] BLOCKED: Public release contains third-party game links; ask owner how to proceed before publishing. Manifest recovery, builder checksum and CI gates fixed. Update ZIP and checksum share a trust source (not signed). Live GitHub update untested until release. Goal and watchdog schedules deleted while blocked.
+- [x] Public repo created: github.com/cputroll/Silver-Lantern (main pushed, v1.2.0 tag pushed, release pending).
+- [x] SHIPPED v1.2.0: https://github.com/cputroll/Silver-Lantern/releases/tag/v1.2.0 — workflow green, SHA256SUMS matches zip, all 6 files present, EXE --version == 1.2.0, live --self-update against the real release reports 'up to date (1.2.0)', main/tag at 5442ee5. First broken publish deleted with 0 downloads.
+- [x] GPU-aware preset (commit 2db9982 on main): DLSS when RTX + ngx dll, else FSR 3.1 Performance (dlss=3, resolution=4, reflex=0); 31 tests pass; no tag.
+- [ ] v1.3.0 lane A (UI implementation from ui-spec.md) and lane B (CI/docs hardening), parallel, disjoint files; shipper agent afterwards: bump version, tag v1.3.0, watch CI, verify release.
+- [ ] UI spec (Opus agent ses_e191b276cffe62MTLStXmLBdIk, active, read-only): console UX design for v1.3.0 (progress bar, friendly errors, next-steps finish, log file, pause-on-error).
+- [ ] v1.3.0 backlog from code review: H4 retries/backoff + fresh token on 403, H5 helper error visibility, H3 pin builder repo in code + reject http manifests, M1 stale backup recovery, M2 stage cleanup, M3 relaunch arg fix, M5 stream_to edge cases, M6 plain-English Windows errors, M7 README SmartScreen note, M8 run all tests in CI, hash cache for 25 GB re-verify.
+- Known/accepted: update ZIP and checksum share a trust source (not signed); third-party game links published at owner's direction.
