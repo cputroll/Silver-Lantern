@@ -1364,6 +1364,8 @@ class LauncherUI:
                 if self.state == State.READY and installed_manifest_digest(self.folder) != digest:
                     self.state = State.UPDATE_AVAILABLE
                     self.status = 'A game data update may be available.'
+                    if self.operation is None and self.screen == 'main':
+                        self.start_operation(True)
                 else: self.status = 'Game data: ' + (str(revision) if revision is not None else 'unversioned')
             elif kind == 'tool_check':
                 match = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)', value)

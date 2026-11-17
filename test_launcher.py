@@ -271,6 +271,28 @@ class StateTests(unittest.TestCase):
             check.assert_called_once()
             install.assert_not_called()
 
+    def test_detected_game_update_starts_automatically_when_idle(self):
+        with patch.object(LauncherUI, 'check_updates'), patch.object(launcher, 'installed_manifest_digest', return_value='old'):
+            ui = LauncherUI()
+            ui.state = State.READY
+            ui.screen = 'main'
+            ui.operation = None
+            ui.events.publish('check', (2, 'new'))
+            with patch.object(ui, 'start_operation') as start:
+                ui.drain()
+            start.assert_called_once_with(True)
+
+    def test_detected_game_update_does_not_interrupt_active_operation(self):
+        with patch.object(LauncherUI, 'check_updates'), patch.object(launcher, 'installed_manifest_digest', return_value='old'):
+            ui = LauncherUI()
+            ui.state = State.READY
+            ui.screen = 'main'
+            ui.operation = 'game'
+            ui.events.publish('check', (2, 'new'))
+            with patch.object(ui, 'start_operation') as start:
+                ui.drain()
+            start.assert_not_called()
+
     def test_equal_tool_version_does_not_handoff(self):
         with patch.object(LauncherUI, 'check_updates'):
             ui = LauncherUI()
