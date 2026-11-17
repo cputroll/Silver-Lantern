@@ -38,4 +38,4 @@ class DefenderTests(unittest.TestCase):
             folder = Path(d) / 'game'
             launcher.optimize_defender(folder)
             launcher.remove_defender_exclusion()
-            self.assertEqual(elevated.call_args.args, (folder, False))
+            self.assertEqual(elevated.call_args.args, (folder.resolve(), False))
