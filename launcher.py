@@ -915,6 +915,7 @@ TYPE = {'display': ('segoeuib.ttf', 64), 'title': ('seguisb.ttf', 36), 'figure':
         'heading': ('seguisb.ttf', 22), 'body': ('segoeui.ttf', 20), 'button': ('seguisb.ttf', 20),
         'cta': ('segoeuib.ttf', 24), 'caption': ('segoeui.ttf', 16), 'overline': ('seguisb.ttf', 14)}
 MARGIN = 96
+FOCUS_GAP = 5  # uniform space between a focused control and its accent outline
 
 
 def render_density(width, height):
@@ -1132,22 +1133,62 @@ class Painter:
             spans.append((x + inset, y + row, w - 2 * inset, 1))
         self._spans(spans, color, alpha)
 
+    @staticmethod
+    def _row_extent(cy, x0, y0, x1, y1, rad):
+        """Horizontal extent of a rounded rect at scanline `cy` (device space), or None."""
+        if cy < y0 or cy > y1:
+            return None
+        if cy < y0 + rad:
+            k = (y0 + rad) - cy
+            arc = math.sqrt(max(0.0, rad * rad - k * k))
+            return (x0 + rad) - arc, (x1 - rad) + arc
+        if cy > y1 - rad:
+            k = cy - (y1 - rad)
+            arc = math.sqrt(max(0.0, rad * rad - k * k))
+            return (x0 + rad) - arc, (x1 - rad) + arc
+        return x0, x1
+
     def ring(self, x, y, w, h, color, alpha=255, radius=0, thickness=2):
-        x, y, w, h = int(x), int(y), int(w), int(h)
-        if w <= 2 * thickness or h <= 2 * thickness:
+        """Even, crisp rounded outline rasterized in device pixels.
+
+        Computing the stroke per device row (instead of scaling logical spans) keeps the
+        stroke weight and the corner arcs uniform at fractional DPI -- no scale stripes.
+        """
+        s = self.s
+        width, height = ctypes.c_int(), ctypes.c_int()
+        if s.SDL_GetRendererOutputSize(self.r, ctypes.byref(width), ctypes.byref(height)) != 0:
             return
-        radius = min(int(radius), w // 2, h // 2)
-        inner_r = max(0, radius - thickness)
+        scale = min(width.value / CANVAS[0], height.value / CANVAS[1])
+        if scale <= 0:
+            return
+        ox = round((width.value - CANVAS[0] * scale) / 2)
+        oy = round((height.value - CANVAS[1] * scale) / 2)
+        x0, y0 = x * scale, y * scale
+        x1, y1 = (x + w) * scale, (y + h) * scale
+        if x1 <= x0 or y1 <= y0:
+            return
+        rad = min(radius * scale, (x1 - x0) / 2, (y1 - y0) / 2)
+        th = max(1.0, thickness * scale)
+        inner_rad = max(0.0, rad - th)
         spans = []
-        for row in range(h):
-            a = self._inset(w, h, radius, row)
-            if row < thickness or row >= h - thickness:
-                spans.append((x + a, y + row, w - 2 * a, 1))
-            else:
-                b = thickness + self._inset(w - 2 * thickness, h - 2 * thickness, inner_r, row - thickness)
-                spans.append((x + a, y + row, b - a, 1))
-                spans.append((x + w - b, y + row, b - a, 1))
-        self._spans(spans, color, alpha)
+        for dy in range(int(math.floor(y0)), int(math.ceil(y1))):
+            cy = dy + 0.5
+            outer = self._row_extent(cy, x0, y0, x1, y1, rad)
+            if outer is None:
+                continue
+            inner = self._row_extent(cy, x0 + th, y0 + th, x1 - th, y1 - th, inner_rad)
+            segs = [(outer[0], outer[1])] if inner is None else [(outer[0], inner[0]), (inner[1], outer[1])]
+            for a, b in segs:
+                pa, pb = int(round(a)), int(round(b))
+                if pb > pa:
+                    spans.append((ox + pa, oy + dy, pb - pa))
+        if not spans:
+            return
+        s.SDL_SetRenderDrawColor(self.r, *color, int(max(0, min(255, alpha))))
+        rects = (s.SDL_Rect * len(spans))(*[s.SDL_Rect(*span) for span in spans])
+        s.SDL_RenderSetLogicalSize(self.r, 0, 0)
+        s.SDL_RenderFillRects(self.r, rects, len(spans))
+        s.SDL_RenderSetLogicalSize(self.r, *CANVAS)
 
     def circle(self, cx, cy, radius, color, alpha=255):
         self.fill(cx - radius, cy - radius, 2 * radius, 2 * radius, color, alpha, radius)
@@ -1660,7 +1701,7 @@ class LauncherUI:
         if first <= self.focus < first + len(labels):
             fy = self.ease('focus', y + (self.focus - first) * (h + gap), dt)
             p.fill(x, fy, w, h, SURFACE_FOCUS, 255, 10)
-            p.ring(x, fy, w, h, ACCENT, 255, 10, 2)
+            p.ring(x - FOCUS_GAP, fy - FOCUS_GAP, w + 2 * FOCUS_GAP, h + 2 * FOCUS_GAP, ACCENT, 255, 10 + FOCUS_GAP, 2)
         for i, label in enumerate(labels):
             index, top = first + i, y + i * (h + gap)
             focused = index == self.focus
@@ -1722,7 +1763,7 @@ class LauncherUI:
             self.hits.append((x, top, w, h, 0))
             p.fill(x, top, w, h, ACCENT, 255, 12)
             if self.focus == 0:
-                p.ring(x - 6, top - 6, w + 12, h + 12, ACCENT, 220, 17, 2)
+                p.ring(x - FOCUS_GAP, top - FOCUS_GAP, w + 2 * FOCUS_GAP, h + 2 * FOCUS_GAP, ACCENT, 220, 11 + FOCUS_GAP, 2)
             p.text('cta', cta, x + w // 2, top + (h - p.height('cta')) // 2, ACCENT_INK, max_width=w - 40, align='center')
             rows, first = buttons[1:], 1
         else:
@@ -1854,7 +1895,7 @@ class LauncherUI:
             focused = picker is None and self.focus == i
             p.fill(ax, ay, aw, ah, SURFACE_FOCUS if focused else SURFACE_HI, 255 if focused else 200, 10)
             if focused:
-                p.ring(ax, ay, aw, ah, ACCENT, 255, 10, 2)
+                p.ring(ax - FOCUS_GAP, ay - FOCUS_GAP, aw + 2 * FOCUS_GAP, ah + 2 * FOCUS_GAP, ACCENT, 255, 10 + FOCUS_GAP, 2)
             p.text('button', label, ax + 20, ay + (ah - p.height('button')) // 2, ACCENT if i == 0 else INK)
             if picker is None:
                 self.hits.append((ax, ay, aw, ah, i))
@@ -1888,7 +1929,7 @@ class LauncherUI:
         if focus_y is not None:
             fy = self.ease('focus', focus_y, dt)
             p.fill(x, fy, w, 44, SURFACE_FOCUS, 255, 10)
-            p.ring(x, fy, w, 44, ACCENT, 255, 10, 2)
+            p.ring(x - FOCUS_GAP, fy - FOCUS_GAP, w + 2 * FOCUS_GAP, 44 + 2 * FOCUS_GAP, ACCENT, 255, 10 + FOCUS_GAP, 2)
         for kind, idx, top, h in rows:
             y = view_top + top - scroll
             if kind != 'option' or y + h < view_top or y > view_top + view_h:

@@ -38,6 +38,20 @@ class RenderDensityTests(unittest.TestCase):
         self.assertEqual(ttf.TTF_CloseFont.call_count, len(launcher.TYPE))
         painter.close()
 
+    def test_ring_outline_is_symmetric_and_even(self):
+        # A rounded outline rasterized per device row must stay symmetric (even stroke).
+        x0, x1 = 0.0, 100.0
+        for cy in (0.5, 2.0, 9.0, 20.0, 31.0, 38.0, 39.5):
+            extent = launcher.Painter._row_extent(cy, x0, 0.0, x1, 40.0, 10.0)
+            if extent is not None:
+                left, right = extent
+                self.assertAlmostEqual(left + right, x0 + x1, places=5)
+        # Straight side spans the full width; corner rows narrow symmetrically.
+        self.assertEqual(launcher.Painter._row_extent(20.0, x0, 0.0, x1, 40.0, 10.0), (x0, x1))
+        left, right = launcher.Painter._row_extent(2.0, x0, 0.0, x1, 40.0, 10.0)
+        self.assertGreater(left, x0)
+        self.assertLess(right, x1)
+
 
 if __name__ == '__main__':
     unittest.main()
