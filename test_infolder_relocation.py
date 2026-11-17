@@ -16,6 +16,14 @@ class RelocationTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b'exe'); self.assertTrue(source.exists())
             self.assertEqual(spawn.call_args.args[0], [str(target), '--gui'])
 
+    def test_existing_destination_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); source = root / 'source.exe'; source.write_bytes(b'exe'); game = root / 'game'; game.mkdir()
+            target = game / 'Ocarina of Time.exe'; target.write_bytes(b'user file')
+            with patch.dict(launcher.os.environ, {'LOCALAPPDATA': str(root)}), patch.object(launcher.sys, 'frozen', True, create=True), patch.object(launcher.sys, 'executable', str(source)), patch.object(launcher.subprocess, 'Popen'), patch.object(launcher, 'register_install'):
+                launcher.relocate_launcher(game)
+            self.assertEqual(target.read_bytes(), b'user file')
+
     def test_unwritable_game_uses_programs_fallback(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); source = root / 'source.exe'; source.write_bytes(b'exe'); game = root / 'game'

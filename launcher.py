@@ -98,13 +98,20 @@ def shortcut_path():
     return desktop / (GAME_NAME + '.lnk')
 
 
+def launcher_target(folder):
+    fallback = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Programs' / 'Ocarina of Time' / 'Ocarina of Time.exe'
+    if getattr(sys, 'frozen', False) and Path(sys.executable).resolve() == fallback.resolve():
+        return fallback
+    return Path(folder) / 'Ocarina of Time.exe'
+
+
 def create_shortcut(folder, enabled=True):
     link = shortcut_path()
     if not enabled:
         link.unlink(missing_ok=True)
         return
-    target = Path(folder) / 'Ocarina of Time.exe'
-    create_link(link, target, folder)
+    target = launcher_target(folder)
+    create_link(link, target, target.parent)
 
 
 def ps_quote(value):
@@ -189,7 +196,7 @@ OWNED_FILES += tuple('support/' + name for name in OWNED_FILES if name not in ('
 def register_install(folder):
     if winreg is None:
         return
-    exe = Path(folder) / 'Ocarina of Time.exe'
+    exe = launcher_target(folder)
     create_shortcut(Path(folder))
     link = start_menu_path()
     link.parent.mkdir(parents=True, exist_ok=True)
@@ -306,12 +313,14 @@ def relocate_launcher(folder):
     target = destination / 'Ocarina of Time.exe'
     if source == target.resolve():
         return False
-    staging = target.with_name(target.name + '.tmp')
-    try:
-        shutil.copy2(source, staging)
-        os.replace(staging, target)
-    finally:
-        staging.unlink(missing_ok=True)
+    if target.exists():
+        destination = fallback
+        probe_writable(destination)
+        target = destination / 'Ocarina of Time.exe'
+        if source == target.resolve():
+            return False
+    with source.open('rb') as original, target.open('xb') as copy:
+        shutil.copyfileobj(original, copy)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with LOG.open('a', encoding='utf-8') as log:
         log.write(f'Launcher relocation: {target}\n')
