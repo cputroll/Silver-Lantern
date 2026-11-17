@@ -11,6 +11,11 @@ from launcher import App, IllegalTransition, State, InputMapper, resolve_folder,
 
 
 class StateTests(unittest.TestCase):
+    def test_standalone_version_matches_release_version(self):
+        import json
+        version = json.loads((Path(launcher.__file__).parent / 'sources.json').read_text(encoding='utf-8'))['tool']['version']
+        self.assertEqual(launcher.APP_VERSION, version)
+
     def test_download_defers_space_check_to_installer_even_on_low_space(self):
         with tempfile.TemporaryDirectory() as d, patch.object(LauncherUI, 'check_updates'):
             ui = LauncherUI()
