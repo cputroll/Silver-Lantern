@@ -6,6 +6,20 @@ import launcher
 
 
 class InFolderUninstallTests(unittest.TestCase):
+    def test_generated_settings_removed_with_and_without_saves(self):
+        for purge in (False, True):
+            with self.subTest(purge=purge), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp); game = root / 'game'; saves = game / 'user'; saves.mkdir(parents=True)
+                (saves / 'save.dat').write_bytes(b'save')
+                (game / launcher.game_settings.INI_NAME).write_text('graphics settings')
+                with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'confirm_uninstall', return_value=True), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'ownership_manifest', return_value=None), patch.object(launcher, 'shortcut_path', return_value=root / 'desktop.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'start.lnk'), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'LOG', root / 'uninstall.log'), patch.object(launcher, 'schedule_owned_cleanup'):
+                    self.assertTrue(launcher.uninstall(purge_saves=purge))
+                if purge:
+                    self.assertFalse(game.exists())
+                else:
+                    self.assertEqual(list(game.iterdir()), [saves])
+                    self.assertEqual((saves / 'save.dat').read_bytes(), b'save')
+
     def test_preservation_count_is_logged(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); game = root / 'game'; game.mkdir(); (game / 'notes.txt').write_text('mine')

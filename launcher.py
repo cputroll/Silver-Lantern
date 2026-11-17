@@ -380,6 +380,7 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
         running = Path(sys.executable).resolve() if getattr(sys, 'frozen', False) else None
         owned = manifest_owned_files(folder, ownership_manifest(folder))
         owned.extend(folder / name for name in OWNED_FILES)
+        owned.append(folder / game_settings.INI_NAME)
         owned.append(folder / '.heylisten-get' / 'game-manifest.json')
         for path in owned:
             try:
