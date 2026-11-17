@@ -16,9 +16,51 @@ class StateTests(unittest.TestCase):
             output = Path(d) / 'screen.bmp'
             result = subprocess.run([sys.executable, str(Path(launcher.__file__)), '--screenshot', str(output)], capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
-            for name in ('main', 'progress', 'settings'):
+            for name in ('main', 'hero-download', 'progress', 'tool-update', 'settings', 'folder', 'update', 'error'):
                 frame = output.with_name('screen-' + name + '.bmp')
-                self.assertGreater(frame.stat().st_size, 0)
+                # A full 1280x720x32 BMP; an empty or missing frame fails here.
+                self.assertGreater(frame.stat().st_size, 1280 * 720 * 3, name)
+
+    def test_backdrop_asset_ships(self):
+        self.assertTrue((Path(launcher.__file__).parent / 'assets' / 'ui-backdrop.bmp').is_file())
+        release = (Path(launcher.__file__).parent / 'release.ps1').read_text(encoding='utf-8')
+        self.assertIn('ui-backdrop.bmp', release)
+
+    def test_no_controller_nag(self):
+        source = Path(launcher.__file__).read_text(encoding='utf-8')
+        self.assertNotIn('No controller found', source)
+
+    def test_gui_progress_line_parsed(self):
+        info = launcher.parse_progress('HLPROGRESS phase=Downloading done=500 total=1000 speed=2048\n')
+        self.assertEqual((info['pct'], info['done'], info['total'], info['speed'], info['phase']), (50, 500, 1000, 2048, 'Downloading'))
+        self.assertEqual(launcher.parse_progress('HLPROGRESS done=x total=1')['text'] if launcher.parse_progress('HLPROGRESS done=x total=1') else None, None)
+
+    def test_progress_info_reaches_ui(self):
+        with patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.events.publish('progress', launcher.parse_progress('HLPROGRESS phase=Downloading done=63 total=100 speed=10'))
+            ui.drain()
+            self.assertEqual(ui.progress_info['pct'], 63)
+            self.assertEqual(ui.progress, 'Downloading: 63%')
+
+    def test_cli_emits_gui_progress_when_requested(self):
+        import io, importlib.util
+        from contextlib import redirect_stdout
+        spec = importlib.util.spec_from_file_location('hl_cli', Path(launcher.__file__).parent / 'Get-HeyListen.py')
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        out, t = io.StringIO(), [0.0]
+        with patch.dict(os.environ, {'SILVER_LANTERN_GUI_PROGRESS': '1'}), redirect_stdout(out):
+            bar = cli.Progress('Downloading', 100, tty=False, clock=lambda: t[0])
+            for _ in range(4):
+                t[0] += 1; bar.add(25)
+        lines = [l for l in out.getvalue().splitlines() if l.startswith('HLPROGRESS ')]
+        self.assertTrue(lines)
+        self.assertEqual(launcher.parse_progress(lines[-1])['pct'], 100)
+
+    def test_format_helpers(self):
+        self.assertEqual(launcher.fmt_bytes(int(33.05 * 1024 ** 3)), '33.0 GB')
+        self.assertEqual(launcher.fmt_eta(214), '3 min 34 s')
+        self.assertEqual(launcher.fmt_eta(3700), '1 h 01 min')
 
     def test_tool_worker_invocation_and_success(self):
         events = ProgressEvents()

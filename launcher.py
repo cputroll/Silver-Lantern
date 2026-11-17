@@ -5,6 +5,7 @@ import threading
 import argparse
 import ctypes
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -268,7 +269,37 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
     return True
 
 
+def fmt_bytes(n):
+    n = float(n or 0)
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if n < 1024 or unit == 'GB':
+            return f'{n:.0f} {unit}' if unit == 'B' else f'{n:.1f} {unit}'
+        n /= 1024
+    return f'{n:.1f} GB'
+
+
+def fmt_eta(seconds):
+    seconds = max(0, int(seconds))
+    h, rest = divmod(seconds, 3600)
+    m, s = divmod(rest, 60)
+    if h:
+        return f'{h} h {m:02d} min'
+    if m:
+        return f'{m} min {s:02d} s'
+    return f'{s} s'
+
+
 def parse_progress(line):
+    if line.startswith('HLPROGRESS '):
+        fields = dict(re.findall(r'(\w+)=([^ ]+)', line[11:]))
+        try:
+            done, total, speed = (int(fields.get(k, 0)) for k in ('done', 'total', 'speed'))
+        except ValueError:
+            return None
+        phase = fields.get('phase', 'Downloading').replace('_', ' ')
+        pct = done * 100 // total if total > 0 else None
+        text = f'{phase}: {pct}%' if pct is not None else phase
+        return {'text': text, 'phase': phase, 'done': done, 'total': total, 'speed': speed, 'pct': pct}
     if line.startswith('HLUPDATE '):
         return dict(re.findall(r'(\w+)=([^ ]+)', line[9:]))
     if 'Downloading:' in line:
@@ -279,7 +310,8 @@ def parse_progress(line):
 def worker_command(events, args):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        process = subprocess.Popen(cli_command(*args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
+        env = dict(os.environ, SILVER_LANTERN_GUI_PROGRESS='1')
+        process = subprocess.Popen(cli_command(*args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, env=env, creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
         events.process = process
         if events.cancelled.is_set():
             terminate_worker(events)
@@ -424,6 +456,203 @@ class App:
             raise IllegalTransition(f'{self.state.name} -> {state.name}')
         self.state = state
 
+# ---------------------------------------------------------------- look
+# One logical canvas, a dark palette with a single warm accent, and a fixed type scale.
+CANVAS = (1280, 720)
+ACCENT = (232, 192, 112)
+ACCENT_INK = (24, 18, 8)
+INK = (238, 240, 243)
+INK_DIM = (168, 176, 184)
+INK_FAINT = (116, 124, 132)
+SURFACE = (14, 18, 23)
+SURFACE_HI = (36, 43, 52)
+SURFACE_FOCUS = (52, 61, 72)
+DANGER = (240, 128, 112)
+SUCCESS = (120, 204, 150)
+TYPE = {'display': ('segoeuib.ttf', 64), 'title': ('seguisb.ttf', 36), 'figure': ('segoeuil.ttf', 56),
+        'heading': ('seguisb.ttf', 22), 'body': ('segoeui.ttf', 20), 'button': ('seguisb.ttf', 20),
+        'cta': ('segoeuib.ttf', 24), 'caption': ('segoeui.ttf', 16), 'overline': ('seguisb.ttf', 14)}
+MARGIN = 96
+
+
+class Painter:
+    """Measured text, rounded shapes and the backdrop; every string is fitted, never clipped."""
+
+    def __init__(self, s, ttf, renderer):
+        self.s, self.ttf, self.r = s, ttf, renderer
+        fonts = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts'
+        self.fonts, self.cache, self.backdrop = {}, {}, None
+        for role, (name, size) in TYPE.items():
+            font = None
+            for candidate in (name, 'segoeui.ttf'):
+                font = ttf.TTF_OpenFont(str(fonts / candidate).encode(), size)
+                if font:
+                    break
+            if not font:
+                raise RuntimeError('Could not open the system font')
+            self.fonts[role] = font
+        art = ROOT / 'assets' / 'ui-backdrop.bmp'
+        if art.is_file():
+            surface = s.SDL_LoadBMP(str(art).encode())
+            if surface:
+                self.backdrop = s.SDL_CreateTextureFromSurface(renderer, surface)
+                s.SDL_FreeSurface(surface)
+        s.SDL_SetRenderDrawBlendMode(renderer, s.SDL_BLENDMODE_BLEND)
+
+    def close(self):
+        for texture, _, _ in self.cache.values():
+            self.s.SDL_DestroyTexture(texture)
+        self.cache.clear()
+        if self.backdrop:
+            self.s.SDL_DestroyTexture(self.backdrop)
+        for font in self.fonts.values():
+            self.ttf.TTF_CloseFont(font)
+
+    # -- text
+    def measure(self, role, value):
+        w, h = ctypes.c_int(), ctypes.c_int()
+        if self.ttf.TTF_SizeUTF8(self.fonts[role], str(value).encode('utf-8'), ctypes.byref(w), ctypes.byref(h)) != 0:
+            return 10 ** 6, 0
+        return w.value, h.value
+
+    def height(self, role):
+        return self.ttf.TTF_FontHeight(self.fonts[role])
+
+    def fit(self, role, value, max_width):
+        value = str(value)
+        if self.measure(role, value)[0] <= max_width:
+            return value
+        lo, hi = 0, len(value)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self.measure(role, value[:mid].rstrip() + '…')[0] <= max_width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return value[:lo].rstrip() + '…' if self.measure(role, '…')[0] <= max_width else ''
+
+    def fit_middle(self, role, value, max_width):
+        """Paths keep their start and their end."""
+        value = str(value)
+        if self.measure(role, value)[0] <= max_width:
+            return value
+        lo, hi = 0, len(value)
+        clip = lambda n: value[:n - n // 2] + '…' + value[len(value) - n // 2:] if n else '…'
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self.measure(role, clip(mid))[0] <= max_width:
+                lo = mid
+            else:
+                hi = mid - 1
+        return clip(lo) if self.measure(role, clip(lo))[0] <= max_width else ''
+
+    def wrap(self, role, value, max_width, max_lines=3):
+        lines, current = [], ''
+        for word in str(value).split():
+            trial = (current + ' ' + word).strip()
+            if current and self.measure(role, trial)[0] > max_width:
+                lines.append(current)
+                current = word
+            else:
+                current = trial
+        if current:
+            lines.append(current)
+        if len(lines) > max_lines:
+            lines = lines[:max_lines - 1] + [' '.join(lines[max_lines - 1:])]
+        return [self.fit(role, line, max_width) for line in lines]
+
+    def text(self, role, value, x, y, color=INK, max_width=None, align='left', alpha=255, middle=False):
+        """Draw fitted text; returns the drawn width."""
+        s = self.s
+        value = str(value)
+        if max_width is not None:
+            value = (self.fit_middle if middle else self.fit)(role, value, max_width)
+        if not value:
+            return 0
+        key = (role, value, color)
+        if key not in self.cache:
+            if len(self.cache) > 400:
+                for texture, _, _ in self.cache.values():
+                    s.SDL_DestroyTexture(texture)
+                self.cache.clear()
+            surface = self.ttf.TTF_RenderUTF8_Blended(self.fonts[role], value.encode('utf-8'), s.SDL_Color(*color, 255))
+            if not surface:
+                return 0
+            texture = s.SDL_CreateTextureFromSurface(self.r, surface)
+            self.cache[key] = (texture, surface.contents.w, surface.contents.h)
+            s.SDL_FreeSurface(surface)
+        texture, w, h = self.cache[key]
+        if align == 'center':
+            x -= w // 2
+        elif align == 'right':
+            x -= w
+        s.SDL_SetTextureAlphaMod(texture, alpha)
+        s.SDL_RenderCopy(self.r, texture, None, s.SDL_Rect(int(x), int(y), w, h))
+        return w
+
+    # -- shapes
+    @staticmethod
+    def _inset(w, h, radius, row):
+        if radius <= 0:
+            return 0
+        if row < radius:
+            dy = radius - row - .5
+        elif row >= h - radius:
+            dy = row - (h - radius) + .5
+        else:
+            return 0
+        return radius - int(round(max(0.0, radius * radius - dy * dy) ** .5))
+
+    def _spans(self, spans, color, alpha):
+        s = self.s
+        if not spans:
+            return
+        s.SDL_SetRenderDrawColor(self.r, *color, int(max(0, min(255, alpha))))
+        rects = (s.SDL_Rect * len(spans))(*[s.SDL_Rect(*span) for span in spans])
+        s.SDL_RenderFillRects(self.r, rects, len(spans))
+
+    def fill(self, x, y, w, h, color, alpha=255, radius=0):
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        if w <= 0 or h <= 0:
+            return
+        radius = min(int(radius), w // 2, h // 2)
+        spans = [(x, y + radius, w, h - 2 * radius)] if h > 2 * radius else []
+        for row in list(range(radius)) + list(range(h - radius, h)):
+            inset = self._inset(w, h, radius, row)
+            spans.append((x + inset, y + row, w - 2 * inset, 1))
+        self._spans(spans, color, alpha)
+
+    def ring(self, x, y, w, h, color, alpha=255, radius=0, thickness=2):
+        x, y, w, h = int(x), int(y), int(w), int(h)
+        if w <= 2 * thickness or h <= 2 * thickness:
+            return
+        radius = min(int(radius), w // 2, h // 2)
+        inner_r = max(0, radius - thickness)
+        spans = []
+        for row in range(h):
+            a = self._inset(w, h, radius, row)
+            if row < thickness or row >= h - thickness:
+                spans.append((x + a, y + row, w - 2 * a, 1))
+            else:
+                b = thickness + self._inset(w - 2 * thickness, h - 2 * thickness, inner_r, row - thickness)
+                spans.append((x + a, y + row, b - a, 1))
+                spans.append((x + w - b, y + row, b - a, 1))
+        self._spans(spans, color, alpha)
+
+    def circle(self, cx, cy, radius, color, alpha=255):
+        self.fill(cx - radius, cy - radius, 2 * radius, 2 * radius, color, alpha, radius)
+
+    def scene(self, scrim=0):
+        """Key-art backdrop (or a plain dark fill), optionally dimmed for dense screens."""
+        s = self.s
+        s.SDL_SetRenderDrawColor(self.r, *SURFACE, 255)
+        s.SDL_RenderClear(self.r)
+        if self.backdrop:
+            s.SDL_RenderCopy(self.r, self.backdrop, None, None)
+        if scrim:
+            self.fill(0, 0, *CANVAS, SURFACE, scrim)
+
+
 class LauncherUI:
     def __init__(self):
         self.profile = Path(os.environ.get('USERPROFILE', str(Path.home())))
@@ -440,6 +669,7 @@ class LauncherUI:
         self.focus = 0
         self.status = 'Checking for updates…'
         self.progress = ''
+        self.progress_info = {}
         self.events = ProgressEvents()
         self.mapper = InputMapper()
         self.controllers = {}
@@ -566,6 +796,7 @@ class LauncherUI:
             return
         self.operation = 'update' if update else 'download'
         self.progress = 'Checking for updates…' if update else 'Fetching manifest…'
+        self.progress_info = {}
         self.state = State.UPDATING if update else State.DOWNLOADING
         self.events = ProgressEvents()
         args = ['--no-self-update', '--update-game' if update else '--install-game', str(self.folder)]
@@ -667,7 +898,14 @@ class LauncherUI:
             try: kind, value = self.events.queue.get_nowait()
             except queue.Empty: break
             if kind == 'status': self.status = str(value)
-            elif kind == 'progress': self.progress = value.get('text', str(value))
+            elif kind == 'progress':
+                self.progress = value.get('text', str(value)) if isinstance(value, dict) else str(value)
+                if isinstance(value, dict) and 'done' in value:
+                    self.progress_info = value
+                elif isinstance(value, dict) and value.get('text'):
+                    match = re.search(r'(\d{1,3})%', value['text'])
+                    if match and not self.progress_info.get('total'):
+                        self.progress_info = dict(self.progress_info, pct=min(100, int(match.group(1))))
             elif kind == 'complete':
                 self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
                 self.status = 'Ready to play.' if self.state == State.READY else 'Installation completed but game files were not found.'
@@ -730,6 +968,236 @@ class LauncherUI:
                 STATE_DIR.mkdir(parents=True, exist_ok=True)
                 with LOG.open('a', encoding='utf-8') as log: log.write('Shortcut: ' + str(exc) + '\n')
 
+    # ---------------------------------------------------------------- drawing
+    def free_space_text(self):
+        now = time.monotonic()
+        cached = getattr(self, '_free_cache', None)
+        if cached and cached[0] == self.folder and now - cached[1] < 2:
+            return cached[2]
+        parent = self.folder
+        while not parent.exists() and parent != parent.parent: parent = parent.parent
+        try: value = f'{shutil.disk_usage(parent).free / 1e9:.1f} GB free · about 40 GB needed'
+        except OSError: value = ''
+        self._free_cache = (self.folder, now, value)
+        return value
+
+    def ease(self, key, target, dt, rate=0.035):
+        """Exponential approach: ~95% of the way in about 105 ms."""
+        anim = self.__dict__.setdefault('anim', {})
+        current = anim.get(key, target)
+        if getattr(self, 'snap', False) or dt <= 0:
+            current = target
+        else:
+            current += (target - current) * (1 - math.exp(-dt / rate))
+            if abs(current - target) < .5:
+                current = target
+        anim[key] = current
+        return current
+
+    def row_spec(self, label):
+        """Split a settings label into (text, value, toggle) for display."""
+        for prefix in ('Desktop shortcut', 'Check for updates automatically'):
+            if label.startswith(prefix + ':'):
+                return prefix, None, label.endswith('On')
+        if label.startswith('Speed up installs'):
+            return 'Speed up installs', 'One Windows permission', None
+        if label == 'Change game folder':
+            return 'Game folder', str(self.folder), None
+        return label, None, None
+
+    def draw_rows(self, p, labels, x, y, w, h, gap, dt, first=0):
+        """Stacked rows with one eased focus highlight; registers mouse targets."""
+        for i, _ in enumerate(labels):
+            p.fill(x, y + i * (h + gap), w, h, SURFACE_HI, 165, 10)
+        if first <= self.focus < first + len(labels):
+            fy = self.ease('focus', y + (self.focus - first) * (h + gap), dt)
+            p.fill(x, fy, w, h, SURFACE_FOCUS, 255, 10)
+            p.ring(x, fy, w, h, ACCENT, 255, 10, 2)
+        for i, label in enumerate(labels):
+            index, top = first + i, y + i * (h + gap)
+            focused = index == self.focus
+            self.hits.append((x, top, w, h, index))
+            text, value, toggle = self.row_spec(label)
+            right = x + w - 20
+            if toggle is not None:
+                tw, th = 46, 26
+                tx, ty = right - tw, top + (h - th) // 2
+                p.fill(tx, ty, tw, th, ACCENT if toggle else (72, 80, 90), 255, th // 2)
+                p.circle(tx + (tw - th // 2 if toggle else th // 2), ty + th // 2, th // 2 - 4, ACCENT_INK if toggle else INK)
+                p.text('caption', 'On' if toggle else 'Off', tx - 12, top + (h - p.height('caption')) // 2, INK if toggle else INK_DIM, align='right')
+                right = tx - 70
+            elif value:
+                fitted = p.fit_middle('caption', value, (w - 40) // 2)
+                p.text('caption', fitted, right, top + (h - p.height('caption')) // 2, INK_DIM, align='right')
+                right -= p.measure('caption', fitted)[0] + 24
+            p.text('button', text, x + 20, top + (h - p.height('button')) // 2, INK if focused else (210, 215, 221), max_width=right - x - 20)
+
+    def draw_hints(self, p, items):
+        x, y = MARGIN, 672
+        for key, label in items:
+            kw = p.measure('overline', key)[0] + 16
+            p.fill(x, y, kw, 24, SURFACE_HI, 230, 6)
+            p.text('overline', key, x + 8, y + (24 - p.height('overline')) // 2, INK)
+            x += kw + 8
+            x += p.text('caption', label, x, y + (24 - p.height('caption')) // 2, INK_DIM) + 24
+
+    def status_tone(self):
+        status = self.status.lower()
+        if "couldn't" in status or 'could not' in status or 'fail' in status:
+            return DANGER
+        if 'available' in status:
+            return ACCENT
+        if 'up to date' in status or 'ready' in status or 'game data:' in status:
+            return SUCCESS
+        return INK_FAINT
+
+    def draw_hero(self, p, dt):
+        p.scene()
+        x = MARGIN
+        p.text('overline', 'THE LEGEND OF ZELDA', x + 2, 160, ACCENT)
+        p.text('display', 'Ocarina of Time', x - 2, 176, INK, max_width=760)
+        if self.state == State.PLAYING:
+            subtitle = 'Have fun! The launcher waits here while you play.'
+        elif self.state in (State.READY, State.UPDATE_AVAILABLE):
+            subtitle = 'Installed and ready to play.'
+        else:
+            subtitle = 'Not installed yet · about a 33 GB download.'
+        p.text('body', subtitle, x, 270, INK_DIM, max_width=620)
+        buttons = self.buttons()
+        cta = {'Play': 'PLAY', 'Download': 'DOWNLOAD', 'Update now': 'UPDATE NOW'}.get(buttons[0]) if buttons else None
+        top, w = 336, 340
+        if cta:
+            h = 68
+            self.hits.append((x, top, w, h, 0))
+            p.fill(x, top, w, h, ACCENT, 255, 12)
+            if self.focus == 0:
+                p.ring(x - 6, top - 6, w + 12, h + 12, ACCENT, 220, 17, 2)
+            p.text('cta', cta, x + w // 2, top + (h - p.height('cta')) // 2, ACCENT_INK, max_width=w - 40, align='center')
+            rows, first = buttons[1:], 1
+        else:
+            h = 68
+            p.fill(x, top, w, h, SURFACE_HI, 200, 12)
+            p.circle(x + 30, top + h // 2, 6, SUCCESS)
+            p.text('cta', 'NOW PLAYING', x + 50, top + (h - p.height('cta')) // 2, INK, max_width=w - 70)
+            rows, first = buttons, 0
+        self.draw_rows(p, rows, x, top + h + 22, w, 50, 10, dt, first)
+        p.circle(x + 5, 626 + p.height('caption') // 2, 4, self.status_tone())
+        p.text('caption', self.status, x + 18, 626, INK_DIM, max_width=700)
+        self.draw_hints(p, [('A / ENTER', 'Select'), ('START / F1', 'Settings')])
+        p.text('caption', 'Silver Lantern v' + APP_VERSION, CANVAS[0] - MARGIN, 674, INK_FAINT, align='right')
+
+    def draw_progress(self, p, dt):
+        p.scene(scrim=150)
+        x, bar_w = MARGIN, 780
+        info = self.progress_info or {}
+        tool = self.operation == 'tool'
+        title = 'Updating Silver Lantern' if tool else ('Updating the game' if self.operation == 'update' else 'Installing Ocarina of Time')
+        pct = info.get('pct')
+        if pct is None:
+            match = re.search(r'(\d{1,3})%', self.progress)
+            pct = min(100, int(match.group(1))) if match else None
+        phase = info.get('phase') or ('Preparing' if pct is None else 'Downloading')
+        p.text('overline', phase.upper(), x + 2, 124, ACCENT, max_width=bar_w)
+        p.text('title', title, x, 142, INK, max_width=bar_w)
+        if pct is not None:
+            p.text('figure', f'{pct}%', x - 2, 204, INK)
+        else:
+            p.text('body', 'Please wait — this usually takes under a minute.' if tool else 'Getting things ready…', x, 250, INK_DIM, max_width=bar_w)
+        p.fill(x, 300, bar_w, 12, (255, 255, 255), 30, 6)
+        if pct is not None:
+            fill = self.ease('bar', bar_w * max(0, min(100, pct)) / 100, dt, rate=.12)
+            if fill >= 12:
+                p.fill(x, 300, fill, 12, ACCENT, 255, 6)
+        else:
+            phase_t = (time.monotonic() * .6) % 1
+            seg = 180
+            start = -seg + phase_t * (bar_w + seg)
+            left, right = max(x, x + start), min(x + bar_w, x + start + seg)
+            if right - left >= 12:
+                p.fill(left, 300, right - left, 12, ACCENT, 255, 6)
+        done, total, speed = info.get('done'), info.get('total'), info.get('speed') or 0
+        if total:
+            p.text('body', f'{fmt_bytes(done)} of {fmt_bytes(total)}', x, 326, INK)
+            right = (fmt_bytes(speed) + '/s') if speed else ''
+            if speed and total > done:
+                right += ('  ·  ' if right else '') + fmt_eta((total - done) / speed) + ' left'
+            if right:
+                p.text('body', right, x + bar_w, 326, INK_DIM, align='right')
+        detail = self.progress if not tool else "The launcher restarts by itself when it's done."
+        p.text('caption', detail, x, 364, INK_FAINT, max_width=bar_w, middle=True)
+        buttons = self.buttons()
+        if buttons:
+            self.draw_rows(p, buttons, x, 420, 240, 50, 10, dt)
+            self.draw_hints(p, [('A / ENTER', 'Select'), ('B / ESC', 'Stop download')])
+        else:
+            self.draw_hints(p, [])
+
+    def draw_panel(self, p, dt):
+        p.scene(scrim=205)
+        x, w = MARGIN, 720
+        overline, title = {'settings': ('LAUNCHER', 'Settings'), 'folder': ('GAME FOLDER', 'Where should the game go?'),
+                           'error': ('ERROR', 'Something went wrong'), 'update': ('GAME DATA', 'Update the game?')}[self.screen]
+        p.text('overline', overline, x + 2, 76, DANGER if self.screen == 'error' else ACCENT)
+        p.text('title', title, x, 94, INK, max_width=w)
+        top = 172
+        buttons = self.buttons()
+        if self.screen == 'settings':
+            self.draw_rows(p, buttons, x, top, w, 52, 8, dt)
+            p.text('caption', self.free_space_text(), x, 604, INK_FAINT, max_width=w)
+        elif self.screen == 'folder':
+            p.fill(x, top, w, 66, SURFACE_HI, 200, 10)
+            p.text('overline', 'INSTALL LOCATION', x + 20, top + 10, INK_DIM)
+            p.text('body', str(self.folder), x + 20, top + 30, INK, max_width=w - 40, middle=True)
+            p.text('caption', self.free_space_text(), x, top + 78, INK_FAINT, max_width=w)
+            self.draw_rows(p, buttons, x, top + 120, 420, 50, 10, dt)
+        elif self.screen == 'error':
+            lines = p.wrap('body', self.last_error or 'An unknown error occurred.', w - 24, 4)
+            p.fill(x, top, 4, len(lines) * 30 - 2, DANGER, 255, 2)
+            for i, line in enumerate(lines):
+                p.text('body', line, x + 20, top + i * 30, INK)
+            p.text('caption', 'Details are in the log.', x + 20, top + len(lines) * 30 + 6, INK_FAINT)
+            self.draw_rows(p, buttons, x, top + len(lines) * 30 + 50, 320, 50, 10, dt)
+        else:
+            p.text('body', 'Only changed files are downloaded. Your saves are not touched.', x, top, INK_DIM, max_width=w)
+            self.draw_rows(p, buttons, x, top + 56, 320, 50, 10, dt)
+        if self.screen in ('settings', 'folder') and self.status:
+            p.circle(x + 5, 630 + p.height('caption') // 2, 4, self.status_tone())
+            p.text('caption', self.status, x + 18, 630, INK_DIM, max_width=w - 18)
+        self.draw_hints(p, [('A / ENTER', 'Select'), ('B / ESC', 'Back')])
+
+    def render(self, p, dt):
+        self.hits = []
+        count = len(self.buttons())
+        if count and self.focus >= count:
+            self.focus = count - 1
+        if self.screen == 'main': self.draw_hero(p, dt)
+        elif self.screen == 'progress': self.draw_progress(p, dt)
+        else: self.draw_panel(p, dt)
+
+    def screenshot_scenes(self):
+        """Realistic fake states for the --screenshot design/regression loop."""
+        long = Path('C:/Games/' + 'Very Long Game Folder Name/' * 8 + 'Ocarina of Time')
+        def scene(name, screen, state, status='', focus=0, **values):
+            def setup():
+                self.state, self.status = state, status
+                self.tool_update_available, self.operation = False, None
+                self.set_screen(screen)
+                for key, value in values.items(): setattr(self, key, value)
+                self.focus = focus
+            return name, setup
+        info = {'phase': 'Downloading', 'done': int(20.83 * 1024 ** 3), 'total': int(33.05 * 1024 ** 3), 'speed': int(58.4 * 1024 ** 2), 'pct': 63}
+        return [
+            scene('main', 'main', State.READY, 'Silver Lantern is up to date.'),
+            scene('hero-download', 'main', State.NOT_INSTALLED, 'Game data: 2026.11.16', folder=long),
+            scene('progress', 'progress', State.DOWNLOADING, operation='download', progress_info=info,
+                  progress='Downloading: 63% — ' + str(long / 'data' / 'textures' / 'kokiri_forest_hd_pack_part_07.pak')),
+            scene('tool-update', 'progress', State.READY, operation='tool', progress_info={}, progress='Updating Silver Lantern…'),
+            scene('settings', 'settings', State.READY, 'Silver Lantern is up to date.', focus=2, folder=long),
+            scene('folder', 'folder', State.NOT_INSTALLED, '', focus=1, folder=long),
+            scene('update', 'update', State.UPDATE_AVAILABLE),
+            scene('error', 'error', State.ERROR, operation='download', last_error='Could not reach the update server. The connection stalled three times while downloading whole-07.bin from objects.githubusercontent.com; check your network and try again.'),
+        ]
+
     def run(self, screenshot=None):
         if screenshot:
             os.environ['SDL_VIDEODRIVER'] = 'dummy'
@@ -740,17 +1208,15 @@ class LauncherUI:
         s.SDL_SetHint(b'SDL_GAMECONTROLLER_USE_BUTTON_LABELS', b'1')
         if s.SDL_Init(s.SDL_INIT_VIDEO | s.SDL_INIT_GAMECONTROLLER) != 0: raise RuntimeError(s.SDL_GetError().decode())
         if ttf.TTF_Init() != 0: raise RuntimeError('SDL_ttf initialization failed')
-        window = s.SDL_CreateWindow(b'Silver Lantern', s.SDL_WINDOWPOS_CENTERED, s.SDL_WINDOWPOS_CENTERED, 1280, 720, s.SDL_WINDOW_RESIZABLE)
+        window = s.SDL_CreateWindow('Ocarina of Time'.encode('utf-8'), s.SDL_WINDOWPOS_CENTERED, s.SDL_WINDOWPOS_CENTERED, 1280, 720, s.SDL_WINDOW_RESIZABLE)
         renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_ACCELERATED | s.SDL_RENDERER_PRESENTVSYNC)
         if not renderer: renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
         if not window or not renderer: raise RuntimeError('Could not create the launcher window')
         s.SDL_RenderSetLogicalSize(renderer, 1280, 720)
-        s.SDL_SetRenderDrawColor(renderer, 18, 26, 32, 255)
+        s.SDL_SetRenderDrawColor(renderer, *SURFACE, 255)
         s.SDL_RenderClear(renderer)
         s.SDL_RenderPresent(renderer)
-        fontpath = Path(os.environ.get('WINDIR', r'C:\Windows')) / 'Fonts' / 'segoeui.ttf'
-        font = ttf.TTF_OpenFont(str(fontpath).encode(), 26)
-        if not font: raise RuntimeError('Could not open the system font')
+        painter = Painter(s, ttf, renderer)
         def open_pads():
             for i in range(s.SDL_NumJoysticks()):
                 if s.SDL_IsGameController(i):
@@ -760,36 +1226,16 @@ class LauncherUI:
                         ident = s.SDL_JoystickInstanceID(joystick)
                         if ident in self.controllers: s.SDL_GameControllerClose(p)
                         else: self.controllers[ident] = p
-        def text(value, x, y, color=(230, 234, 238), max_width=None):
-            value = str(value)
-            max_width = max_width if max_width is not None else 1215 - x
-            width, height = ctypes.c_int(), ctypes.c_int()
-            def fits(text):
-                return ttf.TTF_SizeUTF8(font, text.encode('utf-8'), ctypes.byref(width), ctypes.byref(height)) == 0 and width.value <= max_width
-            if not fits(value):
-                lo, hi = 0, len(value)
-                while lo < hi:
-                    mid = (lo + hi + 1) // 2
-                    if fits(value[:mid] + '…'):
-                        lo = mid
-                    else:
-                        hi = mid - 1
-                value = value[:lo] + '…' if fits('…') else ''
-            if not value:
-                return
-            surface = ttf.TTF_RenderUTF8_Blended(font, value.encode('utf-8'), s.SDL_Color(*color, 255))
-            if surface:
-                texture = s.SDL_CreateTextureFromSurface(renderer, surface)
-                rect = s.SDL_Rect(x, y, surface.contents.w, surface.contents.h)
-                s.SDL_RenderCopy(renderer, texture, None, rect)
-                s.SDL_DestroyTexture(texture); s.SDL_FreeSurface(surface)
         open_pads()
         event = s.SDL_Event()
-        capture_screens = iter(('main', 'progress', 'settings')) if screenshot else None
+        scenes = iter(self.screenshot_scenes()) if screenshot else None
+        scene_name = None
         if screenshot:
-            self.screen = next(capture_screens)
-            self.state = State.READY
-            self.status = 'Ready to play.'
+            self.snap = True
+            scene_name, setup = next(scenes)
+            setup()
+        self.hits = []
+        last = time.monotonic()
         try:
             while self.running:
                 self.drain()
@@ -818,65 +1264,38 @@ class LauncherUI:
                     elif typ in (s.SDL_MOUSEMOTION, s.SDL_MOUSEBUTTONUP):
                         mx = event.motion.x if typ == s.SDL_MOUSEMOTION else event.button.x
                         my = event.motion.y if typ == s.SDL_MOUSEMOTION else event.button.y
-                        w, h = ctypes.c_int(), ctypes.c_int(); s.SDL_GetWindowSize(window, ctypes.byref(w), ctypes.byref(h))
-                        x, y = mx * 1280 / max(w.value, 1), my * 720 / max(h.value, 1)
-                        spacing = 50 if self.screen == 'settings' else 65
-                        height = 44 if self.screen == 'settings' else 56
-                        index = int((y - 210) // spacing)
-                        if 250 <= x <= 1030 and 0 <= index < len(self.buttons()) and 210 + index * spacing <= y < 210 + height + index * spacing:
-                            self.focus = index
-                            if typ == s.SDL_MOUSEBUTTONUP and event.button.button == s.SDL_BUTTON_LEFT: self.activate()
-                s.SDL_SetRenderDrawColor(renderer, 18, 26, 32, 255); s.SDL_RenderClear(renderer)
-                text('SILVER LANTERN', 65, 45, (230, 198, 130))
-                titles = {'main':'Welcome', 'folder':'Where should the game go?', 'settings':'Settings', 'progress':'Working...', 'error':'Something went wrong', 'update':'Update the game?'}
-                text(titles[self.screen], 250, 130)
-                spacing = 50 if self.screen == 'settings' else 65
-                height = 44 if self.screen == 'settings' else 56
-                for i, label in enumerate(self.buttons()):
-                    selected = i == self.focus
-                    s.SDL_SetRenderDrawColor(renderer, *( (90, 108, 100, 255) if selected else (42, 54, 58, 255) ))
-                    rect = s.SDL_Rect(250, 210 + i * spacing, 780, height); s.SDL_RenderFillRect(renderer, ctypes.byref(rect))
-                    text(label, 275, 210 + i * spacing + (height - ttf.TTF_FontHeight(font)) // 2, max_width=730)
-                if self.screen == 'error': text(self.last_error, 65, 580, (255, 180, 160))
-                elif self.screen == 'progress':
-                    text(self.progress, 250, 330, max_width=780)
-                    match = re.search(r'(\d{1,3})%', self.progress)
-                    if match:
-                        s.SDL_SetRenderDrawColor(renderer, 42, 54, 58, 255)
-                        s.SDL_RenderFillRect(renderer, ctypes.byref(s.SDL_Rect(250, 380, 780, 16)))
-                        s.SDL_SetRenderDrawColor(renderer, 192, 166, 104, 255)
-                        s.SDL_RenderFillRect(renderer, ctypes.byref(s.SDL_Rect(250, 380, int(780 * min(100, int(match.group(1))) / 100), 16)))
-                else: text(self.status, 65, 570 if self.screen == 'settings' else 580)
-                if self.screen in ('folder', 'settings'):
-                    text(str(self.folder), 65, 615 if self.screen == 'settings' else 630)
-                    parent = self.folder
-                    while not parent.exists() and parent != parent.parent: parent = parent.parent
-                    try: text(f'{shutil.disk_usage(parent).free / 1e9:.1f} GB free (about 40 GB needed)', 65, 665, (170, 180, 180))
-                    except OSError: pass
-                else:
-                    text('A / Enter: Select   B / Esc: Back   Start / F1: Settings' if self.controllers else 'No controller found. Plug one in, or use the keyboard and mouse.', 65, 650, (170, 180, 180))
+                        # The renderer reports mouse positions in logical (1280x720) coordinates.
+                        for hx, hy, hw, hh, index in self.hits:
+                            if hx <= mx < hx + hw and hy <= my < hy + hh and index < len(self.buttons()):
+                                if not (self.screen == 'progress' and self.operation == 'tool'):
+                                    self.focus = index
+                                    if typ == s.SDL_MOUSEBUTTONUP and event.button.button == s.SDL_BUTTON_LEFT: self.activate()
+                                break
+                frame_now = time.monotonic()
+                dt, last = min(.1, frame_now - last), frame_now
+                self.render(painter, dt)
                 if screenshot:
-                    surface = s.SDL_CreateRGBSurfaceWithFormat(0, 1280, 720, 32, s.SDL_PIXELFORMAT_ARGB8888)
+                    surface = s.SDL_CreateRGBSurfaceWithFormat(0, CANVAS[0], CANVAS[1], 32, s.SDL_PIXELFORMAT_ARGB8888)
                     if not surface or s.SDL_RenderReadPixels(renderer, None, s.SDL_PIXELFORMAT_ARGB8888, surface.contents.pixels, surface.contents.pitch) != 0:
                         raise RuntimeError('Could not capture launcher frame')
                     path = Path(screenshot)
-                    output = path.with_name(path.stem + '-' + self.screen + '.bmp')
+                    output = path.with_name(path.stem + '-' + scene_name + '.bmp')
                     if s.SDL_SaveBMP(surface, str(output).encode()) != 0:
                         raise RuntimeError('Could not save launcher frame')
                     s.SDL_FreeSurface(surface)
-                    self.screen = next(capture_screens, None)
-                    if self.screen is None:
+                    nxt = next(scenes, None)
+                    if nxt is None:
+                        self.operation = None
                         break
-                    if self.screen == 'progress':
-                        self.progress = 'Downloading: 42% (14.0 GB of 33.0 GB)'
-                    elif self.screen == 'settings':
-                        self.folder = Path('C:/Games/' + 'Very Long Game Folder Name/' * 8 + 'Silver Lantern')
+                    scene_name, setup = nxt
+                    setup()
+                    continue
                 s.SDL_RenderPresent(renderer)
                 s.SDL_Delay(16)
         finally:
             if self.screen == 'progress' and self.operation != 'tool': terminate_worker(self.events)
             for pad in self.controllers.values(): s.SDL_GameControllerClose(pad)
-            ttf.TTF_CloseFont(font); s.SDL_DestroyRenderer(renderer); s.SDL_DestroyWindow(window); ttf.TTF_Quit(); s.SDL_Quit()
+            painter.close(); s.SDL_DestroyRenderer(renderer); s.SDL_DestroyWindow(window); ttf.TTF_Quit(); s.SDL_Quit()
 
 
 def main():
