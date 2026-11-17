@@ -1,18 +1,10 @@
-# Goal: safe executable auto-update
-- [x] Establish goal-mode scheduling in this session (hourly task b1ca7e29-46b5-41da-9282-c649424d97e9).
-- [x] Repair updater with safe staging, versioning, verification and rollback.
-- [x] Test failure cases and real packaged EXE update. Packaged helper replacement/relaunch and missing-replacement rollback passed; mocked release-to-relaunch passed. Fresh suite: 15 tests OK. Live GitHub update remains untested until release.
-- [x] Public repo created: github.com/cputroll/Silver-Lantern (main pushed, v1.2.0 tag pushed, release pending).
-- [x] SHIPPED v1.2.0: https://github.com/cputroll/Silver-Lantern/releases/tag/v1.2.0 — workflow green, SHA256SUMS matches zip, all 6 files present, EXE --version == 1.2.0, live --self-update against the real release reports 'up to date (1.2.0)', main/tag at 5442ee5. First broken publish deleted with 0 downloads.
-- [x] GPU-aware preset (commit 2db9982 on main): DLSS when RTX + ngx dll, else FSR 3.1 Performance (dlss=3, resolution=4, reflex=0); 31 tests pass; no tag.
-- [x] Sync installer (commit 0f5b9e6): `--install-game [folder]` with `--game-manifest`, `--dry-run`, `--prune`; parallel part downloads, per-part verify, resume offset check. 41 tests.
-- [x] Auto-update watcher (commit 6a4ca0a): `Watch-Game.ps1` + `SilverLantern-AutoUpdate.cmd`; polls upstream latest release, semver compare, state in %LOCALAPPDATA%\SilverLantern, log, -Once/-Force/-InstallTask/-DryRun; live dry run 'Up to date (v0.4.0)'. 42 tests.
-- [ ] Builder-update research (Opus lane, running): update-spec.md — version marker, minimal-work update sequence, contract for Update-Game.ps1 -GameFolder [-DryRun], exit 0/10/1.
-- [ ] Rebuild-speed analysis (Opus lane, running): rebuild-speed.md — where the 22 compile minutes go, ranked speedups, 32-thread profile.
-- [ ] Packaging/upload of the 33 GB build (Terra lane, background): ~186k files packing, then game-v1 release + game-manifest.json + part verification.
-- [x] CLI wiring (commit 576135e): `--update-game [folder]`, `--update-dry-run`, `--force-update`, `--update-on-launch`; parses HLUPDATE lines; 49 tests.
-- [ ] Update-Game.ps1 (Opus lane, running): real updater per update-spec.md, dry-run validated, pushes to main.
-- [ ] End-to-end proof (after both land): run `Get-HeyListen.py --update-game --update-dry-run` on this PC and expect 'Already up to date (v0.4.0)'.
-- [ ] UI spec (Opus agent ses_e191b276cffe62MTLStXmLBdIk, active, read-only): console UX design for v1.3.0 (progress bar, friendly errors, next-steps finish, log file, pause-on-error).
-- [ ] v1.3.0 backlog from code review: H4 retries/backoff + fresh token on 403, H5 helper error visibility, H3 pin builder repo in code + reject http manifests, M1 stale backup recovery, M2 stage cleanup, M3 relaunch arg fix, M5 stream_to edge cases, M6 plain-English Windows errors, M7 README SmartScreen note, M8 run all tests in CI, hash cache for 25 GB re-verify.
-- Known/accepted: update ZIP and checksum share a trust source (not signed); third-party game links published at owner's direction.
+# Goal: ship v1.4.0 one-click launcher
+- [x] Console UX + one-click default flow (508245d): update check -> install prebuilt game files -> GPU preset -> launch; old flow behind --builder-flow. Disk-space preflight fixed for fast disks (a2a8ef9: 40 GiB, bundle cleanup-after-use, peak ~34 GiB).
+- [x] Auto-publish pipeline (7f10e57): pack-game.py + AutoShip-Game.ps1; live dry-run 'GAMESHIP status=current installed=v0.4.0'.
+- [x] Docs: README one-click story + RELEASE_NOTES (9355d9c), --builder-flow and flag list (2d8ae42).
+- [x] Launcher: spec (d64f036), Nintendo-art icon assets (c361e1d), controller-first SDL2 implementation + tests (b8182cf), merged into ONE executable SilverLantern.exe (f6590ae), tool self-update wired through the proven helper with relaunch (a00f1bf, 112 tests).
+- [x] SHIPPED v1.4.0 (e31b907, release verified): 114 tests + CI green; zip SHA256 matches sums; both EXE names identical bytes; --version/--cli --version = 1.4.0; --self-test pass; REAL 1.3.0 -> 1.4.0 self-update swap + relaunch proven (updated exe answers 1.4.0); clean-profile friend simulation exit 0, 33.05 GiB, bin\HeyListen.exe sha256 matched manifest, temp install removed.
+- [ ] v1.4.1 speed fix (lane ses_e182acbf3ffeMeMvIv7qOSRW0c, clone sl-speed-build): parallel ranged-chunk downloads (owner's line does ~100 MB/s, tool capped at ~14 MB/s single-stream). Design settled: preallocated .part + offset writes + completion sidecar, 206/200 probe fallback, SILVER_LANTERN_DL_STREAMS default 6, final full-file hash unchanged, peak disk = one bundle. After DONE: shipper bumps/tags/verifies v1.4.1 + timed friend-sim vs 40-min baseline.
+- [ ] After v1.4.1: final report and delete the goal scheduled task.
+Known/accepted: update zip+checksum share a trust source (unsigned); prebuilt game files and Nintendo art published in the program (owner's direction); public names stay neutral ('Silver Lantern').
+Backlog (v1.5.0): manifest hash-cache baseline; H4 retries/backoff; H2 signing; SmartScreen copy; UI polish leftovers (zip/.cmd cleanup, --preset-only).
