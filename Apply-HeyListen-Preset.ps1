@@ -8,13 +8,13 @@
   Frame pacing and frame generation are on in both. Explicit -Upscaler / -RenderMode / -Sharpness /
   -Reflex / -FrameGeneration / -NoFramePacing always win. -Auto:$false keeps the old fixed DLSS preset.
 
-  Keys are the engine's own (engine/gpu/vk/vk_menu.cpp ini_key):
-    dlss       0 Game's own | 1 NVIDIA DLSS | 2 DLAA | 3 FSR 3.1 | 4 FSR 4 | 5 FSR 4 Native AA
-    resolution 0 Auto | 1 100% | 2 75% | 3 67% (Quality) | 4 50% (Performance) | 5 58% (Balanced) | 6 33% (Ultra)
-    sharpness  0-100
-    reflex     0 Off | 1 On | 2 On+Boost
-    pace       0/1 frame pacing
-    framegen   0 Off | 1 Auto | 2 2x | 3 3x ...
+  Keys are the ones the engine reads (see docs/graphics-options.md):
+    dlss             0 Game's own | 1 NVIDIA DLSS | 2 DLAA | 3 FSR 3.1 | 4 FSR 4 | 5 FSR 4 Native AA
+    resolution       0 Auto | 1 100% | 2 75% | 3 67% (Quality) | 4 50% (Performance) | 5 58% (Balanced) | 6 33% (Ultra)
+    sharpness        0-100
+    nvidia_reflex    0 Off | 1 On | 2 On+Boost
+    frame_pacing     0/1
+    frame_generation 0 Off | 1 Auto | 2 2x ... 8 8x
 
   DLSS itself must be compiled in: the Builder's "NVIDIA DLSS" box has to be ticked for that build.
 #>
@@ -74,14 +74,18 @@ $fg  = @{ Off = 0; Auto = 1; '2x' = 2 }[$FrameGeneration]
 $up  = @{ DLSS = 1; FSR3 = 3 }[$Upscaler]
 
 $wanted = [ordered]@{
-  fullscreen = 1          # borderless fullscreen (engine integer toggle)
-  dlss       = $up        # 1 NVIDIA DLSS | 3 AMD FSR 3.1
-  resolution = $res       # Performance = 50% = value 4 (same shares for DLSS and FSR)
-  sharpness  = $Sharpness # DLSS is softer than the game's own: 80% is the documented pairing
-  reflex     = $ref
-  pace       = if ($NoFramePacing) { 0 } else { 1 }
-  framegen   = $fg
+  fullscreen       = 1          # borderless fullscreen (engine integer toggle)
+  quality_preset   = 0          # Custom: keeps the rows below as written
+  dlss             = $up        # 1 NVIDIA DLSS | 3 AMD FSR 3.1
+  resolution       = $res       # Performance = 50% = value 4 (same shares for DLSS and FSR)
+  sharpness        = $Sharpness # DLSS is softer than the game's own: 80% is the documented pairing
+  nvidia_reflex    = $ref
+  frame_pacing     = if ($NoFramePacing) { 0 } else { 1 }
+  frame_generation = $fg
+  options_version  = 3
 }
+# Keys older presets wrote; the engine never read them (it reads the names above).
+$dead = @('reflex', 'pace', 'framegen')
 
 # Merge: keep every line we do not own (controls, pad_/key_, unknown keys).
 $lines = @()
@@ -94,6 +98,8 @@ foreach ($line in $lines) {
   $key = $line.Substring(0, $eq).Trim()
   if ($wanted.Contains($key)) {
     if (-not $seen.ContainsKey($key)) { $out.Add("$key=$($wanted[$key])"); $seen[$key] = $true }
+  } elseif ($dead -contains $key) {
+    continue
   } else {
     $out.Add($line)
   }

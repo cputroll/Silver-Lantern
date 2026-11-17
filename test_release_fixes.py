@@ -123,11 +123,14 @@ class GpuPresetTests(unittest.TestCase):
 
     def test_preset_values(self):
         self.assertEqual(app.PRESET_DLSS['dlss'], '1')
-        self.assertEqual(app.PRESET_DLSS['reflex'], '1')
+        self.assertEqual(app.PRESET_DLSS['nvidia_reflex'], '1')
         self.assertEqual(app.PRESET_FSR['dlss'], '3')
-        self.assertEqual(app.PRESET_FSR['reflex'], '0')
+        self.assertEqual(app.PRESET_FSR['nvidia_reflex'], '0')
         for p in (app.PRESET_DLSS, app.PRESET_FSR):
-            self.assertEqual((p['resolution'], p['sharpness'], p['pace'], p['framegen']), ('4', '80', '1', '1'))
+            self.assertEqual((p['resolution'], p['sharpness'], p['frame_pacing'], p['frame_generation']), ('4', '80', '1', '1'))
+            # The engine never read these; the preset must not write them.
+            for dead in ('reflex', 'pace', 'framegen'):
+                self.assertNotIn(dead, p)
 
     def test_detection_failures_fall_back_to_fsr(self):
         for err in (FileNotFoundError('powershell'), app.subprocess.TimeoutExpired('powershell', 30), OSError('x')):
@@ -148,7 +151,7 @@ class GpuPresetTests(unittest.TestCase):
                 ini = app.apply_preset(game)
             lines = ini.read_text(encoding='ascii').splitlines()
             self.assertEqual(lines[:2], ['pad_a=3', 'dlss=1'])
-            self.assertIn('reflex=1', lines)
+            self.assertIn('nvidia_reflex=1', lines)
             self.assertIn('DLSS Performance', log.call_args_list[0].args[0])
 
             with mock.patch.object(app, 'detect_gpu_name', side_effect=RuntimeError('boom')), \
@@ -156,7 +159,7 @@ class GpuPresetTests(unittest.TestCase):
                 app.apply_preset(game)
             lines = ini.read_text(encoding='ascii').splitlines()
             self.assertEqual(lines[:2], ['pad_a=3', 'dlss=3'])
-            self.assertIn('reflex=0', lines)
+            self.assertIn('nvidia_reflex=0', lines)
             self.assertIn('detection failed', log.call_args_list[0].args[0])
 
     def test_ps1_parses(self):

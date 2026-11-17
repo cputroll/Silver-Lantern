@@ -55,26 +55,10 @@ VERSION_FILE = HERE / "VERSION"
 UPDATE_ASSET = "HeyListen-Get.zip"
 SUMS_ASSET = "SHA256SUMS.txt"
 
-PRESET_DLSS = {         # engine/gpu/vk/vk_menu.cpp ini_key names
-    "fullscreen": "1",  # borderless fullscreen
-    "dlss": "1",        # 1 = NVIDIA DLSS
-    "resolution": "4",  # 4 = 50% = DLSS Performance
-    "sharpness": "80",
-    "reflex": "1",
-    "pace": "1",
-    "framegen": "1",
-    "options_version": "3",
-}
-PRESET_FSR = {
-    "fullscreen": "1",  # borderless fullscreen
-    "dlss": "3",        # 3 = AMD FSR 3.1 (compiled into every build)
-    "resolution": "4",  # 4 = 50% = FSR Performance
-    "sharpness": "80",
-    "reflex": "0",      # Reflex is NVIDIA-only
-    "pace": "1",
-    "framegen": "1",
-    "options_version": "3",
-}
+import game_settings  # noqa: E402  the one reader/writer of hookshot_options.ini (keys as the engine reads them)
+
+PRESET_DLSS = game_settings.PRESET_DLSS  # dlss=1 NVIDIA DLSS, resolution=4 (50%), nvidia_reflex=1, ...
+PRESET_FSR = game_settings.PRESET_FSR    # dlss=3 AMD FSR 3.1 (every build), nvidia_reflex=0 (NVIDIA-only)
 PRESET = PRESET_DLSS    # kept for backwards compatibility
 DLSS_DLL = Path("ngx") / "nvngx_dlss.dll"
 GPU_QUERY = ("Get-CimInstance Win32_VideoController | Sort-Object AdapterRAM -Descending | "
@@ -1171,22 +1155,8 @@ def apply_preset(game_dir: Path) -> Path:
     game_dir = Path(game_dir)
     preset, why = choose_preset(game_dir)
     log(why)
-    game_dir.mkdir(parents=True, exist_ok=True)
-    ini = game_dir / "hookshot_options.ini"
-    lines = ini.read_text(encoding="ascii", errors="replace").splitlines() if ini.exists() else []
-    out: list[str] = []
-    seen: set[str] = set()
-    for line in lines:
-        eq = line.find("=")
-        key = line[:eq].strip() if eq > 0 else None
-        if key in preset:
-            if key not in seen:
-                out.append(f"{key}={preset[key]}")
-                seen.add(key)
-        else:
-            out.append(line)
-    out.extend(f"{k}={v}" for k, v in preset.items() if k not in seen)
-    ini.write_text("\n".join(out) + "\n", encoding="ascii", errors="replace")
+    # Atomic merge; drops the dead framegen/pace/reflex keys older presets wrote.
+    ini = game_settings.write_values(game_dir, preset)
     label = "DLSS" if preset is PRESET_DLSS else "FSR 3.1"
     log(f"{label} preset written: {ini}")
     return ini
