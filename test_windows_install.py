@@ -51,6 +51,41 @@ class WindowsInstallTests(unittest.TestCase):
         self.assertNotIn('-Recurse', script)
         self.assertFalse(run.call_args.kwargs['wait'])
 
+    def test_default_uninstall_keeps_saves_and_shows_path(self):
+        import io
+        from contextlib import redirect_stdout
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); game = root / 'game'; (game / 'user').mkdir(parents=True)
+            (game / 'user' / 'save').write_text('save'); (game / 'game.bin').write_text('game')
+            output = io.StringIO()
+            with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'), redirect_stdout(output):
+                self.assertTrue(launcher.uninstall())
+            self.assertEqual((game / 'user' / 'save').read_text(), 'save')
+            self.assertEqual([p.name for p in game.iterdir()], ['user'])
+            self.assertIn(f'Your saves stay at {game / "user"} — use --purge-saves to remove them too', output.getvalue())
+
+    def test_explicit_purge_removes_game_and_saves(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); game = root / 'game'; (game / 'user').mkdir(parents=True)
+            (game / 'user' / 'save').write_text('save')
+            with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'):
+                self.assertTrue(launcher.uninstall(purge_saves=True))
+            self.assertFalse(game.exists())
+
+    def test_cli_save_flags(self):
+        import sys
+        from test_game_sync import h
+        for args, purge in [(['--uninstall'], False), (['--uninstall', '--keep-saves'], False), (['--uninstall', '--purge-saves'], True), (['--uninstall', '--keep-saves', '--purge-saves'], True)]:
+            with self.subTest(args=args), patch.object(sys, 'argv', ['get'] + args), patch.object(h, 'relocate_transient', return_value=False), patch.object(launcher, 'uninstall', return_value=True) as uninstall:
+                self.assertEqual(h.main(), 0)
+                self.assertEqual(uninstall.call_args.kwargs['purge_saves'], purge)
+
+    def test_gui_confirmation_uses_same_save_message(self):
+        folder = Path('example')
+        with patch.object(launcher, 'load_game_folder', return_value=folder), patch.object(launcher, 'confirm_uninstall', return_value=False) as confirm:
+            self.assertFalse(launcher.uninstall(gui=True))
+        self.assertIn(f'Your saves stay at {folder / "user"} — use --purge-saves to remove them too', confirm.call_args.args[0])
+
     def test_refusal_and_keep_saves(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); game = root / 'game'; (game / 'user').mkdir(parents=True)

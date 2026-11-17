@@ -22,6 +22,10 @@ Silver Lantern installs the game for you and keeps it up to date.
 
 The launcher checks for tool and game updates; use `SilverLantern.exe --self-update` to apply a tool update. The normal install does not rebuild anything on your PC.
 
+## Uninstall
+
+Uninstall from Windows Apps or run `SilverLantern.exe --uninstall`. Game files and launcher settings are removed, but the game folder and its `user` save directory remain in place. The confirmation shows the save path. To remove the saves and the entire game folder too, run `SilverLantern.exe --uninstall --purge-saves`. The older `--keep-saves` flag is still accepted and has no effect because keeping saves is now the default.
+
 ## All command-line options
 
 - `--install-game [FOLDER]` installs or updates the prebuilt game files in the default folder or a folder you specify, without opening the game.

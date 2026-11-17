@@ -1921,7 +1921,8 @@ def relocate_transient() -> bool:
 def main() -> int:
     if relocate_transient():
         return 0
-    if '--cli' in sys.argv[1:]:
+    cli_requested = '--cli' in sys.argv[1:]
+    if cli_requested:
         sys.argv.remove('--cli')
     elif '--self-test' in sys.argv[1:]:
         import launcher
@@ -1971,14 +1972,15 @@ def main() -> int:
     ap.add_argument('--builder-flow', action='store_true',
                     help='old flow: download the game dump + HeyListenBuilder and open the Builder')
     ap.add_argument('--uninstall', action='store_true', help='Remove the installed game and launcher')
-    ap.add_argument('--keep-saves', action='store_true', help='Keep the game user saves when uninstalling')
+    ap.add_argument('--keep-saves', action='store_true', help='Compatibility alias; saves are kept by default')
+    ap.add_argument('--purge-saves', action='store_true', help='Remove saved games as well when uninstalling')
     ap.add_argument('--no-pause', action='store_true', help="don't wait for Enter before closing")
     ap.add_argument('--plain', action='store_true', help='no colors')
     a = ap.parse_args()
 
     if a.uninstall:
         import launcher
-        return 0 if launcher.uninstall(keep_saves=a.keep_saves) else 1
+        return 0 if launcher.uninstall(purge_saves=a.purge_saves, gui=getattr(sys, 'frozen', False) and not cli_requested) else 1
     if a.update_game is not None:
         return run_game_update(Path(a.update_game).expanduser(), dry_run=a.update_dry_run, force=a.force_update)
     if a.version:

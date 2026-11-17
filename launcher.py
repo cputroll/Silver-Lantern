@@ -199,11 +199,23 @@ def schedule_owned_cleanup():
     powershell(script, wait=False)
 
 
-def uninstall(keep_saves=False):
+def confirm_uninstall(message, gui=False):
+    if gui and os.name == 'nt':
+        return ctypes.windll.user32.MessageBoxW(None, message, 'Uninstall Silver Lantern', 0x24) == 6
+    print(message)
+    return input('Continue? [y/N] ').strip().lower() == 'y'
+
+
+def uninstall(keep_saves=True, purge_saves=False, gui=False):
     folder = load_game_folder()
-    print('This removes the entire game folder and all its contents' + (' except the user saves directory' if keep_saves else ', including saves') + ', shortcuts, launcher files and settings.')
-    print('Game folder:', folder or '(not configured)')
-    if input('Continue? [y/N] ').strip().lower() != 'y':
+    if purge_saves:
+        message = 'This removes the game folder, including your saves, and the launcher files and settings.'
+    else:
+        saves = folder / 'user' if folder else '(game folder not configured)'
+        message = ('This removes game files, shortcuts, launcher files and settings; the saves folder remains.\n'
+                   f'Your saves stay at {saves} — use --purge-saves to remove them too')
+    message += f'\nGame folder: {folder or "(not configured)"}'
+    if not confirm_uninstall(message, gui):
         print('Uninstall cancelled.')
         return False
     had_folder = bool(folder and folder.exists())
@@ -220,7 +232,7 @@ def uninstall(keep_saves=False):
                 raise RuntimeError('Cannot safely remove a game folder containing the launcher; move the launcher first.')
         if not remove_defender_exclusion():
             raise RuntimeError('Could not remove the Windows Defender exclusion; retry uninstall or remove it in Windows Security.')
-        if keep_saves:
+        if not purge_saves:
             for child in folder.iterdir():
                 if child.name.casefold() == 'user':
                     continue
