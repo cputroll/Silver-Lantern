@@ -1,6 +1,6 @@
 {
   "tool": {
-    "version": "1.4.0",
+    "version": "1.4.1",
     "repo": "cputroll/Silver-Lantern",
     "manifest_url": "https://raw.githubusercontent.com/cputroll/Silver-Lantern/main/sources.json",
     "description": "Update these values and re-upload this file (or the whole tool) to change where the game comes from, without touching the script. Set manifest_url to the raw URL of this file on GitHub so every install picks up new links by itself; empty means local only."
