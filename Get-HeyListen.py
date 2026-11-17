@@ -29,7 +29,10 @@ import sys
 import tempfile
 import time
 import zipfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import quote, urlparse
 
 try:
     from curl_cffi import requests
@@ -221,7 +224,8 @@ def content_range_start(r) -> int | None:
 
 
 def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = None,
-              referer: str | None = None, max_retries: int = 6, part: Path | None = None) -> int:
+              referer: str | None = None, max_retries: int = 6, part: Path | None = None,
+              progress=None, quiet: bool = False) -> int:
     """Resumable streaming download into dest (via `part`, default dest + '.part')."""
     part = part or Path(str(dest) + ".part")
     for attempt in range(1, max_retries + 1):
@@ -263,8 +267,10 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
                             raise ValueError("download exceeds expected size")
                         f.write(chunk)
                         done += len(chunk)
+                        if progress:
+                            progress(len(chunk))
                         now = time.time()
-                        if now - last >= 2:
+                        if not quiet and now - last >= 2:
                             last = now
                             pct = f"{done * 100 / total:5.1f}%" if total else "  ?  "
                             rate = (done - have) / max(now - t0, 0.001)
@@ -272,13 +278,15 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
             finally:
                 r.close()
             if total and done < total and attempt < max_retries:
-                log(f"  short read ({done}/{total}), resuming…")
+                if not quiet:
+                    log(f"  short read ({done}/{total}), resuming…")
                 continue
             break
         except Exception as e:  # noqa: BLE001
             if attempt == max_retries:
                 raise
-            log(f"  network hiccup ({type(e).__name__}), retry {attempt}/{max_retries} in 3 s")
+            if not quiet:
+                log(f"  network hiccup ({type(e).__name__}), retry {attempt}/{max_retries} in 3 s")
             time.sleep(3)
     if expect is not None and part.stat().st_size != expect:
         raise RuntimeError(f"size mismatch: {part.stat().st_size} != {expect}")
@@ -413,11 +421,21 @@ def apply_preset(game_dir: Path) -> Path:
     return ini
 
 
-def sha256(p: Path) -> str:
+def sha256(p: Path, progress: bool = False) -> str:
     h = hashlib.sha256()
+    total = p.stat().st_size if progress else 0
+    done = 0
+    last = 0.0
     with open(p, "rb") as f:
         for block in iter(lambda: f.read(8 * 1024 * 1024), b""):
             h.update(block)
+            if progress:
+                done += len(block)
+                if time.monotonic() - last >= 0.5:
+                    last = time.monotonic()
+                    print(f'\rChecking SHA-256: {human(done)} / {human(total)}', end='', flush=True)
+    if progress:
+        print(f'\rChecking SHA-256: {human(done)} / {human(total)}', flush=True)
     return h.hexdigest()
 
 
@@ -638,6 +656,177 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
 
 
 # ---------------------------------------------------------------- main
+GAME_MANIFEST_URL = "https://raw.githubusercontent.com/cputroll/Silver-Lantern/main/game-manifest.json"
+GAME_ASSET_URL = "https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/"
+
+
+def parse_game_manifest(text: str) -> dict:
+    try:
+        man = json.loads(text)
+        if not isinstance(man, dict) or man['version'] != 1 or man['build'] != 'game-v1':
+            raise ValueError('unsupported manifest')
+        files = man['files']
+        if not isinstance(files, list):
+            raise ValueError('files must be a list')
+        seen = set()
+        assets = set()
+        def size(value):
+            if type(value) is not int or value < 0:
+                raise ValueError('invalid size')
+            return value
+        def digest(value):
+            if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+                raise ValueError('invalid SHA-256')
+        for item in files:
+            path = item['path']
+            if not isinstance(path, str) or not path or '\\' in path or ':' in path:
+                raise ValueError('invalid path')
+            segments = path.split('/')
+            if any(not p or p in ('.', '..') or p.endswith(('.', ' ')) for p in segments):
+                raise ValueError('invalid path')
+            key = path.casefold()
+            if (key in seen or segments[0].casefold() == '.heylisten-parts'
+                    or any(p.casefold() == 'user' for p in segments[:-1])):
+                raise ValueError('duplicate or reserved path')
+            seen.add(key)
+            size(item['size']); digest(item['sha256'])
+            parts = item['parts']
+            if not isinstance(parts, list) or not parts:
+                raise ValueError('missing parts')
+            for part in parts:
+                asset = part['asset']
+                if not isinstance(asset, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', asset) or asset in ('.', '..') or asset.casefold() in assets:
+                    raise ValueError('invalid or duplicate asset')
+                assets.add(asset.casefold())
+                size(part['size']); digest(part['sha256'])
+            if sum(p['size'] for p in parts) != item['size']:
+                raise ValueError('part sizes do not match file')
+        if size(man['total_bytes']) != sum(f['size'] for f in files):
+            raise ValueError('total size mismatch')
+        return man
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError('invalid game manifest') from exc
+
+
+def load_game_manifest(s, source: str) -> dict:
+    if urlparse(source).scheme in ('https', 'http'):
+        response = s.get(source, timeout=120)
+        try:
+            response.raise_for_status()
+            text = response.text
+        finally:
+            response.close()
+    else:
+        text = Path(source).expanduser().read_text(encoding='utf-8')
+    return parse_game_manifest(text)
+
+
+class GameProgress:
+    def __init__(self, total):
+        self.total = total
+        self.done = 0
+        self.lock = threading.Lock()
+        self.last = 0.0
+
+    def add(self, amount):
+        with self.lock:
+            self.done += amount
+            if time.monotonic() - self.last >= 0.5:
+                self.last = time.monotonic()
+                print(f'\rDownloading: {human(self.done)} / {human(self.total)}', end='', flush=True)
+
+    def finish(self):
+        with self.lock:
+            print(f'\rDownloading: {human(self.done)} / {human(self.total)}', flush=True)
+
+
+def game_path(root: Path, relative: str) -> Path:
+    target = root.joinpath(*relative.split('/'))
+    if not target.resolve().is_relative_to(root.resolve()):
+        raise ValueError('manifest path escapes install directory')
+    return target
+
+
+def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = False,
+                 manifest_path: Path | None = None) -> None:
+    root = root.expanduser()
+    pending = []
+    kept = 0
+    for item in man['files']:
+        target = game_path(root, item['path'])
+        if target.is_file() and target.stat().st_size == item['size']:
+            if item['size'] >= 256 * 1024 * 1024:
+                log(f"Checking SHA-256: {item['path']} ({human(item['size'])})")
+            if sha256(target, progress=item['size'] >= 256 * 1024 * 1024) == item['sha256']:
+                kept += item['size']
+                continue
+        pending.append(item)
+    cache = root / '.heylisten-parts'
+    download_bytes = 0
+    for item in pending:
+        for part in item['parts']:
+            done = cache / part['asset']
+            partial = Path(str(done) + '.part')
+            if done.is_file() and done.stat().st_size == part['size'] and sha256(done) == part['sha256']:
+                continue
+            have = partial.stat().st_size if partial.is_file() else 0
+            download_bytes += part['size'] - (have if have < part['size'] else 0)
+    log(f"Plan: {len(man['files']) - len(pending)} files present, {len(pending)} to download ({download_bytes / 1024**3:.2f} GB), {kept / 1024**3:.2f} GB kept")
+    if dry_run:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    if pending:
+        cache.mkdir(parents=True, exist_ok=True)
+        progress = GameProgress(download_bytes)
+        def fetch(part):
+            dest = cache / part['asset']
+            if dest.is_file() and dest.stat().st_size == part['size'] and sha256(dest) == part['sha256']:
+                return
+            dest.unlink(missing_ok=True)
+            partial = Path(str(dest) + '.part')
+            if partial.is_file() and partial.stat().st_size == part['size']:
+                if sha256(partial) == part['sha256']:
+                    partial.replace(dest)
+                    return
+                partial.unlink()
+            # Each worker owns its HTTP session; sessions are not shared between threads.
+            worker = session() if s is None else s
+            stream_to(worker, GAME_ASSET_URL + quote(part['asset']), dest, expect=part['size'], progress=progress.add, quiet=True)
+            if sha256(dest) != part['sha256']:
+                dest.unlink(missing_ok=True)
+                raise ValueError(f"SHA-256 mismatch: {part['asset']}")
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            list(pool.map(fetch, (p for f in pending for p in f['parts'])))
+        progress.finish()
+        for item in pending:
+            target = game_path(root, item['path'])
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temp = target.with_name(target.name + '.heylisten-new')
+            try:
+                with temp.open('wb') as output:
+                    for part in item['parts']:
+                        with (cache / part['asset']).open('rb') as source:
+                            shutil.copyfileobj(source, output, 1024 * 1024)
+                if temp.stat().st_size != item['size'] or sha256(temp) != item['sha256']:
+                    raise ValueError(f"assembled SHA-256 mismatch: {item['path']}")
+                temp.replace(target)
+            finally:
+                temp.unlink(missing_ok=True)
+        shutil.rmtree(cache)
+    if prune:
+        wanted = {f['path'].casefold() for f in man['files']}
+        manifest_resolved = manifest_path.resolve() if manifest_path else None
+        for path in root.rglob('*'):
+            if not path.is_file() or path.is_symlink():
+                continue
+            relative = path.relative_to(root)
+            if any(x.casefold() == 'user' for x in relative.parts[:-1]):
+                continue
+            if relative.as_posix().casefold() in wanted or path.name.casefold() == 'game-manifest.json' or (manifest_resolved and path.resolve() == manifest_resolved):
+                continue
+            path.unlink()
+
+
 def main() -> int:
     if len(sys.argv) >= 5 and sys.argv[1] == "--apply-update-internal":
         _apply_update(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5:])
@@ -662,8 +851,18 @@ def main() -> int:
                     help="run only the self-update check (installs a newer release if there is one)")
     ap.add_argument("--self-update-from", metavar="ZIP",
                     help="install a release zip from a local path (testing)")
+    ap.add_argument('--install-game', nargs='?', const=str(Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Games' / 'HeyListen'), metavar='FOLDER')
+    ap.add_argument('--game-manifest', default=GAME_MANIFEST_URL, metavar='PATH_OR_URL')
+    ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--prune', action='store_true')
     a = ap.parse_args()
 
+    if a.install_game is not None:
+        s = session()
+        game_manifest = load_game_manifest(s, a.game_manifest)
+        local_manifest = None if urlparse(a.game_manifest).scheme in ('http', 'https') else Path(a.game_manifest).expanduser()
+        install_game(None, game_manifest, Path(a.install_game), a.dry_run, a.prune, local_manifest)
+        return 0
     if a.version:
         print(local_version({}))
         return 0
