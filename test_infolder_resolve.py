@@ -15,6 +15,10 @@ class ResolveGameFolderTests(unittest.TestCase):
             legacy = Path(temp) / 'Games' / 'HeyListen'; legacy.mkdir(parents=True)
             self.assertEqual(launcher.resolve_game_folder(), legacy)
 
+    def test_both_defaults_unwritable_still_resolve_game_folder(self):
+        with tempfile.TemporaryDirectory() as temp, patch.dict(launcher.os.environ, {'USERPROFILE': temp}), patch.object(launcher, 'load_game_folder', return_value=None), patch.object(launcher, 'probe_writable', side_effect=PermissionError):
+            self.assertEqual(launcher.resolve_game_folder(), Path(temp) / 'Games' / launcher.GAME_NAME)
+
     def test_unwritable_primary_falls_back(self):
         with tempfile.TemporaryDirectory() as temp, patch.dict(launcher.os.environ, {'USERPROFILE': temp}), patch.object(launcher, 'load_game_folder', return_value=None):
             def probe(path):

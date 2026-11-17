@@ -289,9 +289,7 @@ def resolve_game_folder():
         probe_writable(primary)
         return primary
     except OSError:
-        fallback = profile / 'Games' / GAME_NAME
-        probe_writable(fallback)
-        return fallback
+        return profile / 'Games' / GAME_NAME
 
 
 def relocate_launcher(folder):
@@ -370,7 +368,7 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
         owned.append(folder / '.heylisten-get' / 'game-manifest.json')
         for path in owned:
             try:
-                if path.resolve() != running and not path.is_symlink() and path.is_file():
+                if path.resolve() != running and path.resolve().is_relative_to(folder.resolve()) and not path.is_symlink() and path.is_file():
                     path.unlink()
             except OSError:
                 pass

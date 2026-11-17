@@ -17,6 +17,6 @@ class GuiCliContractTests(unittest.TestCase):
                 self.assertEqual(h.main(), 0)
 
     def test_bare_gui_dispatch(self):
-        with mock.patch.object(sys, 'argv', ['tool', '--gui']), mock.patch.object(sys, 'frozen', True, create=True), mock.patch.object(h, 'relocate_transient', return_value=False), mock.patch('launcher.main', return_value=0) as gui:
+        with mock.patch.object(sys, 'argv', ['tool', '--gui']), mock.patch.object(sys, 'frozen', True, create=True), mock.patch('launcher.resolve_game_folder'), mock.patch('launcher.relocate_launcher', return_value=False), mock.patch('launcher.main', return_value=0) as gui:
             self.assertEqual(h.main(), 0)
             gui.assert_called_once()
