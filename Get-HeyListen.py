@@ -1497,6 +1497,35 @@ def game_path(root: Path, relative: str) -> Path:
     return target
 
 
+def restore_segment_checkpoint(temp, checkpoint, item):
+    """Trust a retained prefix only after checking every segment hash."""
+    hasher = hashlib.sha256()
+    try:
+        info = json.loads(checkpoint.read_text(encoding='utf-8'))
+        index = info['next_index']
+        if type(index) is not int or not 0 < index < len(item['segments']):
+            raise ValueError('invalid checkpoint index')
+        size = sum(part['length'] for part in item['segments'][:index])
+        if type(info['bytes_written']) is not int or info['bytes_written'] != size or temp.stat().st_size != size:
+            raise ValueError('invalid checkpoint length')
+        with temp.open('rb') as source:
+            for part in item['segments'][:index]:
+                segment_hash = hashlib.sha256()
+                remaining = part['length']
+                while remaining:
+                    data = source.read(min(remaining, 1024 * 1024))
+                    if not data:
+                        raise ValueError('short checkpoint')
+                    segment_hash.update(data); hasher.update(data); remaining -= len(data)
+                if segment_hash.hexdigest() != part['sha256']:
+                    raise ValueError('checkpoint hash mismatch')
+        return index, hasher
+    except (OSError, ValueError, KeyError, TypeError):
+        temp.unlink(missing_ok=True)
+        checkpoint.unlink(missing_ok=True)
+        return 0, hashlib.sha256()
+
+
 def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
     """Download bundles in order while workers consume segments in file order."""
     cond = threading.Condition()
