@@ -7,14 +7,10 @@ import launcher
 
 
 class ManifestServingTests(unittest.TestCase):
-    def test_autoship_only_clobbers_the_manifest(self):
+    def test_legacy_autoship_publication_is_blocked(self):
         script = (Path(__file__).parent / 'AutoShip-Game.ps1').read_text(encoding='utf-8')
-        upload_lines = [line for line in script.splitlines() if "'release', 'upload'" in line]
-        self.assertEqual(len(upload_lines), 2)
-        self.assertNotIn('--clobber', upload_lines[0])
-        self.assertIn('$repoManifest', upload_lines[1])
-        self.assertIn('--clobber', upload_lines[1])
-        self.assertIn('Bundle asset already exists', script)
+        self.assertIn("throw 'Publishing disabled: atomic game-channel publisher", script)
+        self.assertLess(script.index("throw 'Publishing disabled:"), script.index("Run 'gh' @('release', 'upload'"))
 
     def test_configured_game_manifest_url_and_fallback(self):
         with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'BASE', Path(d)):

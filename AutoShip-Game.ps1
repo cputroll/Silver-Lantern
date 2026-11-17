@@ -39,6 +39,7 @@ try {
         Write-Output "GAMESHIP status=available installed=$installed latest=$latest"
         exit 10
     }
+    throw 'Publishing disabled: atomic game-channel publisher is not yet implemented; no assets or live manifest were changed.'
     Push-Location $repo
     try {
         $work = Join-Path ([IO.Path]::GetTempPath()) ('silvership-' + [guid]::NewGuid().ToString('N'))
