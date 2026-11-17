@@ -394,6 +394,39 @@ def resolve_game_folder():
         return profile / 'Games' / GAME_NAME
 
 
+def _cleanup_stale_siblings(destination, keep):
+    """Delete stacked ``Ocarina of Time-<random>.exe`` launcher copies, keeping only `keep`.
+
+    Never removes the copy in use: the running executable is skipped explicitly, and any
+    still-running (locked) sibling simply fails to delete and is left alone.
+    """
+    try:
+        keep_resolved = Path(keep).resolve()
+    except OSError:
+        keep_resolved = Path(keep)
+    running = None
+    if getattr(sys, 'frozen', False):
+        try:
+            running = Path(sys.executable).resolve()
+        except OSError:
+            running = None
+    try:
+        candidates = list(Path(destination).glob('Ocarina of Time-*.exe'))
+    except OSError:
+        return
+    for stale in candidates:
+        try:
+            resolved = stale.resolve()
+        except OSError:
+            continue
+        if resolved == keep_resolved or (running is not None and resolved == running):
+            continue
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
 def relocate_launcher(folder):
     if not getattr(sys, 'frozen', False):
         return False
@@ -434,6 +467,7 @@ def relocate_launcher(folder):
         register_install(destination, exe=target)
     except Exception as exc:
         log_message(f'Install registration: {exc}')
+    _cleanup_stale_siblings(destination, target)
     subprocess.Popen([str(target), *sys.argv[1:]], close_fds=False)
     return True
 

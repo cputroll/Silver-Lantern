@@ -73,3 +73,31 @@ class RelocationTests(unittest.TestCase):
             with patch.dict(launcher.os.environ, {'LOCALAPPDATA': str(root)}), patch.object(launcher.sys, 'frozen', True, create=True), patch.object(launcher.sys, 'executable', str(source)), patch.object(launcher, 'probe_writable', side_effect=probe), patch.object(launcher.subprocess, 'Popen'), patch.object(launcher, 'register_install'):
                 self.assertTrue(launcher.relocate_launcher(game))
             self.assertTrue((root / 'Programs' / 'Ocarina of Time' / 'Ocarina of Time.exe').exists())
+
+    def test_stale_sibling_copies_are_cleaned_after_relocation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); source = root / 'temp' / 'SilverLantern.exe'; source.parent.mkdir(); source.write_bytes(b'new launcher')
+            game = root / 'game'; game.mkdir(); (game / 'Ocarina of Time.exe').write_bytes(b'game user data')
+            fallback = root / 'Programs' / 'Ocarina of Time'; fallback.mkdir(parents=True); occupied = fallback / 'Ocarina of Time.exe'; occupied.write_bytes(b'other user data')
+            stale1 = fallback / 'Ocarina of Time-aaaa1111.exe'; stale1.write_bytes(b'stale1')
+            stale2 = fallback / 'Ocarina of Time-bbbb2222.exe'; stale2.write_bytes(b'stale2')
+            with patch.dict(launcher.os.environ, {'LOCALAPPDATA': str(root)}), patch.object(launcher.sys, 'frozen', True, create=True), patch.object(launcher.sys, 'executable', str(source)), patch.object(launcher.sys, 'argv', ['exe']), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'LOG', root / 'state' / 'log'), patch.object(launcher.subprocess, 'Popen') as spawn, patch.object(launcher, 'register_install'):
+                self.assertTrue(launcher.relocate_launcher(game))
+            target = Path(spawn.call_args.args[0][0])
+            self.assertFalse(stale1.exists()); self.assertFalse(stale2.exists())
+            self.assertTrue(target.exists())
+            self.assertEqual(target.read_bytes(), b'new launcher')
+            self.assertEqual(occupied.read_bytes(), b'other user data')
+
+    def test_cleanup_keeps_current_and_running_and_untouched_user_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d); current = dest / 'Ocarina of Time-new00001.exe'; current.write_bytes(b'current')
+            running = dest / 'Ocarina of Time-run00002.exe'; running.write_bytes(b'running')
+            stale = dest / 'Ocarina of Time-old00003.exe'; stale.write_bytes(b'stale')
+            user = dest / 'Ocarina of Time.exe'; user.write_bytes(b'user data')
+            with patch.object(launcher.sys, 'frozen', True, create=True), patch.object(launcher.sys, 'executable', str(running)):
+                launcher._cleanup_stale_siblings(dest, current)
+            self.assertTrue(current.exists())
+            self.assertTrue(running.exists())
+            self.assertFalse(stale.exists())
+            self.assertTrue(user.exists())
