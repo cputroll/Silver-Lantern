@@ -1095,8 +1095,8 @@ class LauncherUI:
     def start_operation(self, update=False):
         try:
             probe_writable(self.folder)
-            if shutil.disk_usage(self.folder).free < 40_000_000_000 and not update:
-                raise OSError('Not enough free space. About 40 GB is needed.')
+            # The installer checks free space after verifying existing files and cache.
+            # A fixed preflight here wrongly blocks already-complete installations.
             self.save()
         except OSError as exc:
             self.last_error = str(exc)

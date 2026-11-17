@@ -11,6 +11,17 @@ from launcher import App, IllegalTransition, State, InputMapper, resolve_folder,
 
 
 class StateTests(unittest.TestCase):
+    def test_download_defers_space_check_to_installer_even_on_low_space(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.folder = Path(d)
+            with patch.object(launcher.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 1})()), \
+                 patch.object(ui, 'save'), patch.object(launcher.threading, 'Thread') as thread:
+                ui.start_operation()
+            self.assertEqual(ui.screen, 'progress')
+            self.assertEqual(ui.state, State.DOWNLOADING)
+            thread.return_value.start.assert_called_once()
+
     def test_screenshot_debug_renders_all_screens(self):
         with tempfile.TemporaryDirectory() as d:
             output = Path(d) / 'screen.bmp'

@@ -1949,8 +1949,11 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                         (cache / name).unlink(missing_ok=True)
                         Path(str(cache / name) + '.part').unlink(missing_ok=True)
         progress.finish()
-    if not keep_assets and cache.exists():
-        shutil.rmtree(cache)
+    if pending and not keep_assets and cache.exists():
+        try:
+            cache.rmdir()  # Keep unrelated or resumable cached data.
+        except OSError:
+            pass
     if prune:
         wanted = {f['path'].casefold() for f in man['files']}
         manifest_resolved = manifest_path.resolve() if manifest_path else None

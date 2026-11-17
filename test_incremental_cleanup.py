@@ -65,6 +65,42 @@ class IncrementalTests(unittest.TestCase):
             self.assertEqual((root / 'three').read_bytes(), b'c')
             self.assertFalse((root / '.heylisten-parts').exists())
 
+    def test_completed_files_need_no_disk_preflight(self):
+        with tempfile.TemporaryDirectory() as td, redirect_stdout(io.StringIO()):
+            root = Path(td)
+            for name, data in [('one', b'a'), ('two', b'b'), ('three', b'c')]:
+                (root / name).write_bytes(data)
+            cache = root / '.heylisten-parts'
+            cache.mkdir()
+            (cache / 'preserve').write_bytes(b'cached data')
+            with patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to') as stream:
+                h.install_game(object(), fixture(), root)
+            check.assert_not_called()
+            stream.assert_not_called()
+            self.assertEqual((cache / 'preserve').read_bytes(), b'cached data')
+
+    def test_pending_install_preserves_unrelated_cache(self):
+        with tempfile.TemporaryDirectory() as td, redirect_stdout(io.StringIO()):
+            root = Path(td)
+            cache = root / '.heylisten-parts'
+            cache.mkdir()
+            (cache / 'preserve').write_bytes(b'cached data')
+            def stream(s, url, dest, **kw):
+                data = {'a': b'ab', 'b': b'c'}[url.rsplit('/', 1)[-1]]
+                dest.write_bytes(data)
+                kw['progress'](len(data))
+            with patch.object(h, 'stream_to', side_effect=stream):
+                h.install_game(object(), fixture(), root)
+            self.assertEqual((cache / 'preserve').read_bytes(), b'cached data')
+
+    def test_pending_files_still_require_disk_preflight(self):
+        with tempfile.TemporaryDirectory() as td, redirect_stdout(io.StringIO()), \
+             patch.object(h.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 1})()), \
+             patch.object(h, 'stream_to') as stream:
+            with self.assertRaises(h.UserError):
+                h.install_game(object(), fixture(), Path(td))
+            stream.assert_not_called()
+
     def test_preflight_override_zero_disables_check(self):
         with tempfile.TemporaryDirectory() as td, patch.dict('os.environ', {'SILVER_LANTERN_MIN_FREE_GB': '0'}), patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to', side_effect=RuntimeError('stop')), redirect_stdout(io.StringIO()):
             with self.assertRaises(RuntimeError):
