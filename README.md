@@ -18,6 +18,12 @@ Silver Lantern installs the game for you and keeps it up to date.
 
 **Advanced:** Run `SilverLantern.exe --builder-flow` to download the data package and open the Builder to compile locally, useful when prebuilt files are unavailable for your setup.
 
+## Game settings (DLSS, FSR, frame generation, everything)
+
+- **In game:** press **F1** or **Insert** to open the game's own settings menu (F11 toggles fullscreen, F10 the FPS counter). The game has no gamepad button for this menu; once it is open, the D-pad moves, A changes a value and B goes back.
+- **In the launcher:** go to **Settings -> Graphics**. Every option the game reads is listed by group: Upscaling, Display, Performance, Interface, Gameplay, Controls, Motion and Advanced. Press A (or Enter, or click) to change a value, and left/right to step through values. Each change is saved to the game at once. **Recommended for this PC** applies the DLSS or FSR 3.1 preset that fits your graphics card, and **Reset to game defaults** restores the game's own values. Your controls and bindings are kept either way.
+- The full option list is in [docs/graphics-options.md](docs/graphics-options.md).
+
 ## Keeping it up to date
 
 The launcher checks for tool and game updates; use `SilverLantern.exe --self-update` to apply a tool update. The normal install does not rebuild anything on your PC.
@@ -34,6 +40,7 @@ Uninstall from Windows Apps or run `SilverLantern.exe --uninstall`. Game files a
 - `--update-game [FOLDER]` runs the classic game updater for the default folder or a folder you specify; it may rebuild the game locally.
 - `--update-on-launch` also runs a quiet check with the classic updater after the normal or Builder flow.
 - `--builder-flow` downloads the data package and opens the Builder for a local build.
+- `--graphics [FOLDER]` prints every game setting (current value, allowed values, default) as JSON. Add `--set KEY=VALUE` (repeatable) to change settings first, for example `--graphics --set frame_generation=Auto --set dlss=3`.
 
 ## Troubleshooting
 
