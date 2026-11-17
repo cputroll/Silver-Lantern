@@ -1005,6 +1005,7 @@ class LauncherUI:
         os.replace(tmp, CONFIG)
 
     def check_updates(self):
+        events = self.events
         def check():
             try:
                 self.events.publish('status', 'Fetching manifest…')
