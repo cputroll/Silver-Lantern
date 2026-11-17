@@ -90,7 +90,7 @@ OPTIONS = [
     Option('robust_buffers', 'Robust buffers', 'Performance', ['Auto', 'Off', 'On'], 0, "Bounds-checked buffer reads. Off can be faster on some NVIDIA cards.", True),
     Option('fps_counter', 'FPS counter', 'Interface', ['Off', 'FPS', 'Full'], 0, 'Frame rate in the corner, or a full GPU/CPU panel. F10 cycles it in game.'),
     Option('menu_size', 'Menu size', 'Interface', ['Auto', 'Small', 'Medium', 'Large'], 0, "How large the game's own menu is drawn."),
-    Option('menu_shortcut', 'Menu shortcut', 'Interface', ['Insert or F1', 'Insert only', 'F1 only'], 0, "Which key opens the game's own settings menu."),
+    Option('menu_shortcut', 'Menu shortcut', 'Interface', ['Insert or F1', 'Insert only', 'F1 only'], 0, "Which key opens the game's own settings menu. To exit the game from that menu: its Quit row (the last row, under Restart), A or Enter twice."),
     Option('game_speed', 'Game speed', 'Gameplay', ['Per frame', 'Real time'], 1, 'How the game keeps time when it runs below 60 fps.'),
     Option('text_speed', 'Text speed', 'Gameplay', ['Normal', 'Twice as fast', 'Four times as fast', 'Instant'], 0, 'How fast dialogue letters appear.'),
     Option('audio_output', 'Audio output', 'Gameplay', ['Auto', 'Stereo', '5.1'], 0, 'The speakers the game mixes its sound for.', True),

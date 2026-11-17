@@ -943,7 +943,7 @@ class LauncherUI:
         self.gfx_picker = None
         self.set_screen('graphics')
         self.focus = len(self.GFX_ACTIONS)
-        self.status = 'Changes are saved to the game at once. In game: F1 or Insert opens its own menu.'
+        self.status = 'Saved to the game at once. In game: F1 or Insert opens its menu; its last row, Quit (A twice), exits the game.'
 
     def leave_graphics(self):
         self.gfx_picker = None
@@ -1612,7 +1612,7 @@ class LauncherUI:
                   gfx_values=dlss_values, gfx_picker=None, gfx_dlss_ok=True),
             scene('graphics-fsr', 'graphics', State.READY, 'Recommended applied: FSR 3.1 Performance', focus=len(self.GFX_ACTIONS) + 16,
                   gfx_values=fsr_values, gfx_picker=None, gfx_dlss_ok=False, folder=long),
-            scene('graphics-actions', 'graphics', State.READY, 'Changes are saved to the game at once. In game: F1 or Insert opens its own menu.', focus=0,
+            scene('graphics-actions', 'graphics', State.READY, 'Saved to the game at once. In game: F1 or Insert opens its menu; its last row, Quit (A twice), exits the game.', focus=0,
                   gfx_values=dlss_values, gfx_picker=None, gfx_dlss_ok=True),
             scene('graphics-picker', 'graphics', State.READY, '', focus=1, gfx_values=dlss_values, gfx_picker='frame_generation',
                   gfx_return=len(self.GFX_ACTIONS) + 5, gfx_dlss_ok=True),

@@ -21,6 +21,7 @@ Silver Lantern installs the game for you and keeps it up to date. The app instal
 ## Game settings (DLSS, FSR, frame generation, everything)
 
 - **In game:** press **F1** or **Insert** to open the game's own settings menu (F11 toggles fullscreen, F10 the FPS counter). The game has no gamepad button for this menu; once it is open, the D-pad moves, A changes a value and B goes back.
+- **To exit the game from that menu:** select **Quit**, the last row (just under **Restart**, on the same page as Text speed and Audio output), then press **A** or **Enter** twice. Esc or B cancels. Save first, because unsaved progress is lost.
 - **In the launcher:** go to **Settings -> Graphics**. Every option the game reads is listed by group: Upscaling, Display, Performance, Interface, Gameplay, Controls, Motion and Advanced. Press A (or Enter, or click) to change a value, and left/right to step through values. Each change is saved to the game at once. **Recommended for this PC** applies the DLSS or FSR 3.1 preset that fits your graphics card, and **Reset to game defaults** restores the game's own values. Your controls and bindings are kept either way.
 - The full option list is in [docs/graphics-options.md](docs/graphics-options.md).
 

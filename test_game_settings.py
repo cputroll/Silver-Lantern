@@ -119,6 +119,17 @@ class GameSettingsTests(unittest.TestCase):
         json.dumps(d)
 
 
+class ExitGameHintTests(unittest.TestCase):
+    def test_quit_row_is_documented_everywhere(self):
+        root = Path(gs.__file__).parent
+        self.assertIn('Quit', gs.BY_KEY['menu_shortcut'].desc)
+        readme = (root / 'README.md').read_text(encoding='utf-8')
+        self.assertIn('To exit the game from that menu', readme)
+        doc = (root / 'docs' / 'graphics-options.md').read_text(encoding='utf-8')
+        self.assertIn('Exit Game already exists', doc)
+        self.assertIn('Quit (A twice), exits the game', (root / 'launcher.py').read_text(encoding='utf-8'))
+
+
 class GraphicsCliTests(unittest.TestCase):
     def run_cli(self, *args):
         out, err = io.StringIO(), io.StringIO()
