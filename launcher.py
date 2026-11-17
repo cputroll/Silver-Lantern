@@ -950,7 +950,30 @@ class Painter:
             self.ttf.TTF_CloseFont(font)
 
     # -- text
+    def _safe_char(self, role):
+        font = self.fonts.get(role)
+        for ch in ('·', '-', '.', '?', ' '):
+            if font is None or self.ttf.TTF_GlyphIsProvided(font, ord(ch)):
+                return ch
+        return '?'
+
+    def _sanitize(self, value, role):
+        """Replace any codepoint the loaded font lacks with a covered fallback (never tofu)."""
+        value = str(value)
+        font = self.fonts.get(role)
+        if font is None or all(ord(ch) < 128 for ch in value):
+            return value
+        safe = self._safe_char(role)
+        out = []
+        for ch in value:
+            if ord(ch) < 128 or self.ttf.TTF_GlyphIsProvided(font, ord(ch)):
+                out.append(ch)
+            else:
+                out.append(safe)
+        return ''.join(out)
+
     def measure(self, role, value):
+        value = self._sanitize(value, role)
         w, h = ctypes.c_int(), ctypes.c_int()
         if self.ttf.TTF_SizeUTF8(self.fonts[role], str(value).encode('utf-8'), ctypes.byref(w), ctypes.byref(h)) != 0:
             return 10 ** 6, 0
@@ -1008,6 +1031,7 @@ class Painter:
         value = str(value)
         if max_width is not None:
             value = (self.fit_middle if middle else self.fit)(role, value, max_width)
+        value = self._sanitize(value, role)
         if not value:
             return 0
         key = (role, value, color)
