@@ -388,20 +388,71 @@ def load_game_folder():
         return None
 
 
+def game_folder_candidates():
+    profile = Path(os.environ.get('USERPROFILE', str(Path.home())))
+    legacy = profile / 'Games' / 'HeyListen'
+    primary = Path(r'C:\Games') / GAME_NAME
+    fallback = profile / 'Games' / GAME_NAME
+    return primary, fallback, legacy
+
+
+def has_game_data(folder):
+    """True when `folder` holds an installed, partial or cached game (not just user files)."""
+    folder = Path(folder)
+    if not folder.is_dir():
+        return False
+    if (folder / '.heylisten-get' / 'game-manifest.json').is_file():
+        return True
+    if (folder / 'bin' / 'HeyListen.exe').is_file() or (folder / 'hookshot_version.txt').is_file():
+        return True
+    try:
+        for pat in ('*.part', '*.part.json', '*.p*.part', '*.join'):
+            if any(True for _ in folder.glob(pat)):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def game_data_mtime(folder):
+    folder = Path(folder)
+    newest = 0.0
+    for marker in (folder / '.heylisten-get' / 'game-manifest.json', folder / 'bin' / 'HeyListen.exe',
+                   folder / 'hookshot_version.txt'):
+        try:
+            newest = max(newest, marker.stat().st_mtime)
+        except OSError:
+            pass
+    return newest
+
+
+def adopt_existing(candidates):
+    """Return the newest candidate folder that already holds game data, or None.
+
+    This is what stops a second 33 GB download when a partial install is already on
+    disk in another candidate location.
+    """
+    with_data = [Path(c) for c in candidates if has_game_data(c)]
+    return max(with_data, key=game_data_mtime) if with_data else None
+
+
 def resolve_game_folder():
     configured = load_game_folder()
     if configured:
         return configured
-    profile = Path(os.environ.get('USERPROFILE', str(Path.home())))
-    legacy = profile / 'Games' / 'HeyListen'
+    primary, fallback, legacy = game_folder_candidates()
+    # First run (no configured destination): resume an existing partial or full
+    # install instead of silently downloading a second copy into a fresh folder.
+    adopted = adopt_existing((legacy, primary, fallback))
+    if adopted:
+        return adopted
     if legacy.exists():
         return legacy
-    primary = Path(r'C:\Games') / GAME_NAME
     try:
         probe_writable(primary)
         return primary
     except OSError:
-        return profile / 'Games' / GAME_NAME
+        return fallback
 
 
 def _cleanup_stale_siblings(destination, keep):

@@ -20,17 +20,86 @@ class ResolveGameFolderTests(unittest.TestCase):
             self.assertEqual(launcher.resolve_game_folder(), Path('custom'))
 
     def test_legacy_folder_is_adopted(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(launcher.os.environ, {'USERPROFILE': temp}), patch.object(launcher, 'load_game_folder', return_value=None), patch.object(launcher, 'probe_writable'):
-            legacy = Path(temp) / 'Games' / 'HeyListen'; legacy.mkdir(parents=True)
-            self.assertEqual(launcher.resolve_game_folder(), legacy)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); primary, fallback, legacy = root / 'primary', root / 'fallback', root / 'legacy'
+            for f in (primary, fallback, legacy): f.mkdir()
+            with patch.object(launcher, 'load_game_folder', return_value=None), \
+                 patch.object(launcher, 'game_folder_candidates', return_value=(primary, fallback, legacy)), \
+                 patch.object(launcher, 'probe_writable'):
+                self.assertEqual(launcher.resolve_game_folder(), legacy)
 
     def test_both_defaults_unwritable_still_resolve_game_folder(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(launcher.os.environ, {'USERPROFILE': temp}), patch.object(launcher, 'load_game_folder', return_value=None), patch.object(launcher, 'probe_writable', side_effect=PermissionError):
-            self.assertEqual(launcher.resolve_game_folder(), Path(temp) / 'Games' / launcher.GAME_NAME)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); primary, fallback, legacy = root / 'primary', root / 'fallback', root / 'legacy'
+            for f in (primary, fallback): f.mkdir()
+            with patch.object(launcher, 'load_game_folder', return_value=None), \
+                 patch.object(launcher, 'game_folder_candidates', return_value=(primary, fallback, legacy)), \
+                 patch.object(launcher, 'probe_writable', side_effect=PermissionError):
+                self.assertEqual(launcher.resolve_game_folder(), fallback)
 
     def test_unwritable_primary_falls_back(self):
-        with tempfile.TemporaryDirectory() as temp, patch.dict(launcher.os.environ, {'USERPROFILE': temp}), patch.object(launcher, 'load_game_folder', return_value=None):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); primary, fallback, legacy = root / 'primary', root / 'fallback', root / 'legacy'
+            for f in (primary, fallback): f.mkdir()
             def probe(path):
-                if path == Path(r'C:\Games') / launcher.GAME_NAME: raise PermissionError('denied')
-            with patch.object(launcher, 'probe_writable', side_effect=probe):
-                self.assertEqual(launcher.resolve_game_folder(), Path(temp) / 'Games' / launcher.GAME_NAME)
+                if path == primary: raise PermissionError('denied')
+            with patch.object(launcher, 'load_game_folder', return_value=None), \
+                 patch.object(launcher, 'game_folder_candidates', return_value=(primary, fallback, legacy)), \
+                 patch.object(launcher, 'probe_writable', side_effect=probe):
+                self.assertEqual(launcher.resolve_game_folder(), fallback)
+
+    def test_resumes_existing_partial_install_not_a_fresh_folder(self):
+        import json
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary, fallback, legacy = root / 'primary', root / 'fallback', root / 'legacy'
+            for f in (primary, fallback, legacy): f.mkdir()
+            cache = primary / '.heylisten-get'; cache.mkdir()
+            (cache / 'game-manifest.json').write_text(json.dumps({'files': []}))
+            (primary / 'user-save.dat').write_text('keep me')
+            with patch.object(launcher, 'load_game_folder', return_value=None), \
+                 patch.object(launcher, 'game_folder_candidates', return_value=(primary, fallback, legacy)), \
+                 patch.object(launcher, 'probe_writable') as probe:
+                self.assertEqual(launcher.resolve_game_folder(), primary)
+                probe.assert_not_called()
+            self.assertEqual((primary / 'user-save.dat').read_text(), 'keep me')
+
+    def test_partial_download_files_are_adopted(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary, fallback, legacy = root / 'primary', root / 'fallback', root / 'legacy'
+            for f in (primary, fallback, legacy): f.mkdir()
+            (primary / 'whole-07.bin.part').write_bytes(b'partial')
+            with patch.object(launcher, 'load_game_folder', return_value=None), \
+                 patch.object(launcher, 'game_folder_candidates', return_value=(primary, fallback, legacy)):
+                self.assertEqual(launcher.resolve_game_folder(), primary)
+
+    def test_adopts_newest_candidate_when_multiple_have_data(self):
+        import json, os
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary, fallback, legacy = root / 'primary', root / 'fallback', root / 'legacy'
+            for f in (primary, fallback, legacy): f.mkdir()
+            for f in (primary, fallback):
+                cache = f / '.heylisten-get'; cache.mkdir()
+                (cache / 'game-manifest.json').write_text(json.dumps({'files': []}))
+            os.utime(primary / '.heylisten-get' / 'game-manifest.json', (100, 100))
+            os.utime(fallback / '.heylisten-get' / 'game-manifest.json', (200, 200))
+            with patch.object(launcher, 'load_game_folder', return_value=None), \
+                 patch.object(launcher, 'game_folder_candidates', return_value=(primary, fallback, legacy)):
+                self.assertEqual(launcher.resolve_game_folder(), fallback)
+
+    def test_no_data_keeps_fallback_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            primary, fallback, legacy = root / 'primary', root / 'fallback', root / 'legacy'
+            for f in (primary, fallback, legacy): f.mkdir()
+            with patch.object(launcher, 'load_game_folder', return_value=None), \
+                 patch.object(launcher, 'game_folder_candidates', return_value=(primary, fallback, legacy)), \
+                 patch.object(launcher, 'probe_writable'):
+                self.assertEqual(launcher.resolve_game_folder(), legacy)  # legacy exists first
+            legacy.rmdir()
+            with patch.object(launcher, 'load_game_folder', return_value=None), \
+                 patch.object(launcher, 'game_folder_candidates', return_value=(primary, fallback, legacy)), \
+                 patch.object(launcher, 'probe_writable'):
+                self.assertEqual(launcher.resolve_game_folder(), primary)  # then writable primary
