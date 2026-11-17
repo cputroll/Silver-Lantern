@@ -70,6 +70,40 @@ def windows_animations_enabled():
     return True
 
 
+_DPI_AWARE = False
+
+
+def enable_dpi_awareness():
+    """Become per-monitor DPI aware before any window exists.
+
+    Without this Windows lies to SDL about the window size on 125%/150% displays, so
+    everything is drawn at 100% and then bitmap-upscaled (soft). Once aware, SDL reports
+    true device pixels and render_density()/font scaling draw sharp at every scale.
+    """
+    global _DPI_AWARE
+    if _DPI_AWARE or os.name != 'nt':
+        return
+    _DPI_AWARE = True
+    try:
+        # Per-monitor v2 (Windows 10 1703+): keeps a resizable window sharp on every monitor.
+        try:
+            if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+                return
+        except (AttributeError, OSError):
+            pass
+        try:
+            if ctypes.windll.shcore.SetProcessDpiAwareness(2) == 0:  # PROCESS_PER_MONITOR_DPI_AWARE
+                return
+        except (AttributeError, OSError):
+            pass
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
+    except Exception:
+        pass
+
+
 def create_renderer(s, window, screenshot=False):
     if screenshot:
         return s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
@@ -1968,8 +2002,14 @@ class LauncherUI:
         if getattr(sys, 'frozen', False): os.environ['PYSDL2_DLL_PATH'] = str(ROOT)
         import sdl2 as s
         import sdl2.sdlttf as ttf
+        enable_dpi_awareness()
         s.SDL_SetHint(b'SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS', b'0')
         s.SDL_SetHint(b'SDL_GAMECONTROLLER_USE_BUTTON_LABELS', b'1')
+        try:
+            s.SDL_SetHint(b'SDL_WINDOWS_DPI_AWARENESS', b'permonitorv2')
+            s.SDL_SetHint(b'SDL_WINDOWS_DPI_SCALING', b'1')
+        except Exception:
+            pass
         if s.SDL_Init(s.SDL_INIT_VIDEO | s.SDL_INIT_GAMECONTROLLER) != 0: raise RuntimeError(s.SDL_GetError().decode())
         if ttf.TTF_Init() != 0: raise RuntimeError('SDL_ttf initialization failed')
         size = CANVAS

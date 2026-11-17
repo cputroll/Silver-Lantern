@@ -2504,6 +2504,11 @@ def run_builder_flow(s, a) -> int:
 
 def run() -> None:
     """Entry point: friendly errors, full details in the log, keep the window open."""
+    try:
+        import launcher
+        launcher.enable_dpi_awareness()
+    except Exception:
+        pass
     no_pause = '--no-pause' in sys.argv
     try:
         code = main()

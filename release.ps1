@@ -44,6 +44,20 @@ try {
   if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)." }
   $exe = Join-Path $stage 'SilverLantern.exe'
   if (-not (Test-Path $exe -PathType Leaf)) { throw 'PyInstaller did not produce SilverLantern.exe.' }
+  # Per-monitor DPI awareness is enabled at runtime (launcher.enable_dpi_awareness) and via SDL
+  # hints, so the launcher renders at device pixels on 125%/150% displays. Embed a matching
+  # manifest too (belt and suspenders); keep the existing UAC manifest by merging. Non-fatal.
+  $mt = Get-Command mt.exe -ErrorAction SilentlyContinue
+  if ($mt -and (Test-Path (Join-Path $here 'dpi.manifest'))) {
+    try {
+      $cur = Join-Path $build 'extracted.manifest'
+      & mt.exe -nologo "-inputresource:$exe;#1" "-out:$cur" | Out-Null
+      if ((Test-Path $cur) -and -not (Select-String -Path $cur -Pattern 'dpiAware' -Quiet)) {
+        & mt.exe -nologo -manifest (Join-Path $here 'dpi.manifest') -manifest $cur "-outputresource:$exe;#1" | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warning 'Could not embed DPI manifest; runtime DPI awareness still applies.' }
+      }
+    } catch { Write-Warning "DPI manifest embed skipped: $($_.Exception.Message)" }
+  }
   $bakedVersion = (& $exe --version --manifest (Join-Path $here 'sources.json') | Out-String).Trim()
   if ($LASTEXITCODE -ne 0) { throw "Executable version check failed ($LASTEXITCODE)." }
   if ($bakedVersion -cne $version) { throw "Executable version $bakedVersion does not match $version in sources.json and tag $Tag." }
