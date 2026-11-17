@@ -27,6 +27,11 @@ BASE = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) el
 STATE_DIR = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'SilverLantern'
 CONFIG = STATE_DIR / 'launcher.json'
 LOG = STATE_DIR / 'launcher.log'
+# Test-only isolation overrides, read once: registry parent under HKCU and shortcut directories.
+# Empty/unset values preserve normal Windows registration and known-folder behavior.
+_TEST_REG_ROOT = os.environ.get('SILVER_LANTERN_REG_ROOT') or r'Software\Microsoft\Windows\CurrentVersion\Uninstall'
+_TEST_DESKTOP_DIR = os.environ.get('SILVER_LANTERN_DESKTOP_DIR') or None
+_TEST_STARTMENU_DIR = os.environ.get('SILVER_LANTERN_STARTMENU_DIR') or None
 GAME_NAME = 'Legend of Zelda Ocarina of Time'
 MANIFEST_URL = 'https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/game-manifest.json'
 
@@ -94,7 +99,7 @@ def _known_desktop():
 
 
 def shortcut_path():
-    desktop = _known_desktop() or Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Desktop'
+    desktop = Path(_TEST_DESKTOP_DIR) if _TEST_DESKTOP_DIR else (_known_desktop() or Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Desktop')
     return desktop / (GAME_NAME + '.lnk')
 
 
@@ -181,10 +186,11 @@ def create_link(link, target, working_dir):
 
 
 def start_menu_path():
-    return Path(os.environ.get('APPDATA', str(Path.home()))) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs' / (GAME_NAME + '.lnk')
+    folder = Path(_TEST_STARTMENU_DIR) if _TEST_STARTMENU_DIR else Path(os.environ.get('APPDATA', str(Path.home()))) / 'Microsoft' / 'Windows' / 'Start Menu' / 'Programs'
+    return folder / (GAME_NAME + '.lnk')
 
 
-UNINSTALL_KEY = r'Software\Microsoft\Windows\CurrentVersion\Uninstall\SilverLantern'
+UNINSTALL_KEY = _TEST_REG_ROOT.rstrip('\\') + r'\SilverLantern'
 OWNED_FILES = ('SilverLantern.exe', 'HeyListen-Get.exe', 'SDL2.dll', 'sources.json',
                'README.md', 'Apply-HeyListen-Preset.ps1', 'SilverLantern-Get.cmd',
                'SilverLantern-Preset.cmd', 'Update-Game.ps1', 'Watch-Game.ps1',
