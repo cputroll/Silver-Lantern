@@ -1,6 +1,3 @@
-# Silver Lantern 1.6.0
+# Silver Lantern 1.6.1
 
-- Installs into the game folder and becomes the default way to launch.
-- A full graphics settings screen exposes every game option.
-- Fixed preset values that the game previously ignored.
-- The game's own menu opens with F1.
+- Fixed: first run could crash while creating shortcuts; errors now show the in-app error screen.
