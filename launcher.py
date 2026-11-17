@@ -123,12 +123,27 @@ def ps_quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
+def log_message(message):
+    text = str(message)
+    try:
+        LOG.parent.mkdir(parents=True, exist_ok=True)
+        with LOG.open('a', encoding='utf-8') as stream:
+            stream.write(text + '\n')
+    except OSError:
+        pass
+    try:
+        if sys.stdout is not None:
+            print(text, file=sys.stdout, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def powershell(script, wait=True):
     encoded = base64.b64encode(script.encode('utf-16le')).decode('ascii')
     args = ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded]
     flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
     if wait:
-        return subprocess.run(args, check=True, creationflags=flags)
+        return subprocess.run(args, check=True, creationflags=flags, stderr=subprocess.PIPE)
     return subprocess.Popen(args, creationflags=flags, close_fds=True)
 
 
@@ -161,7 +176,7 @@ def optimize_defender(folder):
             return True
         # Never lose track of an exclusion when the game folder changes.
         return False
-    print('Optimizing for a faster install — click Yes if Windows asks.', flush=True)
+    log_message('Optimizing for a faster install — click Yes if Windows asks.')
     success = defender_elevated(folder, True)
     config['defender_state'] = 'on' if success else 'unknown'
     if success:
@@ -182,7 +197,17 @@ def remove_defender_exclusion():
 
 def create_link(link, target, working_dir):
     script = '$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut(' + ps_quote(link) + '); $l.TargetPath=' + ps_quote(target) + '; $l.WorkingDirectory=' + ps_quote(working_dir) + '; $l.Save()'
-    powershell(script)
+    for attempt in range(2):
+        try:
+            link.parent.mkdir(parents=True, exist_ok=True)
+            powershell(script)
+            return True
+        except (OSError, subprocess.SubprocessError) as exc:
+            stderr = getattr(exc, 'stderr', None)
+            if isinstance(stderr, bytes):
+                stderr = stderr.decode(errors='replace')
+            log_message(f'Shortcut {link} attempt {attempt + 1}: {exc}; stderr: {stderr or "(empty)"}')
+    return False
 
 
 def start_menu_path():
@@ -203,10 +228,15 @@ def register_install(folder, exe=None):
     if winreg is None:
         return
     exe = exe or launcher_target(folder)
-    create_shortcut(Path(folder), exe=exe)
-    link = start_menu_path()
-    link.parent.mkdir(parents=True, exist_ok=True)
-    create_link(link, exe, exe.parent)
+    try:
+        create_shortcut(Path(folder), exe=exe)
+    except Exception as exc:
+        log_message(f'Desktop shortcut: {exc}')
+    try:
+        link = start_menu_path()
+        create_link(link, exe, exe.parent)
+    except Exception as exc:
+        log_message(f'Start Menu shortcut: {exc}')
     size = 0
     for base, dirs, files in os.walk(folder, followlinks=False):
         for name in files:
@@ -214,14 +244,17 @@ def register_install(folder, exe=None):
                 size += (Path(base) / name).stat().st_size
             except OSError:
                 pass
-    with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
-        for name, value, kind in (
-            ('DisplayName', GAME_NAME, winreg.REG_SZ), ('DisplayIcon', str(exe), winreg.REG_SZ),
-            ('InstallLocation', str(exe.parent), winreg.REG_SZ),
-            ('UninstallString', '"' + str(exe) + '" --uninstall', winreg.REG_SZ),
-            ('NoModify', 1, winreg.REG_DWORD), ('NoRepair', 1, winreg.REG_DWORD),
-            ('EstimatedSize', min((size + 1023) // 1024, 0xffffffff), winreg.REG_DWORD)):
-            winreg.SetValueEx(key, name, 0, kind, value)
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
+            for name, value, kind in (
+                ('DisplayName', GAME_NAME, winreg.REG_SZ), ('DisplayIcon', str(exe), winreg.REG_SZ),
+                ('InstallLocation', str(exe.parent), winreg.REG_SZ),
+                ('UninstallString', '"' + str(exe) + '" --uninstall', winreg.REG_SZ),
+                ('NoModify', 1, winreg.REG_DWORD), ('NoRepair', 1, winreg.REG_DWORD),
+                ('EstimatedSize', min((size + 1023) // 1024, 0xffffffff), winreg.REG_DWORD)):
+                winreg.SetValueEx(key, name, 0, kind, value)
+    except Exception as exc:
+        log_message(f'Uninstall registration: {exc}')
 
 
 def remove_registration():
@@ -327,10 +360,11 @@ def relocate_launcher(folder):
             return False
     with source.open('rb') as original, target.open('xb') as copy:
         shutil.copyfileobj(original, copy)
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    with LOG.open('a', encoding='utf-8') as log:
-        log.write(f'Launcher relocation: {target}\n')
-    register_install(destination, exe=target)
+    log_message(f'Launcher relocation: {target}')
+    try:
+        register_install(destination, exe=target)
+    except Exception as exc:
+        log_message(f'Install registration: {exc}')
     subprocess.Popen([str(target), *sys.argv[1:]], close_fds=False)
     return True
 
@@ -352,7 +386,7 @@ def schedule_owned_cleanup():
 def confirm_uninstall(message, gui=False):
     if gui and os.name == 'nt':
         return ctypes.windll.user32.MessageBoxW(None, message, 'Uninstall Silver Lantern', 0x24) == 6
-    print(message)
+    log_message(message)
     return input('Continue? [y/N] ').strip().lower() == 'y'
 
 
@@ -366,7 +400,7 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
                    f'Your saves stay at {saves} — use --purge-saves to remove them too')
     message += f'\nGame folder: {folder or "(not configured)"}'
     if not confirm_uninstall(message, gui):
-        print('Uninstall cancelled.')
+        log_message('Uninstall cancelled.')
         return False
     had_folder = bool(folder and folder.exists())
     if had_folder:
@@ -395,7 +429,7 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
         unknown = sum(1 for base, dirs, files in os.walk(folder, followlinks=False)
                       if not Path(base).relative_to(folder).parts or Path(base).relative_to(folder).parts[0].casefold() != 'user'
                       for name in files if (Path(base) / name).resolve() != running)
-        print(f'Unknown user files preserved: {unknown}')
+        log_message(f'Unknown user files preserved: {unknown}')
         for base, dirs, files in os.walk(folder, topdown=False, followlinks=False):
             try:
                 Path(base).rmdir()
@@ -805,7 +839,7 @@ class Painter:
 
 
 class LauncherUI:
-    def __init__(self):
+    def __init__(self, startup_error=None):
         self.profile = Path(os.environ.get('USERPROFILE', str(Path.home())))
         self.primary = Path(r'C:\Games') / GAME_NAME
         self.fallback = self.profile / 'Games' / GAME_NAME
@@ -814,7 +848,7 @@ class LauncherUI:
             self.config = json.loads(CONFIG.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             self.config = {}
-        self.folder = resolve_game_folder()
+        self.folder = self.fallback if startup_error is not None else resolve_game_folder()
         self.screen = 'main' if self.config else 'folder'
         self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
         self.focus = 0
@@ -833,7 +867,8 @@ class LauncherUI:
         self.gfx_values, self.gfx_picker, self.gfx_return, self.gfx_dlss_ok = {}, None, 0, True
         if self.state == State.READY and getattr(sys, 'frozen', False) and '--screenshot' not in sys.argv:
             threading.Thread(target=self.shortcut_worker, daemon=True).start()
-        self.check_updates()
+        if startup_error is None:
+            self.check_updates()
 
     def save(self):
         persisted = defender_config()
@@ -1727,6 +1762,18 @@ class LauncherUI:
             painter.close(); s.SDL_DestroyRenderer(renderer); s.SDL_DestroyWindow(window); ttf.TTF_Quit(); s.SDL_Quit()
 
 
+def show_startup_error(exc):
+    log_message(f'Startup error: {exc}')
+    try:
+        ui = LauncherUI(startup_error=exc)
+        ui.last_error = str(exc)
+        ui.set_screen('error')
+        ui.run()
+    except Exception as screen_error:
+        log_message(f'Unable to display error screen: {screen_error}')
+    return 1
+
+
 def main():
     if '--cli' in sys.argv:
         args = sys.argv[1:]; args.remove('--cli')
@@ -1749,9 +1796,7 @@ def main():
             LauncherUI().run()
         return 0
     except Exception as exc:
-        if os.name == 'nt': ctypes.windll.user32.MessageBoxW(None, str(exc) + '\nUse --cli for the console version.', 'Silver Lantern', 0x10)
-        else: print(str(exc), file=sys.stderr)
-        return 1
+        return show_startup_error(exc)
 
 
 if __name__ == '__main__':

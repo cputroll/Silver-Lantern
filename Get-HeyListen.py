@@ -2166,8 +2166,11 @@ def ensure_cli_console():
 def main() -> int:
     if getattr(sys, 'frozen', False) and (not sys.argv[1:] or sys.argv[1:] in (['--gui'], ['--gui', '--no-self-update'])):
         import launcher
-        if launcher.relocate_launcher(launcher.resolve_game_folder()):
-            return 0
+        try:
+            if launcher.relocate_launcher(launcher.resolve_game_folder()):
+                return 0
+        except Exception as exc:
+            return launcher.show_startup_error(exc)
     cli_requested = '--cli' in sys.argv[1:]
     if cli_requested:
         sys.argv.remove('--cli')
