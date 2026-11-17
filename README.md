@@ -1,41 +1,29 @@
 # Silver Lantern
 
-Silver Lantern downloads a data package and prepares the Builder for you on Windows.
+Silver Lantern installs the game for you and keeps it up to date.
 
-## Getting started
+## What you need
 
-1. Extract the downloaded ZIP into a folder you can write to, then open **HeyListen-Get.exe**.
-2. If Windows SmartScreen warns you, select **More info**, then **Run anyway**. This warning can appear for a small, unsigned app; only run a copy you trust.
-3. Wait for the download to finish. The data package and Builder are saved in your **Downloads** folder. Allow about **26 GB** of free space for the download and about **60 GB** while building.
-4. In the Builder window:
-   1. Pick the downloaded data package file.
-   2. Tick **NVIDIA DLSS** if your graphics card is an NVIDIA RTX.
-   3. Press **Build**.
+- Windows 10 or 11
+- About 40 GB of free disk space
+- An internet connection
 
-The tool picks a graphics preset for you: NVIDIA DLSS on RTX cards that support it, otherwise FSR 3.1 Performance.
+## Install
 
-## Installing game files
+1. Download the latest release ZIP and extract it anywhere you can write files.
+2. Double-click `HeyListen-Get.exe` in the extracted folder.
+3. If Windows SmartScreen appears, select **More info -> Run anyway**. This warning can appear for a small app; only run a copy you trust.
+4. Wait for the progress bar while the game downloads. The first download is about 33 GB.
+5. When installation finishes, the game opens automatically.
 
-To download ready-made game files straight into a folder, run:
+## Keeping it up to date
 
-    HeyListen-Get.exe --install-game
-
-- The default folder is `%USERPROFILE%\Games\HeyListen`. To use another folder, add it after the flag: `--install-game "D:\Games\HeyListen"`.
-- Every file is checked. Only missing or changed files are downloaded, so running it again is quick and an interrupted download picks up where it stopped.
-- Add `--dry-run` to see what would be downloaded without changing anything.
-- Add `--prune` to also remove files that are no longer part of the game. Your saves in the `user` folder are never removed.
-
-## Keeping it current
-
-- **Update the game now:** `HeyListen-Get.exe --update-game` updates the game in the default folder. You can also give it a folder: `--update-game "D:\Games\HeyListen"`.
-- **Just check:** `HeyListen-Get.exe --update-game --update-dry-run` tells you if an update is available and changes nothing.
-- **Check every time you run the tool:** add `--update-on-launch`. After its normal work, the tool quietly checks whether a game update is available.
-- **Daily check:** in PowerShell, from the tool's folder, run `.\Watch-Game.ps1 -InstallTask`. Windows then checks once a day. Remove it with `.\Watch-Game.ps1 -UninstallTask`.
-- Rebuilds reuse the build cache, so an update usually takes minutes instead of about 35.
-- The tool also updates itself when a new version is released.
+Every run checks for updates to both the tool and the game and downloads only what changed. Nothing is ever rebuilt on your PC.
 
 ## Troubleshooting
 
-- **Download interrupted?** Run the tool again; it resumes the download where possible.
-- **Antivirus warning?** Security software can sometimes flag small, unsigned utilities by mistake. Check that your copy came from a source you trust before allowing it.
-- **Need the log?** Look for `HeyListen-Get.log` beside the tool. If that folder cannot be written to, check `%LOCALAPPDATA%\SilverLantern\HeyListen-Get.log`. If neither file exists, capture the message shown in the window instead.
+- **Download interrupted?** Run the tool again; the download resumes.
+- **Antivirus warning?** Security software can sometimes flag a small utility by mistake. Check that your copy came from a source you trust before allowing it.
+- **Need the log?** Look for `HeyListen-Get.log` beside the EXE. If that folder cannot be written to, check `%LOCALAPPDATA%\SilverLantern\HeyListen-Get.log`. If neither file exists, capture the message shown in the window instead.
+- **Want to check for updates now?** Run `HeyListen-Get.exe` again.
+- **Moving the install?** The game folder defaults to `%USERPROFILE%\Games\HeyListen`. To install into another folder, run `HeyListen-Get.exe --install-game "D:\Games\HeyListen"` from a command window.
