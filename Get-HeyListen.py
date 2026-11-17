@@ -663,7 +663,7 @@ GAME_ASSET_URL = "https://github.com/cputroll/Silver-Lantern/releases/download/g
 def parse_game_manifest(text: str) -> dict:
     try:
         man = json.loads(text)
-        if not isinstance(man, dict) or man['version'] != 1 or man['build'] != 'game-v1':
+        if not isinstance(man, dict) or man['version'] not in (1, 2) or man['build'] != 'game-v1':
             raise ValueError('unsupported manifest')
         files = man['files']
         if not isinstance(files, list):
@@ -675,8 +675,20 @@ def parse_game_manifest(text: str) -> dict:
                 raise ValueError('invalid size')
             return value
         def digest(value):
-            if not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{64}', value):
+            if not isinstance(value, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', value):
                 raise ValueError('invalid SHA-256')
+            return value.lower()
+        asset_map = {}
+        if man['version'] == 2:
+            if not isinstance(man['assets'], list):
+                raise ValueError('assets must be a list')
+            for asset in man['assets']:
+                name = asset['asset']
+                if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', name) or name in ('.', '..') or name.casefold() in assets:
+                    raise ValueError('invalid or duplicate asset')
+                assets.add(name.casefold())
+                size(asset['size']); asset['sha256'] = digest(asset['sha256'])
+                asset_map[name] = asset
         for item in files:
             path = item['path']
             if not isinstance(path, str) or not path or '\\' in path or ':' in path:
@@ -689,17 +701,25 @@ def parse_game_manifest(text: str) -> dict:
                     or any(p.casefold() == 'user' for p in segments[:-1])):
                 raise ValueError('duplicate or reserved path')
             seen.add(key)
-            size(item['size']); digest(item['sha256'])
-            parts = item['parts']
+            size(item['size']); item['sha256'] = digest(item['sha256'])
+            parts = item['parts' if man['version'] == 1 else 'segments']
             if not isinstance(parts, list) or not parts:
                 raise ValueError('missing parts')
             for part in parts:
                 asset = part['asset']
-                if not isinstance(asset, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', asset) or asset in ('.', '..') or asset.casefold() in assets:
-                    raise ValueError('invalid or duplicate asset')
-                assets.add(asset.casefold())
-                size(part['size']); digest(part['sha256'])
-            if sum(p['size'] for p in parts) != item['size']:
+                if man['version'] == 1:
+                    if not isinstance(asset, str) or not re.fullmatch(r'[A-Za-z0-9_.-]+', asset) or asset in ('.', '..') or asset.casefold() in assets:
+                        raise ValueError('invalid or duplicate asset')
+                    assets.add(asset.casefold())
+                    size(part['size']); part['sha256'] = digest(part['sha256'])
+                else:
+                    if not isinstance(asset, str) or asset not in asset_map:
+                        raise ValueError('unknown asset')
+                    offset = size(part['offset']); length = size(part['length'])
+                    part['sha256'] = digest(part['sha256'])
+                    if offset + length > asset_map[asset]['size']:
+                        raise ValueError('segment exceeds asset')
+            if sum(p['size' if man['version'] == 1 else 'length'] for p in parts) != item['size']:
                 raise ValueError('part sizes do not match file')
         if size(man['total_bytes']) != sum(f['size'] for f in files):
             raise ValueError('total size mismatch')
@@ -748,7 +768,7 @@ def game_path(root: Path, relative: str) -> Path:
 
 
 def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = False,
-                 manifest_path: Path | None = None) -> None:
+                 manifest_path: Path | None = None, keep_assets: bool = False) -> None:
     root = root.expanduser()
     pending = []
     kept = 0
@@ -762,15 +782,19 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 continue
         pending.append(item)
     cache = root / '.heylisten-parts'
+    v2 = man['version'] == 2
+    assets = {a['asset']: a for a in man['assets']} if v2 else {
+        p['asset']: p for f in man['files'] for p in f['parts']}
+    needed = {p['asset'] for f in pending for p in f['segments' if v2 else 'parts']}
     download_bytes = 0
-    for item in pending:
-        for part in item['parts']:
-            done = cache / part['asset']
-            partial = Path(str(done) + '.part')
-            if done.is_file() and done.stat().st_size == part['size'] and sha256(done) == part['sha256']:
-                continue
-            have = partial.stat().st_size if partial.is_file() else 0
-            download_bytes += part['size'] - (have if have < part['size'] else 0)
+    for name in needed:
+        part = assets[name]
+        done = cache / name
+        partial = Path(str(done) + '.part')
+        if done.is_file() and done.stat().st_size == part['size'] and sha256(done) == part['sha256']:
+            continue
+        have = partial.stat().st_size if partial.is_file() else 0
+        download_bytes += part['size'] - (have if have < part['size'] else 0)
     log(f"Plan: {len(man['files']) - len(pending)} files present, {len(pending)} to download ({download_bytes / 1024**3:.2f} GB), {kept / 1024**3:.2f} GB kept")
     if dry_run:
         return
@@ -796,7 +820,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 dest.unlink(missing_ok=True)
                 raise ValueError(f"SHA-256 mismatch: {part['asset']}")
         with ThreadPoolExecutor(max_workers=3) as pool:
-            list(pool.map(fetch, (p for f in pending for p in f['parts'])))
+            list(pool.map(fetch, (assets[name] for name in sorted(needed))))
         progress.finish()
         for item in pending:
             target = game_path(root, item['path'])
@@ -804,14 +828,26 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             temp = target.with_name(target.name + '.heylisten-new')
             try:
                 with temp.open('wb') as output:
-                    for part in item['parts']:
+                    for part in item['segments' if v2 else 'parts']:
                         with (cache / part['asset']).open('rb') as source:
-                            shutil.copyfileobj(source, output, 1024 * 1024)
+                            source.seek(part['offset'] if v2 else 0)
+                            remaining = part['length'] if v2 else part['size']
+                            segment_hash = hashlib.sha256()
+                            while remaining:
+                                chunk = source.read(min(remaining, 1024 * 1024))
+                                if not chunk:
+                                    raise ValueError(f"short segment: {part['asset']}")
+                                output.write(chunk)
+                                segment_hash.update(chunk)
+                                remaining -= len(chunk)
+                            if segment_hash.hexdigest() != part['sha256']:
+                                raise ValueError(f"segment SHA-256 mismatch: {part['asset']}")
                 if temp.stat().st_size != item['size'] or sha256(temp) != item['sha256']:
                     raise ValueError(f"assembled SHA-256 mismatch: {item['path']}")
                 temp.replace(target)
             finally:
                 temp.unlink(missing_ok=True)
+    if not keep_assets and cache.exists():
         shutil.rmtree(cache)
     if prune:
         wanted = {f['path'].casefold() for f in man['files']}
@@ -820,7 +856,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             if not path.is_file() or path.is_symlink():
                 continue
             relative = path.relative_to(root)
-            if any(x.casefold() == 'user' for x in relative.parts[:-1]):
+            if any(x.casefold() == 'user' for x in relative.parts[:-1]) or (keep_assets and relative.parts[0].casefold() == '.heylisten-parts'):
                 continue
             if relative.as_posix().casefold() in wanted or path.name.casefold() == 'game-manifest.json' or (manifest_resolved and path.resolve() == manifest_resolved):
                 continue
@@ -925,6 +961,7 @@ def main() -> int:
     ap.add_argument('--install-game', nargs='?', const=str(Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Games' / 'HeyListen'), metavar='FOLDER')
     ap.add_argument('--game-manifest', default=GAME_MANIFEST_URL, metavar='PATH_OR_URL')
     ap.add_argument('--dry-run', action='store_true')
+    ap.add_argument('--keep-assets', action='store_true', help='Keep downloaded game assets after installation')
     ap.add_argument('--prune', action='store_true')
     ap.add_argument('--update-game', nargs='?', const=default_game_folder(), metavar='FOLDER')
     ap.add_argument('--update-dry-run', action='store_true')
@@ -938,7 +975,7 @@ def main() -> int:
         s = session()
         game_manifest = load_game_manifest(s, a.game_manifest)
         local_manifest = None if urlparse(a.game_manifest).scheme in ('http', 'https') else Path(a.game_manifest).expanduser()
-        install_game(None, game_manifest, Path(a.install_game), a.dry_run, a.prune, local_manifest)
+        install_game(None, game_manifest, Path(a.install_game), a.dry_run, a.prune, local_manifest, a.keep_assets)
         return 0
     if a.version:
         print(local_version({}))
