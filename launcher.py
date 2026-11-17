@@ -49,6 +49,31 @@ def game_manifest_url():
 APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.6.2')
 
 
+def play_tip(folder):
+    try:
+        shortcut = game_settings.read_values(folder)['menu_shortcut']
+        keys = {0: 'F1 or Insert', 1: 'Insert', 2: 'F1'}.get(shortcut)
+    except OSError:
+        keys = None
+    first = (f'While playing, press {keys} for settings or to quit.' if keys else
+             'While playing, open the game menu for settings or to quit.')
+    return first, 'To quit, select Quit and press A or Enter twice.'
+
+
+def windows_animations_enabled():
+    try:
+        enabled = ctypes.c_int(1)
+        if ctypes.windll.user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(enabled), 0):
+            return bool(enabled.value)
+    except (AttributeError, OSError):
+        pass
+    return True
+
+
+def tip_offset(t, snap=False):
+    return 0 if snap else round(3 * math.sin(t * math.tau / 2))
+
+
 def cli_command(*args):
     if getattr(sys, 'frozen', False):
         return [sys.executable, '--cli', *map(str, args)]
@@ -918,6 +943,7 @@ class LauncherUI:
         self.screen = 'main' if self.config else 'folder'
         self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
         self.focus = 0
+        self.reduce_motion = not windows_animations_enabled()
         self.status = 'Checking for updates…'
         self.progress = ''
         self.progress_info = {}
@@ -1457,6 +1483,13 @@ class LauncherUI:
     def draw_hero(self, p, dt):
         p.scene()
         x = MARGIN
+        if self.state in (State.READY, State.UPDATE_AVAILABLE):
+            first, second = play_tip(self.folder)
+            tip_y = 47 + tip_offset(time.monotonic(), getattr(self, 'snap', False) or self.reduce_motion)
+            p.fill(x, tip_y, 700, 78, SURFACE, 235, 10)
+            p.ring(x, tip_y, 700, 78, ACCENT, 180, 10, 1)
+            p.text('caption', first, x + 18, tip_y + 14, INK, max_width=664)
+            p.text('caption', second, x + 18, tip_y + 42, INK_DIM, max_width=664)
         p.text('overline', 'THE LEGEND OF ZELDA', x + 2, 160, ACCENT)
         p.text('display', 'Ocarina of Time', x - 2, 176, INK, max_width=760)
         if self.state == State.PLAYING:

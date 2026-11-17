@@ -10,6 +10,53 @@ import sys
 from launcher import App, IllegalTransition, State, InputMapper, resolve_folder, legacy_exists, ProgressEvents
 
 
+class TipTests(unittest.TestCase):
+    def test_shortcut_tip_tracks_game_setting_without_writing(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            ini = folder / 'hookshot_options.ini'
+            for value, key in ((0, 'F1 or Insert'), (1, 'Insert'), (2, 'F1')):
+                content = f'menu_shortcut={value}\n'
+                ini.write_text(content)
+                self.assertIn(f'press {key} ', launcher.play_tip(folder)[0])
+                self.assertIn('Quit', launcher.play_tip(folder)[1])
+                self.assertEqual(ini.read_text(), content)
+
+    def test_hero_tip_moves_without_overlapping_title_or_navigation(self):
+        from unittest.mock import MagicMock
+        with tempfile.TemporaryDirectory() as d, patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.folder, ui.state, ui.focus = Path(d), State.READY, 0
+            ui.reduce_motion = False
+            painter = MagicMock()
+            painter.height.return_value = 20
+            painter.measure.return_value = (20, 20)
+            painter.fit_middle.side_effect = lambda role, value, width: value
+            frames = []
+            for t in (0, .5):
+                painter.reset_mock()
+                ui.hits = []
+                with patch.object(launcher.time, 'monotonic', return_value=t):
+                    ui.draw_hero(painter, .016)
+                frame = next(c.args for c in painter.fill.call_args_list if len(c.args) >= 4 and c.args[2:4] == (700, 78))
+                frames.append(frame)
+                self.assertLess(frame[1] + frame[3], 160)
+                self.assertTrue(all(y >= 330 for _, y, _, _, _ in ui.hits))
+                self.assertIn(0, [h[4] for h in ui.hits])
+            self.assertNotEqual(frames[0][1], frames[1][1])
+
+    def test_reduced_motion_disables_bounce(self):
+        with patch.object(launcher, 'windows_animations_enabled', return_value=False):
+            with patch.object(LauncherUI, 'check_updates'):
+                self.assertTrue(LauncherUI().reduce_motion)
+
+    def test_tip_bounce_is_bounded_and_can_snap(self):
+        samples = [launcher.tip_offset(t) for t in (0, .25, .5, .75, 1)]
+        self.assertGreater(max(samples), min(samples))
+        self.assertTrue(all(-4 <= x <= 4 for x in samples))
+        self.assertEqual(launcher.tip_offset(.25, snap=True), 0)
+
+
 class StateTests(unittest.TestCase):
     def test_standalone_version_matches_release_version(self):
         import json
