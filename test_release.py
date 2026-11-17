@@ -25,6 +25,9 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(z.read('support/HeyListen-Get.exe'), exe_bytes)
             self.assertEqual(len(z.read('Read me.txt').decode('utf-8').splitlines()), 2)
             self.assertTrue(exe_bytes.startswith(b'MZ'))
+            import struct
+            pe = struct.unpack_from('<I', exe_bytes, 0x3c)[0]
+            self.assertEqual(struct.unpack_from('<H', exe_bytes, pe + 4 + 20 + 68)[0], 2)
             with tempfile.TemporaryDirectory() as temp:
                 exe = Path(temp) / 'SilverLantern.exe'
                 exe.write_bytes(exe_bytes)

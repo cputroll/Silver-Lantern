@@ -47,7 +47,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -2099,8 +2099,66 @@ def relocate_transient() -> bool:
     finally:
         if staging:
             staging.unlink(missing_ok=True)
-    subprocess.Popen([str(target), *sys.argv[1:]], close_fds=True)
+    subprocess.Popen([str(target), *sys.argv[1:]], close_fds=False)
     return True
+
+
+def _attach_parent_console():
+    try:
+        import ctypes
+        return bool(ctypes.windll.kernel32.AttachConsole(-1))
+    except (AttributeError, OSError):
+        return False
+
+
+def _rebind_console_streams():
+    for name in ('stdout', 'stderr'):
+        stream = os.fdopen(os.open('CONOUT$', os.O_WRONLY), 'w', encoding='utf-8', errors='replace', buffering=1)
+        setattr(sys, name, stream)
+
+
+def _restore_inherited_pipes():
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.GetStdHandle.argtypes = [wintypes.DWORD]
+        kernel.GetStdHandle.restype = wintypes.HANDLE
+        kernel.GetFileType.argtypes = [wintypes.HANDLE]
+        kernel.GetFileType.restype = wintypes.DWORD
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.DuplicateHandle.argtypes = [wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.DuplicateHandle.restype = wintypes.BOOL
+        restored = False
+        for name, number in (('stdout', -11), ('stderr', -12)):
+            handle = kernel.GetStdHandle(number & 0xffffffff)
+            if handle and handle != wintypes.HANDLE(-1).value and kernel.GetFileType(handle) in (1, 3):
+                duplicate = wintypes.HANDLE()
+                process = kernel.GetCurrentProcess()
+                if not kernel.DuplicateHandle(process, handle, process, ctypes.byref(duplicate), 0, False, 2):
+                    continue
+                fd = msvcrt.open_osfhandle(duplicate.value, os.O_WRONLY)
+                setattr(sys, name, os.fdopen(fd, 'w', encoding='utf-8', errors='replace', buffering=1))
+                restored = restored or name == 'stdout'
+        return restored
+    except (AttributeError, OSError, ImportError):
+        return False
+
+
+def ensure_cli_console():
+    try:
+        if sys.stdout is not None and sys.stdout.fileno() >= 0:
+            return
+    except (AttributeError, OSError, ValueError):
+        pass
+    if _restore_inherited_pipes():
+        return
+    if _attach_parent_console():
+        try:
+            _rebind_console_streams()
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -2166,6 +2224,8 @@ def main() -> int:
     ap.add_argument('--no-pause', action='store_true', help="don't wait for Enter before closing")
     ap.add_argument('--plain', action='store_true', help='no colors')
     a = ap.parse_args()
+    if getattr(sys, 'frozen', False):
+        ensure_cli_console()
 
     if a.uninstall:
         import launcher
