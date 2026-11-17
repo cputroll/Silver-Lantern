@@ -60,6 +60,13 @@ class UpdaterTests(unittest.TestCase):
                 z.writestr('support/SilverLantern.exe', b'executable')
             self.assertEqual(app.stage_executable(archive, root, 'Run Silver Lantern.exe').read_bytes(), b'executable')
 
+    def test_archive_fallback_for_game_named_client(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); archive = root / 'update.zip'
+            with zipfile.ZipFile(archive, 'w') as z:
+                z.writestr('support/SilverLantern.exe', b'executable')
+            self.assertEqual(app.stage_executable(archive, root, 'Ocarina of Time.exe').read_bytes(), b'executable')
+
     def test_equal_release_never_handoffs(self):
         with mock.patch.object(sys, 'frozen', True, create=True), mock.patch.object(app, '_self_update_started', False), mock.patch.object(app, 'latest_app_release', return_value={'tag_name': 'v' + app.APP_VERSION}), mock.patch.object(app.subprocess, 'Popen') as launch:
             app.check_self_update(mock.Mock(), {}, ['--self-update'])
