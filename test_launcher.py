@@ -21,6 +21,21 @@ class StateTests(unittest.TestCase):
                 # A full 1280x720x32 BMP; an empty or missing frame fails here.
                 self.assertGreater(frame.stat().st_size, 1280 * 720 * 3, name)
 
+    def test_settings_speed_action_reports_result(self):
+        ui = launcher.LauncherUI()
+        ui.screen = 'settings'
+        ui.focus = 1
+        with patch.object(launcher, 'optimize_defender', return_value=True) as optimize:
+            ui.activate()
+            optimize.assert_called_once_with(ui.folder)
+            self.assertEqual(ui.status, 'Added')
+        with patch.object(launcher, 'optimize_defender', return_value=False):
+            ui.activate()
+            self.assertEqual(ui.status, 'Windows declined')
+        with patch.object(launcher, 'optimize_defender', side_effect=OSError('unavailable')):
+            ui.activate()
+            self.assertEqual(ui.status, 'Unavailable')
+
     def test_backdrop_asset_ships(self):
         self.assertTrue((Path(launcher.__file__).parent / 'assets' / 'ui-backdrop.bmp').is_file())
         release = (Path(launcher.__file__).parent / 'release.ps1').read_text(encoding='utf-8')

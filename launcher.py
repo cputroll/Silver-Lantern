@@ -40,7 +40,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.5.0')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.5.1')
 
 
 def cli_command(*args):
@@ -841,7 +841,10 @@ class LauncherUI:
             LOG.touch(exist_ok=True)
             os.startfile(LOG)
         elif choice == 'Speed up installs (one Windows permission, instant)':
-            self.status = 'Optimization will be attempted with the next install plan.'
+            try:
+                self.status = 'Added' if optimize_defender(self.folder) else 'Windows declined'
+            except Exception:
+                self.status = 'Unavailable'
         elif choice == 'Change game folder': self.set_screen('folder')
         elif choice.startswith('Desktop shortcut'):
             enabled = not self.config.get('shortcut', True)

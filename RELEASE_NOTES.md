@@ -1,5 +1,6 @@
-# Silver Lantern 1.5.0
+# Silver Lantern 1.5.1
 
-- **Faster installation:** A streaming pipeline overlaps downloads and file assembly, with startup improvements. In testing, installs were roughly three times faster than the earlier release; actual speeds vary.
-- **More resilient downloads:** Checkpoint recovery retries a damaged bundle rather than restarting the entire installation, and verifies incomplete files before resuming.
-- **Saves kept by default:** Uninstall now preserves saves. Use `--purge-saves` if you explicitly want to remove them too.
+- Redesigned launcher with improved navigation and clearer text.
+- Live download progress, speed, and time remaining, with clearer offline recovery.
+- A simpler ZIP root with one launcher and a readme; supporting files are grouped separately.
+- Faster, more reliable updates and automatic retry when a connection stalls.
