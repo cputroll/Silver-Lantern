@@ -26,9 +26,9 @@ def load_state(folder):
 
 
 @contextmanager
-def state_lock(directory, timeout=10):
+def state_lock(directory, timeout=10, name='channel-state.lock'):
     directory.mkdir(parents=True, exist_ok=True)
-    with (directory / 'channel-state.lock').open('a+b') as lock:
+    with (directory / name).open('a+b') as lock:
         lock.seek(0, os.SEEK_END)
         if lock.tell() == 0:
             lock.write(b'0')
@@ -56,6 +56,10 @@ def state_lock(directory, timeout=10):
                 msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def install_lock(folder, timeout=10):
+    return state_lock(Path(folder) / '.heylisten-get', timeout, name='install-operation.lock')
 
 
 def save_state(folder, revision, digest):

@@ -2332,6 +2332,15 @@ def cache_game_manifest(folder: Path, manifest: dict) -> None:
 
 
 def install_from_manifest(s, a, folder: Path) -> None:
+    import game_channel
+    try:
+        with game_channel.install_lock(folder):
+            _install_from_manifest_locked(s, a, folder)
+    except TimeoutError as exc:
+        raise UserError('Another game installation or update is in progress.', 'Wait for it to finish and try again.', 'busy') from exc
+
+
+def _install_from_manifest_locked(s, a, folder: Path) -> None:
     step("Game file list")
     try:
         with stream_session() as manifest_session:

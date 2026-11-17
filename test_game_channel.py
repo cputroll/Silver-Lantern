@@ -141,6 +141,18 @@ class GameChannelTests(unittest.TestCase):
         data, revision, digest = game_channel.resolve_info(Mock(side_effect=[pointer, content]))
         self.assertEqual((data, revision, digest), (content, 1, hashlib.sha256(content).hexdigest()))
 
+    def test_install_lock_blocks_second_process(self):
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            code = "import game_channel,sys; from pathlib import Path; exec('with game_channel.install_lock(Path(sys.argv[1]), timeout=.2):\\n pass')"
+            with game_channel.install_lock(Path(tmp)):
+                child = subprocess.run([sys.executable, '-c', code, tmp], capture_output=True, timeout=5)
+                self.assertNotEqual(child.returncode, 0)
+                self.assertIn(b'TimeoutError', child.stderr)
+
     def test_rejects_hash_mismatch(self):
         fetch = Mock(side_effect=[self.pointer(b'expected'), b'altered'])
         with self.assertRaises(ValueError):

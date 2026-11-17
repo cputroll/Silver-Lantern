@@ -40,6 +40,15 @@ class SyncTests(unittest.TestCase):
         self.assertIn('Connection stalled - retrying...', out.getvalue())
         self.assertIn('Fetching manifest', out.getvalue())
 
+    def test_install_operation_acquires_lock_before_manifest_fetch(self):
+        import game_channel
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as d, game_channel.install_lock(Path(d)):
+            args = SimpleNamespace(game_manifest='https://example.test/manifest', dry_run=False, prune=False, keep_assets=False)
+            with patch.object(game_channel, 'install_lock', side_effect=TimeoutError('Another installation is in progress')):
+                with self.assertRaisesRegex(h.UserError, 'Another game installation'):
+                    h.install_from_manifest(None, args, Path(d))
+
     def test_bad_json(self):
         with self.assertRaises(ValueError): h.parse_game_manifest('{')
     def test_missing_fields(self):
