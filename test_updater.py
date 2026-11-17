@@ -42,7 +42,7 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(command[5:], ['--no-launch', '--out', 'folder', '--no-self-update'])
 
     def test_update_only_helper_replaces_without_relaunch(self):
-        command = self._run_update(['--self-update'])
+        command = ['helper', '--apply-update-internal', 'app.exe', 'new.exe', '123', '--update-only-internal', 'v999.0.0']
         with mock.patch.object(app, 'wait_for_parent'), \
              mock.patch.object(app, 'replace_transactionally'), \
              mock.patch.object(app, 'cleanup_stage'), \
@@ -51,6 +51,15 @@ class UpdaterTests(unittest.TestCase):
             app._apply_update(Path('app.exe'), Path('stage/new.exe'), 123, command[5:])
         launch.assert_not_called()
         log.assert_called_with('Updated to v999.0.0. Run the tool again to continue.')
+
+    def test_self_update_relaunches_with_original_args(self):
+        command = self._run_update(['--self-update', '--no-launch'])
+        self.assertEqual(command[1], '--apply-update-internal')
+        self.assertEqual(command[5:], ['--no-launch'])
+        with mock.patch.object(app, 'wait_for_parent'), mock.patch.object(app, 'replace_transactionally'), \
+             mock.patch.object(app, 'cleanup_stage'), mock.patch.object(app.subprocess, 'Popen') as launch:
+            app._apply_update(Path('app.exe'), Path('stage/new.exe'), 123, command[5:])
+        launch.assert_called_once_with(['app.exe', '--no-launch'], cwd='.')
 
     def test_version_is_not_manifest_controlled(self):
         self.assertNotEqual(app.local_version({'tool': {'version': '999.0.0'}}), '999.0.0')

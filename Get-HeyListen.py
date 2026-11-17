@@ -1218,7 +1218,7 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
         helper = stage / 'update-helper.exe'
         shutil.copy2(target, helper)
         if '--self-update' in args:
-            rest = ['--update-only-internal', remote]
+            rest = [arg for arg in args if arg != '--self-update']
         else:
             rest = list(args)
             if '--no-self-update' not in rest:
@@ -1229,6 +1229,8 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
         shutil.rmtree(stage, ignore_errors=True)
         raise
     # The helper relaunches in this same console (no CREATE_NEW_CONSOLE, on purpose).
+    if '--self-update' in args:
+        print('SILVERLANTERN_UPDATE_HANDOFF', flush=True)
     done(f"updating to {remote.lstrip('vV')}, restarting...")
     say()
     sys.exit(0)

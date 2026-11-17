@@ -23,6 +23,7 @@ CONFIG = STATE_DIR / 'launcher.json'
 LOG = STATE_DIR / 'launcher.log'
 GAME_NAME = 'Legend of Zelda Ocarina of Time'
 MANIFEST_URL = 'https://raw.githubusercontent.com/cputroll/Silver-Lantern/main/game-manifest.json'
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.3.0')
 
 
 def cli_command(*args):
@@ -91,6 +92,23 @@ def worker_command(events, args):
                 events.publish('progress', parse_progress(line) or {'text': line.strip()})
         code = process.wait()
         events.publish('cancelled' if events.cancelled.is_set() else ('complete' if code == 0 else 'error'), code)
+    except Exception as exc:
+        events.publish('error', str(exc))
+
+
+def tool_update_worker(events, args):
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run([sys.executable, '--self-update', *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        output = result.stdout or ''
+        with LOG.open('a', encoding='utf-8') as log:
+            log.write(output)
+        if result.returncode:
+            events.publish('error', f'Tool update failed (exit {result.returncode}).')
+        elif 'SILVERLANTERN_UPDATE_HANDOFF' in output.splitlines():
+            events.publish('tool_complete', 0)
+        else:
+            events.publish('tool_current', 0)
     except Exception as exc:
         events.publish('error', str(exc))
 
@@ -228,6 +246,7 @@ class LauncherUI:
         self.axis = [0.0, 0.0]
         self.running = True
         self.last_error = ''
+        self.tool_update_available = False
         self.check_updates()
 
     def save(self):
@@ -246,6 +265,9 @@ class LauncherUI:
                 # TODO v1.5: cache the verified manifest hash after installation.
                 digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
                 self.events.publish('check', (manifest.get('revision'), digest))
+            except Exception:
+                self.events.publish('offline', None)
+            try:
                 req = urllib.request.Request('https://api.github.com/repos/cputroll/Silver-Lantern/releases/latest', headers={'User-Agent':'SilverLantern', 'Accept':'application/vnd.github+json'})
                 with urllib.request.urlopen(req, timeout=10) as response:
                     release = json.load(response)
@@ -259,21 +281,32 @@ class LauncherUI:
 
     def buttons(self):
         if self.screen == 'folder':
-            return (['Use existing folder'] if legacy_exists(self.legacy) else []) + ['Use default folder', 'Choose another folder', 'Continue']
+            return (['Update now'] if self.tool_update_available else []) + (['Use existing folder'] if legacy_exists(self.legacy) else []) + ['Use default folder', 'Choose another folder', 'Continue']
         if self.screen == 'settings':
-            return ['Change game folder', 'Desktop shortcut: ' + ('On' if self.config.get('shortcut', True) else 'Off'), 'Check for updates now', 'View log', 'Back']
+            return ['Change game folder', 'Desktop shortcut: ' + ('On' if self.config.get('shortcut', True) else 'Off'), 'Check for updates automatically: ' + ('On' if self.config.get('auto_tool_update', True) else 'Off'), 'Check for updates now', 'View log', 'Back']
         if self.screen == 'progress':
-            return ['Cancel']
+            return [] if self.operation == 'tool' else ['Cancel']
         if self.screen == 'error':
             return ['Retry', 'View log', 'Back']
         if self.screen == 'update':
             return ['Update now', 'Later']
+        if self.tool_update_available:
+            return ['Update now', 'Settings']
         if self.state == State.PLAYING:
             return ['Settings']
         return (['Play', 'Update', 'Settings'] if self.state in (State.READY, State.UPDATE_AVAILABLE) else ['Download', 'Settings'])
 
     def set_screen(self, screen):
         self.screen, self.focus = screen, 0
+
+    def start_tool_update(self):
+        if self.operation == 'tool' and self.screen == 'progress':
+            return
+        self.operation = 'tool'
+        self.progress = 'Updating Silver Lantern…'
+        self.set_screen('progress')
+        args = [arg for arg in sys.argv[1:] if arg not in ('--self-update', '--no-self-update')]
+        threading.Thread(target=tool_update_worker, args=(self.events, args), daemon=True).start()
 
     def start_operation(self, update=False):
         try:
@@ -311,11 +344,15 @@ class LauncherUI:
                 self.set_screen('error')
         elif choice == 'Download': self.start_operation()
         elif choice == 'Update': self.set_screen('update')
-        elif choice == 'Update now': self.start_operation(True)
+        elif choice == 'Update now':
+            if self.tool_update_available: self.start_tool_update()
+            else: self.start_operation(True)
         elif choice in ('Settings',): self.set_screen('settings')
         elif choice in ('Back', 'Later'): self.set_screen('main')
         elif choice == 'Cancel': terminate_worker(self.events)
-        elif choice == 'Retry': self.start_operation(self.operation == 'update')
+        elif choice == 'Retry':
+            if self.operation == 'tool': self.start_tool_update()
+            else: self.start_operation(self.operation == 'update')
         elif choice == 'View log':
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             LOG.touch(exist_ok=True)
@@ -330,6 +367,9 @@ class LauncherUI:
             except Exception as exc:
                 self.last_error = str(exc)
                 self.set_screen('error')
+        elif choice.startswith('Check for updates automatically:'):
+            self.config['auto_tool_update'] = not self.config.get('auto_tool_update', True)
+            self.save()
         elif choice == 'Check for updates now': self.check_updates()
         elif choice == 'Use existing folder': self.folder = self.legacy
         elif choice == 'Use default folder':
@@ -358,12 +398,14 @@ class LauncherUI:
                 self.set_screen('error')
 
     def action(self, action):
+        if self.screen == 'progress' and self.operation == 'tool':
+            return
         if action == 'up': self.focus = max(0, self.focus - 1)
         elif action == 'down': self.focus = min(len(self.buttons()) - 1, self.focus + 1)
         elif action == 'accept': self.activate()
         elif action == 'menu': self.set_screen('main' if self.screen == 'settings' else 'settings')
         elif action in ('back', 'cancel'):
-            if self.screen == 'progress': terminate_worker(self.events)
+            if self.screen == 'progress' and self.operation != 'tool': terminate_worker(self.events)
             elif self.screen != 'main': self.set_screen('main')
 
     def drain(self):
@@ -398,7 +440,20 @@ class LauncherUI:
                     self.status = 'A game data update may be available.'
                 else: self.status = 'Game data: ' + (str(revision) if revision is not None else 'unversioned')
             elif kind == 'tool_check':
-                if value not in ('v1.3.0', 'unknown'): self.status = 'Silver Lantern update available: ' + value
+                match = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)', value)
+                if match and tuple(map(int, match.groups())) > tuple(map(int, APP_VERSION.split('.'))):
+                    self.tool_update_available = True
+                    self.status = 'Silver Lantern update available: ' + value
+                    if self.config.get('auto_tool_update', True) and self.screen != 'progress':
+                        self.start_tool_update()
+            elif kind == 'tool_complete':
+                # The child must exit first; its helper then waits for this GUI to exit before swapping.
+                self.running = False
+            elif kind == 'tool_current':
+                self.tool_update_available = False
+                self.operation = None
+                self.status = 'Silver Lantern is up to date.'
+                self.set_screen('main')
             elif kind == 'upstream_check' and value == 10:
                 self.status = 'An upstream builder update is available.'
 
@@ -449,7 +504,8 @@ class LauncherUI:
                 for action in self.mapper.tick(now): self.action(action)
                 while s.SDL_PollEvent(ctypes.byref(event)):
                     typ = event.type
-                    if typ == s.SDL_QUIT: self.running = False
+                    if typ == s.SDL_QUIT:
+                        if not (self.screen == 'progress' and self.operation == 'tool'): self.running = False
                     elif typ == s.SDL_CONTROLLERDEVICEADDED: open_pads()
                     elif typ == s.SDL_CONTROLLERDEVICEREMOVED:
                         pad = self.controllers.pop(event.cdevice.which, None)
@@ -498,7 +554,7 @@ class LauncherUI:
                 s.SDL_RenderPresent(renderer)
                 s.SDL_Delay(16)
         finally:
-            if self.screen == 'progress': terminate_worker(self.events)
+            if self.screen == 'progress' and self.operation != 'tool': terminate_worker(self.events)
             for pad in self.controllers.values(): s.SDL_GameControllerClose(pad)
             ttf.TTF_CloseFont(font); s.SDL_DestroyRenderer(renderer); s.SDL_DestroyWindow(window); ttf.TTF_Quit(); s.SDL_Quit()
 

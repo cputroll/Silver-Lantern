@@ -4,12 +4,65 @@ from pathlib import Path
 from unittest.mock import patch
 import os
 import subprocess
-from launcher import create_shortcut, cli_command
+from launcher import create_shortcut, cli_command, LauncherUI, tool_update_worker
 import sys
 from launcher import App, IllegalTransition, State, InputMapper, resolve_folder, legacy_exists, ProgressEvents
 
 
 class StateTests(unittest.TestCase):
+    def test_tool_worker_invocation_and_success(self):
+        events = ProgressEvents()
+        with patch('launcher.subprocess.run') as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = 'SILVERLANTERN_UPDATE_HANDOFF\n'
+            tool_update_worker(events, ['--gui'])
+        self.assertEqual(run.call_args.args[0], [sys.executable, '--self-update', '--gui'])
+        self.assertEqual(events.queue.get_nowait(), ('tool_complete', 0))
+
+    def test_tool_worker_already_current(self):
+        events = ProgressEvents()
+        with patch('launcher.subprocess.run') as run:
+            run.return_value.returncode = 0
+            run.return_value.stdout = 'Self-update check complete.\n'
+            tool_update_worker(events, [])
+        self.assertEqual(events.queue.get_nowait(), ('tool_current', 0))
+
+    def test_tool_worker_failure(self):
+        events = ProgressEvents()
+        with patch('launcher.subprocess.run') as run:
+            run.return_value.returncode = 7
+            run.return_value.stdout = ''
+            tool_update_worker(events, [])
+        self.assertEqual(events.queue.get_nowait(), ('error', 'Tool update failed (exit 7).'))
+
+    def test_tool_check_auto_and_manual(self):
+        for auto in (True, False):
+            with self.subTest(auto=auto), patch.object(LauncherUI, 'check_updates'):
+                ui = LauncherUI()
+                ui.config['auto_tool_update'] = auto
+                ui.events.publish('tool_check', 'v999.0.0')
+                with patch.object(ui, 'start_tool_update') as start:
+                    ui.drain()
+                self.assertEqual(start.called, auto)
+                if not auto: self.assertIn('Update now', ui.buttons())
+
+    def test_tool_error_opens_retry_screen(self):
+        with patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.operation = 'tool'
+            ui.events.publish('error', 'failed')
+            ui.drain()
+            self.assertEqual(ui.screen, 'error')
+            self.assertIn('Retry', ui.buttons())
+            self.assertIn('View log', ui.buttons())
+
+    def test_tool_success_exits(self):
+        with patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.events.publish('tool_complete', 0)
+            ui.drain()
+            self.assertFalse(ui.running)
+
     def test_frozen_cli_uses_same_executable(self):
         with patch.object(sys, 'frozen', True, create=True):
             self.assertEqual(cli_command('--version'), [sys.executable, '--cli', '--version'])
