@@ -60,7 +60,7 @@ class UpdateCliTests(unittest.TestCase):
             self.assertIn('-Force', popen.call_args.args[0])
 
     def test_on_launch_failure_is_nonfatal(self):
-        with mock.patch.object(sys, 'argv', ['tool', '--update-on-launch', '--no-self-update', '--no-launch', '--no-preset']), mock.patch.object(cli, 'load_manifest', return_value={'game': {}, 'tool': {}}), mock.patch.object(cli, 'session'), mock.patch.object(cli, 'download_builder'), mock.patch.object(cli, 'download_game'), mock.patch.object(cli, 'run_game_update', return_value=1) as update, mock.patch.object(cli.Path, 'mkdir'), contextlib.redirect_stdout(io.StringIO()):
+        with mock.patch.object(sys, 'argv', ['tool', '--builder-flow', '--no-pause', '--update-on-launch', '--no-self-update', '--no-launch', '--no-preset']), mock.patch.object(cli, 'load_manifest', return_value={'game': {}, 'tool': {}}), mock.patch.object(cli, 'session'), mock.patch.object(cli, 'download_builder'), mock.patch.object(cli, 'download_game'), mock.patch.object(cli, 'run_game_update', return_value=1) as update, mock.patch.object(cli.Path, 'mkdir'), contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(), 0)
             update.assert_called_once()
 

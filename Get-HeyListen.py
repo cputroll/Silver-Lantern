@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-HeyListen Get — one-click downloader for HeyListen + the game dump.
+HeyListen Get - one-click installer for the prebuilt game (or HeyListen + the game dump).
 
   * Reads a manifest (sources.json, or the same file at a URL) that lists where the game
-    comes from. Edit that manifest and every run picks the new links up — no code change.
+    comes from. Edit that manifest and every run picks the new links up - no code change.
   * Fetches the latest HeyListen release from GitHub and keeps HeyListenBuilder.exe current.
   * Downloads the Ocarina of Time (Switch 2) .nup, resumable, size/hash verified.
   * Seeds a Performance preset (DLSS on NVIDIA RTX + DLSS builds, else FSR 3.1) and can launch the Builder.
@@ -19,15 +19,21 @@ Requires: pip install curl_cffi
 from __future__ import annotations
 
 import argparse
+import atexit
+import contextlib
+import errno
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
+import traceback
 import zipfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -72,8 +78,22 @@ GPU_QUERY = ("Get-CimInstance Win32_VideoController | Sort-Object AdapterRAM -De
              "Select-Object -First 1 -ExpandProperty Name")
 
 
-def log(msg: str) -> None:
-    print(time.strftime("[%H:%M:%S] ") + msg, flush=True)
+LOG_NAME = "HeyListen-Get.log"
+LOG_PATH: Path | None = None
+LOG_MAX = 2 * 1024 * 1024
+
+
+def log(msg: str, echo: bool = False) -> None:
+    """Technical record: appended to the log file only (never the screen)."""
+    line = time.strftime("[%H:%M:%S] ") + str(msg)
+    if LOG_PATH is not None:
+        try:
+            with open(LOG_PATH, "a", encoding="utf-8", errors="replace") as f:
+                f.write(line + "\n")
+        except OSError:
+            pass
+    if echo:
+        say(line)
 
 
 def human(n: float) -> str:
@@ -84,11 +104,486 @@ def human(n: float) -> str:
     return f"{n:.1f} TB"
 
 
+# ---------------------------------------------------------------- ui
+# Screen output for people; log() above is the technical record (file only).
+_ANSI = False
+_PLAIN = False
+_OPEN_STEP = False
+_QUICKEDIT_SAVED: int | None = None
+STEP_COL = 34
+TONES = {"green": "32", "yellow": "33", "red": "31", "bold": "1", "dim": "2"}
+
+
+def _ascii(text: str) -> str:
+    text = (str(text).replace("\u2014", "-").replace("\u2013", "-").replace("\u2026", "...")
+            .replace("\u201c", '"').replace("\u201d", '"').replace("\u2019", "'").replace("\u2018", "'"))
+    return text.encode("ascii", "replace").decode("ascii")
+
+
+def _paint(text: str, tone: str | None) -> str:
+    if tone and _ANSI and tone in TONES:
+        return f"\x1b[{TONES[tone]}m{text}\x1b[0m"
+    return text
+
+
+def _write(text: str) -> None:
+    try:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        pass
+
+
+def _end_step() -> None:
+    global _OPEN_STEP
+    if _OPEN_STEP:
+        _OPEN_STEP = False
+        _write("\n")
+
+
+def say(text: str = "", tone: str | None = None) -> None:
+    _end_step()
+    _write("  " + _paint(_ascii(text), tone) + "\n" if text else "\n")
+
+
+def warn(text: str) -> None:
+    say(text, "yellow")
+
+
+def step(label: str) -> None:
+    global _OPEN_STEP
+    _end_step()
+    _write("  " + _ascii(label).ljust(STEP_COL - 2, ".") + " ")
+    _OPEN_STEP = True
+    log(f"step: {label}")
+
+
+def done(status: str, tone: str | None = "green") -> None:
+    global _OPEN_STEP
+    if not _OPEN_STEP:
+        say(status, tone)
+        return
+    _OPEN_STEP = False
+    _write(_paint(_ascii(status), tone) + "\n")
+    log(f"  -> {status}")
+
+
+def term_width() -> int:
+    try:
+        return max(20, shutil.get_terminal_size((80, 24)).columns)
+    except (OSError, ValueError):
+        return 80
+
+
+def is_tty() -> bool:
+    try:
+        return sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def set_title(text: str) -> None:
+    if os.name != "nt" or not is_tty():
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW(_ascii(text))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def fmt_eta(seconds: float) -> str:
+    seconds = int(max(0, seconds))
+    h, rest = divmod(seconds, 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+class Progress:
+    """One redrawn line: bar, percent, sizes, smoothed speed and ETA."""
+
+    def __init__(self, label: str, total: int | None, base: int = 0, tty: bool | None = None,
+                 width: int | None = None, clock=time.monotonic):
+        self.label = label
+        self.total = total or 0
+        self.done = base
+        self.clock = clock
+        self.t0 = clock()
+        self.last_draw = -1.0
+        self.last_t = self.t0
+        self.last_done = base
+        self.speed = 0.0
+        self.tty = is_tty() if tty is None else tty
+        self.width = width
+        self.prev_len = 0
+        self.next_pct = 10
+        self.lock = threading.Lock()
+        self.finished = False
+
+    def add(self, amount: int) -> None:
+        with self.lock:
+            self._set(self.done + amount)
+
+    def update(self, done: int) -> None:
+        with self.lock:
+            self._set(done)
+
+    def _set(self, done: int) -> None:
+        self.done = done
+        now = self.clock()
+        dt = now - self.last_t
+        if dt >= 0.25:
+            inst = (self.done - self.last_done) / dt
+            self.speed = inst if self.speed == 0 else 0.2 * inst + 0.8 * self.speed
+            self.last_t, self.last_done = now, self.done
+        if self.tty:
+            if now - self.last_draw >= 0.25:
+                self.last_draw = now
+                self._draw(self.render(now))
+        elif self.total:
+            pct = self.done * 100 // self.total
+            if pct >= self.next_pct:
+                self.next_pct = (pct // 10 + 1) * 10
+                _end_step()
+                _write(f"  {self.label}: {pct}% ({human(self.done)} of {human(self.total)})\n")
+        if self.total:
+            set_title(f"Silver Lantern - {self.done * 100 // self.total}% downloaded")
+
+    def render(self, now: float | None = None) -> str:
+        now = self.clock() if now is None else now
+        width = (self.width or term_width()) - 1
+        pct = f"{self.done * 100 // self.total:3d}%" if self.total else "  ?%"
+        size = f"{human(self.done)} / {human(self.total)}" if self.total else human(self.done)
+        speed = f"{human(self.speed)}/s" if self.speed else ""
+        if now - self.t0 < 3 or not self.speed or not self.total:
+            eta = "--:-- left"
+        else:
+            eta = fmt_eta((self.total - self.done) / self.speed) + " left"
+        fields = {"size": size, "speed": speed}
+        bar_w = 30
+        for drop in (None, "bar", "speed", "size"):
+            if drop == "bar":
+                bar_w = 0
+            elif drop:
+                fields[drop] = ""
+            bar = ""
+            if bar_w and self.total:
+                fill = min(bar_w, self.done * bar_w // self.total)
+                bar = "[" + "#" * fill + "-" * (bar_w - fill) + "]"
+            text = "  " + "  ".join(x for x in (bar, pct, fields["size"], fields["speed"], eta) if x)
+            if len(text) <= width:
+                return text
+        return text[:max(0, width)]
+
+    def _draw(self, text: str) -> None:
+        global _OPEN_STEP
+        if _OPEN_STEP:
+            _OPEN_STEP = False
+            _write("\n")
+        if _ANSI:
+            _write("\r" + text + "\x1b[K")
+        else:
+            _write("\r" + text.ljust(self.prev_len))
+        self.prev_len = len(text)
+
+    def note(self, text: str) -> None:
+        log(f"  {self.label}: {text}")
+        if self.tty:
+            self._draw(("  " + _ascii(text))[: (self.width or term_width()) - 1])
+
+    def finish(self) -> None:
+        with self.lock:
+            if self.finished:
+                return
+            self.finished = True
+            if self.tty and self.prev_len:
+                if _ANSI:
+                    _write("\r\x1b[K")
+                else:
+                    _write("\r" + " " * self.prev_len + "\r")
+            set_title("Silver Lantern")
+
+
+def _log_location() -> Path:
+    for folder in (HERE, Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SilverLantern"):
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            p = folder / LOG_NAME
+            with open(p, "a", encoding="utf-8"):
+                pass
+            return p
+        except OSError:
+            continue
+    return HERE / LOG_NAME
+
+
+def _trim_log(p: Path) -> None:
+    try:
+        if p.stat().st_size > LOG_MAX:
+            with open(p, "rb") as f:
+                f.seek(-LOG_MAX, os.SEEK_END)
+                tail = f.read()
+            p.write_bytes(tail[tail.find(b"\n") + 1:])
+    except OSError:
+        pass
+
+
+def _enable_vt() -> bool:
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if not k.GetConsoleMode(h, ctypes.byref(mode)):
+            return False
+        return bool(k.SetConsoleMode(h, mode.value | 0x4))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _quickedit_off() -> None:
+    """Clicking the window must not freeze the download (QuickEdit pauses all output)."""
+    global _QUICKEDIT_SAVED
+    if os.name != "nt" or _QUICKEDIT_SAVED is not None:
+        return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        h = k.GetStdHandle(-10)
+        mode = ctypes.c_uint32()
+        if k.GetConsoleMode(h, ctypes.byref(mode)):
+            _QUICKEDIT_SAVED = mode.value
+            k.SetConsoleMode(h, (mode.value | 0x80) & ~0x40)
+            atexit.register(_quickedit_restore)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _quickedit_restore() -> None:
+    global _QUICKEDIT_SAVED
+    if _QUICKEDIT_SAVED is None:
+        return
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        k.SetConsoleMode(k.GetStdHandle(-10), _QUICKEDIT_SAVED)
+    except Exception:  # noqa: BLE001
+        pass
+    _QUICKEDIT_SAVED = None
+
+
+def ui_init(plain: bool = False) -> None:
+    global _ANSI, _PLAIN, LOG_PATH
+    _PLAIN = plain
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+    LOG_PATH = _log_location()
+    _trim_log(LOG_PATH)
+    log(f"===== {time.strftime('%Y-%m-%d %H:%M:%S')} v{APP_VERSION} argv={sys.argv[1:]!r} =====")
+    tty = is_tty()
+    _ANSI = bool(tty and not plain and not os.environ.get("NO_COLOR") and _enable_vt())
+    if tty:
+        _quickedit_off()
+    set_title("Silver Lantern")
+    if not MANIFEST_LOCAL.exists() and getattr(sys, "frozen", False):
+        here = str(HERE).lower()
+        temp = os.environ.get("TEMP", "").lower()
+        if (temp and here.startswith(temp)) and (".zip" in here or "rar$" in here or "\\temp\\" in here):
+            raise UserError("It looks like this was opened straight from the zip.",
+                            "Right-click the zip, choose Extract All, then run HeyListen-Get.exe "
+                            "from the extracted folder.")
+
+
+def stdin_is_tty() -> bool:
+    try:
+        return sys.stdin is not None and sys.stdin.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def pause(no_pause: bool = False) -> bool:
+    """Keep a double-clicked window open. Returns True if it waited."""
+    _end_step()
+    _quickedit_restore()
+    if no_pause or not stdin_is_tty():
+        return False
+    try:
+        input("\n  Press Enter to close this window.")
+    except (EOFError, KeyboardInterrupt):
+        pass
+    return True
+
+
+class UserError(Exception):
+    """A problem explained for people: what happened and what to do."""
+
+    def __init__(self, problem: str, action: str, short: str = "", resumable_bytes: int = 0):
+        super().__init__(problem)
+        self.problem = problem
+        self.action = action
+        self.short = short
+        self.resumable_bytes = resumable_bytes
+
+
+NET_CURL_CODES = {6, 7, 28, 35, 52, 56}
+
+
+def _http_status(exc: BaseException) -> int | None:
+    resp = getattr(exc, "response", None)
+    code = getattr(resp, "status_code", None) or getattr(exc, "status_code", None)
+    if isinstance(code, int):
+        return code
+    m = re.search(r"\bHTTP(?: Error)?\s*([1-5][0-9]{2})\b", str(exc))
+    return int(m.group(1)) if m else None
+
+
+def _curl_code(exc: BaseException) -> int | None:
+    code = getattr(exc, "code", None)
+    if isinstance(code, int):
+        return code
+    m = re.search(r"curl: \((\d+)\)", str(exc))
+    return int(m.group(1)) if m else None
+
+
+def _is_network(exc: BaseException) -> bool:
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    names = {c.__name__ for c in type(exc).__mro__}
+    if names & {"ConnectionError", "Timeout", "ConnectTimeout", "ReadTimeout", "DNSError"}:
+        return True
+    return _curl_code(exc) in NET_CURL_CODES
+
+
+def _is_local_disk_error(exc: BaseException) -> bool:
+    """Disk full / locked file: retrying the download can't help."""
+    if not isinstance(exc, OSError) or _is_network(exc):
+        return False
+    winerror = getattr(exc, "winerror", None)
+    return (winerror in (112, 39, 32, 5) or exc.errno == errno.ENOSPC
+            or isinstance(exc, PermissionError))
+
+
+def friendly(exc: BaseException, resumable_bytes: int = 0) -> UserError:
+    """Map a raw exception to a UserError (problem / what to do / short form)."""
+    if isinstance(exc, UserError):
+        return exc
+    resumes = " It resumes where it left off." if resumable_bytes else ""
+    if resumable_bytes:
+        resumes = f" It picks up where it left off ({human(resumable_bytes)} is already saved)."
+    if isinstance(exc, KeyboardInterrupt):
+        return UserError("Stopped.", "Run this again any time. It picks up where it left off.", "stopped")
+    winerror = getattr(exc, "winerror", None)
+    if isinstance(exc, OSError) and (winerror in (112, 39) or exc.errno == errno.ENOSPC):
+        return UserError("The disk ran out of space.", "Free up space and run this again." + resumes,
+                         "disk full", resumable_bytes)
+    if isinstance(exc, PermissionError) or (isinstance(exc, OSError) and winerror in (32, 5)):
+        name = Path(getattr(exc, "filename", None) or "a file").name
+        return UserError(f"Windows wouldn't let this tool use {name}. Usually antivirus is still scanning it.",
+                         "Wait a minute and run this again. If it keeps happening, allow "
+                         "HeyListen-Get.exe in your antivirus.", "file in use", resumable_bytes)
+    status = _http_status(exc)
+    if status in (403, 404, 410) or "no download link on" in str(exc):
+        return UserError("All download links are currently unavailable.",
+                         "Try again later. The links update automatically once the tool's author fixes them.",
+                         "link no longer works", resumable_bytes)
+    if status is not None and (status == 429 or 500 <= status < 600):
+        return UserError("The download site is busy right now.", "Wait about 10 minutes and run this again.",
+                         "the site is busy", resumable_bytes)
+    if _is_network(exc):
+        return UserError("The internet connection was lost (or isn't working).",
+                         "Check your connection and run this again." + (resumes or ""),
+                         "no connection", resumable_bytes)
+    text = str(exc).lower()
+    if "builder checksum" in text or "has no " in text:
+        return UserError("The HeyListen Builder download didn't check out.",
+                         "Run this again. If it repeats, tell the person who sent you this tool.", "bad download")
+    if "checksum mismatch" in text or "sha-256 mismatch" in text or "size mismatch" in text:
+        return UserError("The download was damaged and has been deleted.",
+                         "Run this again to download a fresh copy.", "damaged download")
+    return UserError("Something unexpected went wrong.",
+                     "Run this again. If it repeats, send the log file to the person who gave you this tool.",
+                     "unexpected error", resumable_bytes)
+
+
+def show_error(err: UserError) -> None:
+    _end_step()
+    wrap = lambda t: textwrap.fill(_ascii(t), 74, initial_indent="  ", subsequent_indent="  ")
+    _write("\n  " + _paint("Problem:", "red") + " " + wrap(err.problem).lstrip() + "\n\n")
+    _write(wrap("What to do: " + err.action) + "\n\n")
+    if LOG_PATH is not None:
+        say(f"Details were saved to: {LOG_PATH}", "dim")
+
+
+def _replace_with_retry(src: Path, dst: Path, budget: float = 15.0) -> None:
+    """Rename, retrying while antivirus still holds the fresh file."""
+    delay, deadline = 0.5, time.monotonic() + budget
+    while True:
+        try:
+            Path(src).replace(dst)
+            return
+        except PermissionError:
+            if time.monotonic() + delay > deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 2.0)
+
+
+@contextlib.contextmanager
+def keep_awake():
+    """Stop the PC sleeping mid-download (ES_CONTINUOUS | ES_SYSTEM_REQUIRED)."""
+    k = None
+    if os.name == "nt":
+        try:
+            import ctypes
+            k = ctypes.windll.kernel32
+            k.SetThreadExecutionState(0x80000000 | 0x00000001)
+        except Exception:  # noqa: BLE001
+            k = None
+    try:
+        yield
+    finally:
+        if k is not None:
+            try:
+                k.SetThreadExecutionState(0x80000000)
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def check_disk_space(folder: Path, need: int, label: str = "Free space") -> None:
+    """Raise UserError when `folder`'s drive can't hold `need` more bytes."""
+    probe = Path(folder)
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    try:
+        free = shutil.disk_usage(probe).free
+    except OSError as e:
+        log(f"disk space check skipped: {e}")
+        return
+    drive = (probe.drive or str(probe.anchor) or str(probe)).rstrip("\\/")
+    step(f"{label} on {drive}")
+    if free < need:
+        done("not enough", "yellow")
+        gap = need - free
+        raise UserError(
+            f"Not enough free space on {drive}. The download needs {human(need)}, and {human(free)} is free.",
+            f"Free up about {human(gap)} (empty the Recycle Bin, or delete old files from Downloads), "
+            "then run this again.", "disk full")
+    done(f"{human(free)} free, {human(need)} needed", None)
+
+
 def session() -> "requests.Session":
     return requests.Session(impersonate="chrome", timeout=90)
 
 
 # ---------------------------------------------------------------- manifest
+_MANIFEST_ORIGIN: str | None = None     # "url", "file" or "cache" after load_manifest()
+
+
 def load_manifest(manifest_arg: str | None) -> dict:
     """Local file, a URL, or the last good copy. A dead link never stops the run."""
     candidates: list[tuple[str, str]] = []       # (label, kind)
@@ -126,6 +621,8 @@ def load_manifest(manifest_arg: str | None) -> dict:
                 log(f"  manifest cache not updated: {e}")
             if kind == "url":
                 log(f"Manifest: {label} (v{data.get('tool', {}).get('version', '?')})")
+            global _MANIFEST_ORIGIN
+            _MANIFEST_ORIGIN = kind
             return data
         except Exception as e:  # noqa: BLE001
             last_err = e
@@ -171,20 +668,30 @@ def download_builder(s: "requests.Session", man: dict, out: Path, force: bool = 
 
     if not force and state.get("release") == tag and have and have == want:
         log(f"Builder already current: {tag}")
+        step("HeyListen Builder")
+        done(f"up to date ({tag})")
         return builder
 
     size = assets[asset_name]["size"]
     log(f"Downloading {asset_name} ({tag}, {human(size)})")
+    step("HeyListen Builder")
+    done(f"downloading {human(size)}", None)
     tmp = builder.with_suffix(builder.suffix + ".part")
-    stream_to(s, assets[asset_name]["browser_download_url"], tmp, expect=size)
+    bar = Progress("HeyListen Builder", size)
+    try:
+        stream_to(s, assets[asset_name]["browser_download_url"], tmp, expect=size, progress=bar.add)
+    finally:
+        bar.finish()
     got = sha256(tmp)
     if want and got != want:
         tmp.unlink(missing_ok=True)
         raise RuntimeError(f"builder checksum mismatch: {got} != {want}")
-    tmp.replace(builder)
+    _replace_with_retry(tmp, builder)
     state.update({"release": tag, "builder_sha256": got, "updated": time.strftime("%Y-%m-%dT%H:%M:%S")})
     state_file.write_text(json.dumps(state, indent=2))
     log(f"Builder ready and checksum-verified: {tag}")
+    step("HeyListen Builder")
+    done(f"ready ({tag})")
     return builder
 
 
@@ -243,7 +750,11 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
                 break
             r.raise_for_status()
             if have and r.status_code == 200:      # server ignored Range
+                if not quiet:
+                    warn("Starting over (the site didn't allow resuming)")
                 have = 0
+            elif have and r.status_code == 206 and content_range_start(r) == have and not quiet:
+                say(f"Resuming at {human(have)}" + (f" ({have * 100 // expect}%)" if expect else ""))
             elif have and content_range_start(r) != have:
                 # Never append bytes that do not continue the file on disk.
                 r.close()
@@ -270,7 +781,7 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
                         if progress:
                             progress(len(chunk))
                         now = time.time()
-                        if not quiet and now - last >= 2:
+                        if now - last >= 60:
                             last = now
                             pct = f"{done * 100 / total:5.1f}%" if total else "  ?  "
                             rate = (done - have) / max(now - t0, 0.001)
@@ -278,19 +789,20 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
             finally:
                 r.close()
             if total and done < total and attempt < max_retries:
-                if not quiet:
-                    log(f"  short read ({done}/{total}), resuming…")
+                log(f"  short read ({done}/{total}), resuming...")
                 continue
             break
         except Exception as e:  # noqa: BLE001
-            if attempt == max_retries:
-                raise
-            if not quiet:
-                log(f"  network hiccup ({type(e).__name__}), retry {attempt}/{max_retries} in 3 s")
+            if _is_local_disk_error(e) or attempt == max_retries:
+                raise   # a full disk or locked file never fixes itself by retrying
+            log(f"  network hiccup ({type(e).__name__}: {e}), retry {attempt}/{max_retries} in 3 s")
+            note = getattr(getattr(progress, "__self__", None), "note", None)
+            if note:
+                note(f"connection dropped, retrying ({attempt} of {max_retries})...")
             time.sleep(3)
     if expect is not None and part.stat().st_size != expect:
         raise RuntimeError(f"size mismatch: {part.stat().st_size} != {expect}")
-    part.replace(dest)
+    _replace_with_retry(part, dest)
     return dest.stat().st_size
 
 
@@ -308,12 +820,23 @@ def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool =
 
     if dest.exists() and dest.stat().st_size in sizes and not force:
         log(f"Game already downloaded: {dest.name}")
+        step("Game data")
+        done("already downloaded")
     else:
         # Older runs shared one dest.part across sources; its origin is unknown.
         Path(str(dest) + ".part").unlink(missing_ok=True)
+        first = game["sources"][0] if game["sources"] else {}
+        if first.get("size"):
+            existing = sum(p.stat().st_size for p in out.glob(dest.name + ".*.part") if p.is_file())
+            extra = first["size"] if first.get("parts") else 0
+            check_disk_space(out, max(0, first["size"] - existing) + extra + 1024 ** 3)
+            say("(The built game needs more space later; keep extra room free.)", "dim")
         last_err = None
         prev_parts: list[Path] = []
+        n_src = len(game["sources"])
         for idx, src in enumerate(game["sources"]):
+            if idx and last_err is not None:
+                warn(f"Copy {idx} didn't work ({friendly(last_err).short}). Trying copy {idx + 1} of {n_src}...")
             tag = source_part_tag(idx, src)
             for stale in prev_parts:            # never resume another source's bytes
                 stale.unlink(missing_ok=True)
@@ -321,8 +844,18 @@ def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool =
             try:
                 urls, size = source_urls(s, src)
                 log(f"Game source: {src.get('url') or src.get('parts')[0]}  ->  {human(size) if size else '?'}")
+                step("Game data")
+                done(f"downloading {human(size) if size else ''}"
+                     + (f" (copy {idx + 1} of {n_src})" if n_src > 1 else ""), None)
+                bar = Progress("Game data", size)
                 if len(urls) == 1:
-                    stream_to(s, urls[0][0], dest, expect=size, referer=urls[0][1], part=prev_parts[0])
+                    have0 = prev_parts[0].stat().st_size if prev_parts[0].exists() else 0
+                    bar.done = have0 if size and have0 <= size else 0
+                    try:
+                        stream_to(s, urls[0][0], dest, expect=size, referer=urls[0][1], part=prev_parts[0],
+                                  progress=bar.add)
+                    finally:
+                        bar.finish()
                 else:   # parts joined in order
                     tmp = Path(str(dest) + ".join")
                     prev_parts.append(tmp)
@@ -331,7 +864,11 @@ def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool =
                             p = Path(str(dest) + f".p{i}")
                             pp = Path(str(dest) + f".{tag}.p{i}.part")
                             prev_parts.append(pp)
-                            stream_to(s, u, p, referer=ref, part=pp)
+                            try:
+                                stream_to(s, u, p, referer=ref, part=pp, progress=bar.add)
+                            finally:
+                                if i == len(urls):
+                                    bar.finish()
                             log(f"  part {i}/{len(urls)} done ({human(p.stat().st_size)})")
                             with open(p, "rb") as pf:
                                 while (b := pf.read(8 * 1024 * 1024)):
@@ -339,7 +876,7 @@ def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool =
                             p.unlink()
                     if size and tmp.stat().st_size != size:
                         raise RuntimeError(f"joined size {tmp.stat().st_size} != {size}")
-                    tmp.replace(dest)
+                    _replace_with_retry(tmp, dest)
                 last_err = None
                 break
             except Exception as e:  # noqa: BLE001
@@ -353,11 +890,30 @@ def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool =
     if not skip_hash:
         want = next((src["sha256"] for src in game["sources"]
                      if src.get("sha256") and src.get("size") == dest.stat().st_size), None)
-        log("Verifying SHA-256 (a few minutes on 25 GB)…")
-        got = sha256(dest)
+        log("Verifying SHA-256 (a few minutes on a large file)...")
+        step("Checking the download")
+        tick = {"t": 0.0}
+
+        def show(done_bytes, total):
+            now = time.monotonic()
+            if is_tty() and total and now - tick["t"] >= 0.25:
+                tick["t"] = now
+                _write(f"\r  {'Checking the download'.ljust(STEP_COL - 2, '.')} {done_bytes * 100 // total}%"
+                       " (a few minutes)\x1b[K" if _ANSI else
+                       f"\r  {'Checking the download'.ljust(STEP_COL - 2, '.')} {done_bytes * 100 // total}%   ")
+
+        got = sha256(dest, progress=show)
+        if is_tty():
+            _write(f"\r  {'Checking the download'.ljust(STEP_COL - 2, '.')} " + " " * 20
+                   + f"\r  {'Checking the download'.ljust(STEP_COL - 2, '.')} ")
         if want and got.lower() != want.lower():
-            raise RuntimeError(f"game checksum mismatch: {got}")
-        log("Checksum OK — this is the supported build." if want else f"Checksum (re-pack, no pinned hash): {got}")
+            done("damaged", "yellow")
+            dest.unlink(missing_ok=True)
+            log(f"game checksum mismatch: {got}")
+            raise UserError("The download was damaged and has been deleted.",
+                            "Run this again to download a fresh copy.", "damaged download")
+        done("OK")
+        log("Checksum OK - this is the supported build." if want else f"Checksum (re-pack, no pinned hash): {got}")
     return dest
 
 
@@ -421,21 +977,26 @@ def apply_preset(game_dir: Path) -> Path:
     return ini
 
 
-def sha256(p: Path, progress: bool = False) -> str:
+def sha256(p: Path, progress=False) -> str:
+    """SHA-256 of a file. `progress`: True draws a bar; a callable gets (bytes_done, total)."""
     h = hashlib.sha256()
     total = p.stat().st_size if progress else 0
-    done = 0
-    last = 0.0
-    with open(p, "rb") as f:
-        for block in iter(lambda: f.read(8 * 1024 * 1024), b""):
-            h.update(block)
-            if progress:
-                done += len(block)
-                if time.monotonic() - last >= 0.5:
-                    last = time.monotonic()
-                    print(f'\rChecking SHA-256: {human(done)} / {human(total)}', end='', flush=True)
-    if progress:
-        print(f'\rChecking SHA-256: {human(done)} / {human(total)}', flush=True)
+    bar = Progress("Checking", total) if progress is True else None
+    callback = progress if callable(progress) else None
+    done_bytes = 0
+    try:
+        with open(p, "rb") as f:
+            for block in iter(lambda: f.read(8 * 1024 * 1024), b""):
+                h.update(block)
+                if progress:
+                    done_bytes += len(block)
+                    if bar:
+                        bar.update(done_bytes)
+                    if callback:
+                        callback(done_bytes, total)
+    finally:
+        if bar:
+            bar.finish()
     return h.hexdigest()
 
 
@@ -650,7 +1211,7 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
     stage = Path(tempfile.mkdtemp(prefix='.heylisten-update-', dir=target.parent))
     try:
         zp = stage / UPDATE_ASSET
-        stream_to(s, assets[UPDATE_ASSET]['browser_download_url'], zp, expect=size)
+        stream_to(s, assets[UPDATE_ASSET]['browser_download_url'], zp, expect=size, quiet=True)
         if zp.stat().st_size != size or sha256(zp) != want:
             raise ValueError("update size or checksum mismatch")
         replacement = stage_executable(zp, stage, target.name)
@@ -667,6 +1228,9 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
         raise
+    # The helper relaunches in this same console (no CREATE_NEW_CONSOLE, on purpose).
+    done(f"updating to {remote.lstrip('vV')}, restarting...")
+    say()
     sys.exit(0)
 
 
@@ -756,23 +1320,11 @@ def load_game_manifest(s, source: str) -> dict:
     return parse_game_manifest(text)
 
 
-class GameProgress:
+class GameProgress(Progress):
+    """One combined bar across every game asset (several download threads)."""
+
     def __init__(self, total):
-        self.total = total
-        self.done = 0
-        self.lock = threading.Lock()
-        self.last = 0.0
-
-    def add(self, amount):
-        with self.lock:
-            self.done += amount
-            if time.monotonic() - self.last >= 0.5:
-                self.last = time.monotonic()
-                print(f'\rDownloading: {human(self.done)} / {human(self.total)}', end='', flush=True)
-
-    def finish(self):
-        with self.lock:
-            print(f'\rDownloading: {human(self.done)} / {human(self.total)}', flush=True)
+        super().__init__("Downloading", total)
 
 
 def game_path(root: Path, relative: str) -> Path:
@@ -804,15 +1356,24 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     download_bytes = 0
     for name in needed:
         part = assets[name]
-        done = cache / name
-        partial = Path(str(done) + '.part')
-        if done.is_file() and done.stat().st_size == part['size'] and sha256(done) == part['sha256']:
+        cached = cache / name
+        partial = Path(str(cached) + '.part')
+        if cached.is_file() and cached.stat().st_size == part['size'] and sha256(cached) == part['sha256']:
             continue
         have = partial.stat().st_size if partial.is_file() else 0
         download_bytes += part['size'] - (have if have < part['size'] else 0)
     log(f"Plan: {len(man['files']) - len(pending)} files present, {len(pending)} to download ({download_bytes / 1024**3:.2f} GB), {kept / 1024**3:.2f} GB kept")
+    step("Game files")
+    if not pending:
+        done("up to date")
+    else:
+        done(f"{len(pending)} to download ({human(download_bytes)})", None)
     if dry_run:
         return
+    if pending:
+        # Downloaded assets plus the assembled files live side by side until cleanup.
+        assemble = sum(item['size'] for item in pending)
+        check_disk_space(root, download_bytes + assemble + 1024 ** 3)
     root.mkdir(parents=True, exist_ok=True)
     if pending:
         cache.mkdir(parents=True, exist_ok=True)
@@ -912,10 +1473,15 @@ def update_exit_code(code: int) -> int:
     return 0 if code in (0, 10) else 1
 
 
+def _update_say(message: str) -> None:
+    log(message)
+    say(message)
+
+
 def run_game_update(folder: Path, dry_run: bool = False, force: bool = False, silent: bool = False) -> int:
     script = next((p for p in (HERE / 'Update-Game.ps1', Path.cwd() / 'Update-Game.ps1') if p.is_file()), None)
     if script is None:
-        log('Update failed: Update-Game.ps1 not found.')
+        _update_say('Update failed: Update-Game.ps1 not found.')
         return 1
     args = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script), '-GameFolder', str(folder)]
     if dry_run:
@@ -937,15 +1503,15 @@ def run_game_update(folder: Path, dry_run: bool = False, force: bool = False, si
                 if not silent and parsed.get('status') not in (None, 'error'):
                     message = render_update_status(fields)
                     if message:
-                        log(message.encode('ascii', 'replace').decode('ascii'))
+                        _update_say(message)
                         shown = True
             code = update_exit_code(proc.wait())
         if silent or (not shown and (fields.get('status') == 'error' or code)):
             message = render_update_status(fields) or 'Update failed: update check failed.'
-            log(message.encode('ascii', 'replace').decode('ascii'))
+            _update_say(message)
         return code
     except (OSError, ValueError) as e:
-        log(('Update failed: ' + str(e)).encode('ascii', 'replace').decode('ascii'))
+        _update_say('Update failed: ' + str(e))
         return 1
 
 
@@ -955,7 +1521,7 @@ def main() -> int:
         return 0
     ap = argparse.ArgumentParser(description="One-click HeyListen + game downloader")
     ap.add_argument("--manifest", help="sources.json path or URL (default: next to this script)")
-    ap.add_argument("--out", default=str(Path.home() / "Downloads"),
+    ap.add_argument("--out", default=None,
                     help="folder for the .nup and builder (default: Downloads)")
     ap.add_argument("--builder-only", action="store_true")
     ap.add_argument("--game-only", action="store_true")
@@ -963,7 +1529,7 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="re-download even if present")
     ap.add_argument("--no-launch", action="store_true", help="don't open HeyListenBuilder.exe")
     ap.add_argument("--no-preset", action="store_true", help="don't write the upscaler preset ini")
-    ap.add_argument("--game-dir", default=str(Path.home() / "Games" / "HeyListen"),
+    ap.add_argument("--game-dir", default=None,
                     help="built game folder for the upscaler preset")
     ap.add_argument("--print-sources", action="store_true", help="show the manifest and exit")
     ap.add_argument("--version", action="store_true", help="print the installed version and exit")
@@ -982,68 +1548,249 @@ def main() -> int:
     ap.add_argument('--update-dry-run', action='store_true')
     ap.add_argument('--force-update', action='store_true')
     ap.add_argument('--update-on-launch', action='store_true')
+    ap.add_argument('--builder-flow', action='store_true',
+                    help='old flow: download the game dump + HeyListenBuilder and open the Builder')
+    ap.add_argument('--no-pause', action='store_true', help="don't wait for Enter before closing")
+    ap.add_argument('--plain', action='store_true', help='no colors')
     a = ap.parse_args()
 
     if a.update_game is not None:
         return run_game_update(Path(a.update_game).expanduser(), dry_run=a.update_dry_run, force=a.force_update)
-    if a.install_game is not None:
-        s = session()
-        game_manifest = load_game_manifest(s, a.game_manifest)
-        local_manifest = None if urlparse(a.game_manifest).scheme in ('http', 'https') else Path(a.game_manifest).expanduser()
-        install_game(None, game_manifest, Path(a.install_game), a.dry_run, a.prune, local_manifest, a.keep_assets)
-        return 0
     if a.version:
         print(local_version({}))
         return 0
-    man = load_manifest(a.manifest)
     if a.print_sources:
-        print(json.dumps(man, indent=2))
+        print(json.dumps(load_manifest(a.manifest), indent=2))
         return 0
 
-    tool = man.get("tool", {})
-    log(f"Manifest v{tool.get('version', '?')} — game: {man['game'].get('title', '?')}")
+    global _UI_READY
+    _UI_READY = True
+    ui_init(a.plain)
+    builder_flow = bool(a.builder_flow or a.builder_only or a.game_only or a.manifest or a.out or a.skip_hash)
+    say()
+    say(f"Silver Lantern {APP_VERSION}", "bold")
+    if builder_flow:
+        say("Downloads the game data and the HeyListen Builder, then opens the Builder.")
+    elif a.install_game is not None:
+        say("Installs or updates the game files.")
+    else:
+        say("Installs (or updates) the game, then starts it.")
+    say("-" * 70)
+    say()
 
-    out = Path(a.out).expanduser()
-    out.mkdir(parents=True, exist_ok=True)
     s = session()
-
     if not a.no_self_update:
-        try:
-            check_self_update(s, man, sys.argv[1:], a.self_update_from)
-        except Exception as e:
-            log(f"Self-update failed safely: {e}")
-            if a.self_update or a.self_update_from:
-                return 1
+        code = self_update_step(s, a)
+        if code is not None:
+            return code
     if a.self_update or a.self_update_from:
-        log("Self-update check complete.")
+        say("Self-update check complete.")
         return 0
 
-    builder = None
-    if not a.game_only:
-        builder = download_builder(s, man, out, force=a.force)
-    if not a.builder_only:
-        download_game(s, man, out, skip_hash=a.skip_hash, force=a.force)
-        if not a.no_preset:
-            apply_preset(Path(a.game_dir).expanduser())
+    if builder_flow:
+        return run_builder_flow(s, a)
+    if a.install_game is not None:
+        install_from_manifest(s, a, Path(a.install_game).expanduser())
+        return 0
+    return run_default_flow(s, a)
 
-    log("All set.")
-    if builder and not a.no_launch:
-        log("Opening HeyListenBuilder — pick the .nup, tick NVIDIA DLSS, press “Build the game”.")
-        subprocess.Popen([str(builder)], cwd=str(builder.parent))
+
+_UI_READY = False
+
+
+def self_update_step(s, a) -> int | None:
+    """One quiet line. Returns an exit code only when the user asked for --self-update."""
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
+        step("Checking for updates")
+    try:
+        check_self_update(s, {}, sys.argv[1:], a.self_update_from)
+        if frozen:
+            done("up to date")
+    except Exception as e:  # noqa: BLE001
+        log(f"Self-update failed safely: {e}")
+        log(traceback.format_exc())
+        if frozen or a.self_update or a.self_update_from:
+            done("skipped (no connection)" if _is_network(e) else "skipped", "dim")
+        if a.self_update or a.self_update_from:
+            return 1
+    return None
+
+
+def install_from_manifest(s, a, folder: Path) -> None:
+    step("Game file list")
+    try:
+        game_manifest = load_game_manifest(s, a.game_manifest)
+    except Exception:
+        done("failed", "yellow")
+        raise
+    done("up to date")
+    local_manifest = None if urlparse(a.game_manifest).scheme in ('http', 'https') else Path(a.game_manifest).expanduser()
+    with keep_awake():
+        install_game(None, game_manifest, folder, a.dry_run, a.prune, local_manifest, a.keep_assets)
+
+
+def game_launcher(folder: Path) -> Path:
+    top = folder / 'HeyListen.exe'
+    return top if top.is_file() else folder / 'bin' / 'HeyListen.exe'
+
+
+def finish_lines(folder: Path, launched: bool, preset: str | None = None) -> list[str]:
+    """The numbered next-steps block shown after a successful install."""
+    lines = ["-" * 70, "The game is installed." + (" It is starting now." if launched else ""), "",
+             "Your game folder:", f"  {folder}", "", "Next steps:"]
+    if launched:
+        lines.append("  1. Wait for the game window to open (the first start can take")
+        lines.append("     a minute).")
+    else:
+        lines.append("  1. Start the game: double-click HeyListen.exe in the folder above.")
+    lines.append("  2. For game updates later, run this tool again. It only downloads")
+    lines.append("     what changed.")
+    if preset:
+        lines.append(f"  3. Graphics settings were set to {preset}.")
+        lines.append("     You can change them in the game's menu.")
+    else:
+        lines.append("  3. You can change the graphics settings in the game's menu.")
+    return lines
+
+
+def apply_preset_step(folder: Path) -> str | None:
+    """Apply the GPU preset once (never over the user's own settings). Returns its label."""
+    if (folder / 'hookshot_options.ini').exists():
+        log(f"preset skipped: {folder / 'hookshot_options.ini'} already exists")
+        return None
+    step("Graphics settings")
+    try:
+        ini = apply_preset(folder)
+        dlss = 'dlss=1' in ini.read_text(encoding='ascii', errors='replace').splitlines()
+        label = "DLSS Performance" if dlss else "FSR 3.1 Performance"
+        done(f"applied ({label})")
+        return label
+    except Exception as e:  # noqa: BLE001
+        log(f"preset failed: {e}")
+        log(traceback.format_exc())
+        done("skipped", "dim")
+        return None
+
+
+def run_default_flow(s, a) -> int:
+    """Double-click path: install the prebuilt game, set graphics, start it."""
+    folder = Path(a.game_dir or default_game_folder()).expanduser()
+    install_from_manifest(s, a, folder)
+    if a.dry_run:
+        return 0
+    if not (folder / 'bin' / 'HeyListen.exe').is_file():
+        raise UserError("The game files were installed, but HeyListen.exe is missing.",
+                        "Run this again. If it repeats, send the log file to the person who gave you this tool.")
+    preset = None if a.no_preset else apply_preset_step(folder)
+    launched = False
+    if not a.no_launch:
+        exe = game_launcher(folder)
+        log(f"launching {exe}")
+        subprocess.Popen([str(exe)], cwd=str(exe.parent))
+        launched = True
+    say()
+    for line in finish_lines(folder, launched, preset):
+        say(line)
     if a.update_on_launch:
         try:
-            run_game_update(Path(a.game_dir).expanduser(), dry_run=True, silent=True)
-        except Exception as e:
+            run_game_update(folder, dry_run=True, silent=True)
+        except Exception as e:  # noqa: BLE001
             log(('Update failed: ' + str(e)).encode('ascii', 'replace').decode('ascii'))
     return 0
 
 
-if __name__ == "__main__":
+def run_builder_flow(s, a) -> int:
+    """Old flow: game dump + HeyListenBuilder, preset after the Builder closes."""
+    step("Download links")
     try:
-        sys.exit(main())
+        man = load_manifest(a.manifest)
+    except RuntimeError as e:
+        done("failed", "yellow")
+        log(f"manifest: {e}")
+        raise UserError("This tool's files are incomplete.",
+                        "Extract the whole zip into a folder again and run HeyListen-Get.exe from there.")
+    done("up to date" if _MANIFEST_ORIGIN == "url" else "using saved copy",
+         "green" if _MANIFEST_ORIGIN == "url" else "dim")
+    tool = man.get("tool", {})
+    log(f"Manifest v{tool.get('version', '?')} - game: {man.get('game', {}).get('title', '?')}")
+
+    out = Path(a.out or (Path.home() / "Downloads")).expanduser()
+    out.mkdir(parents=True, exist_ok=True)
+    game_dir = Path(a.game_dir or (Path.home() / "Games" / "HeyListen")).expanduser()
+
+    builder = None
+    with keep_awake():
+        if not a.game_only:
+            builder = download_builder(s, man, out, force=a.force)
+        game = None
+        if not a.builder_only:
+            game = download_game(s, man, out, skip_hash=a.skip_hash, force=a.force)
+
+    say()
+    say("-" * 70)
+    proc = None
+    if builder and not a.no_launch:
+        say("Everything is downloaded. The HeyListen Builder is opening now.")
+        log(f"Opening {builder}")
+        proc = subprocess.Popen([str(builder)], cwd=str(builder.parent))
+    else:
+        say("Everything is downloaded.")
+    say()
+    say("Your files are in: " + str(out))
+    if game is not None:
+        say(f"  {Path(str(game)).name}   (the game data)")
+    if builder:
+        say(f"  {Path(str(builder)).name}   (the Builder)")
+    if builder:
+        say()
+        say("Next steps, in the Builder window:")
+        say(f"  1. Choose the game file: {man.get('game', {}).get('filename', 'the .nup file')} in the folder above.")
+        say('  2. Tick the box "NVIDIA DLSS" if you have an NVIDIA RTX card.')
+        say('  3. Press "Build the game" and wait for it to finish.')
+    if proc is not None:
+        say()
+        say("Leave this window open. When you close the Builder, the graphics settings")
+        say("are applied for you.")
+        try:
+            proc.wait()
+        except Exception as e:  # noqa: BLE001
+            log(f"builder wait failed: {e}")
+    if not a.builder_only and not a.no_preset:
+        step("Graphics settings")
+        apply_preset(game_dir)
+        done("applied")
+    if a.update_on_launch:
+        try:
+            run_game_update(game_dir, dry_run=True, silent=True)
+        except Exception as e:  # noqa: BLE001
+            log(('Update failed: ' + str(e)).encode('ascii', 'replace').decode('ascii'))
+    say()
+    say("All done. Enjoy!", "green")
+    return 0
+
+
+def run() -> None:
+    """Entry point: friendly errors, full details in the log, keep the window open."""
+    no_pause = '--no-pause' in sys.argv
+    try:
+        code = main()
     except KeyboardInterrupt:
-        print("\nInterrupted — run again to resume.")
-        sys.exit(130)
+        log("interrupted by user")
+        say()
+        say("Stopped. Run this again any time. It picks up where it left off.", "dim")
+        code = 130
     except Exception as exc:  # noqa: BLE001
-        print(f"ERROR: {exc}", file=sys.stderr)
-        sys.exit(1)
+        log(traceback.format_exc())
+        if _UI_READY:
+            show_error(friendly(exc))
+        else:
+            say("Problem: " + friendly(exc).problem)
+        code = 1
+    if _UI_READY:
+        pause(no_pause)
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    run()

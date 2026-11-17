@@ -19,7 +19,7 @@ class UpdaterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             target = Path(td) / 'app.exe'
             target.write_bytes(b'old')
-            def download(s, url, dest, expect):
+            def download(s, url, dest, expect, **kw):
                 dest.write_bytes(b'new')
             with mock.patch.object(sys, 'frozen', True, create=True), \
                  mock.patch.object(sys, 'executable', str(target)), \
