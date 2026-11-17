@@ -241,6 +241,11 @@ class Progress:
             if now - self.last_draw >= 0.25:
                 self.last_draw = now
                 self._draw(self.render(now))
+        elif os.environ.get('SILVER_LANTERN_GUI_PROGRESS') == '1':
+            # Machine-readable feed for the launcher window: bytes, total and smoothed speed.
+            if now - self.last_draw >= 0.5 or (self.total and self.done >= self.total):
+                self.last_draw = now
+                _write(f"HLPROGRESS phase={self.label.replace(' ', '_')} done={self.done} total={self.total} speed={int(self.speed)}\n")
         elif self.total:
             pct = self.done * 100 // self.total
             if pct >= self.next_pct:
