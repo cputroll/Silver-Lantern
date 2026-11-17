@@ -382,13 +382,6 @@ def ui_init(plain: bool = False) -> None:
     if tty:
         _quickedit_off()
     set_title("Silver Lantern")
-    if not MANIFEST_LOCAL.exists() and getattr(sys, "frozen", False):
-        here = str(HERE).lower()
-        temp = os.environ.get("TEMP", "").lower()
-        if (temp and here.startswith(temp)) and (".zip" in here or "rar$" in here or "\\temp\\" in here):
-            raise UserError("It looks like this was opened straight from the zip.",
-                            "Right-click the zip, choose Extract All, then run SilverLantern.exe "
-                            "from the extracted folder.")
 
 
 def stdin_is_tty() -> bool:

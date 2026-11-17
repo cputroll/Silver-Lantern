@@ -24,6 +24,12 @@ class ZipRunTests(unittest.TestCase):
                 self.assertEqual(target.read_bytes(), b'old')
                 self.assertEqual(popen.call_args.args[0], [str(target), '--uninstall'])
 
+    def test_missing_local_manifest_does_not_block_zip_launch(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); temp = root / 'temp'; temp.mkdir(); here = temp / 'archive.zip'; here.mkdir()
+            with patch.object(h.sys, 'frozen', True, create=True), patch.object(h, 'HERE', here), patch.object(h, 'MANIFEST_LOCAL', here / 'missing'), patch.dict(h.os.environ, {'TEMP': str(temp)}), patch.object(h, '_log_location', return_value=root / 'test.log'), patch.object(h, 'set_title'):
+                h.ui_init(plain=True)
+
     def test_manifest_fallback(self):
         from unittest.mock import MagicMock
         with tempfile.TemporaryDirectory() as d:

@@ -356,10 +356,23 @@ def relocate_launcher(folder):
         destination = fallback
         probe_writable(destination)
         target = destination / 'Ocarina of Time.exe'
-        if source == target.resolve():
+        if source.parent == destination.resolve():
             return False
-    with source.open('rb') as original, target.open('xb') as copy:
-        shutil.copyfileobj(original, copy)
+    try:
+        with source.open('rb') as original, target.open('xb') as copy:
+            shutil.copyfileobj(original, copy)
+    except FileExistsError:
+        # Never overwrite or run an executable whose ownership is unknown.
+        import tempfile
+        with source.open('rb') as original, tempfile.NamedTemporaryFile(
+                prefix='Ocarina of Time-', suffix='.exe', dir=destination, delete=False) as copy:
+            target = Path(copy.name)
+            try:
+                shutil.copyfileobj(original, copy)
+            except BaseException:
+                copy.close()
+                target.unlink(missing_ok=True)
+                raise
     log_message(f'Launcher relocation: {target}')
     try:
         register_install(destination, exe=target)
