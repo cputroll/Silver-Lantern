@@ -1,4 +1,5 @@
 import json
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,13 +28,30 @@ class ParallelResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / 'asset'
             Path(str(dest)+'.part').write_bytes(b'abcdXXXX')
-            Path(str(dest)+'.part.json').write_text(json.dumps({'size': 8, 'bounds': [[0,4],[4,8]], 'done': [True,False]}))
+            Path(str(dest)+'.part.json').write_text(json.dumps({'size': 8, 'bounds': [[0,4],[4,8]], 'done': [True,False], 'hashes': [hashlib.sha256(b'abcd').hexdigest(), None]}))
             progress = h.Progress('test', 4, tty=False)
             h.parallel_download(Session, 'http://example/', dest, 8, '', progress, 2, chunk_min=1)
             self.assertEqual(calls, ['bytes=4-7'])
             self.assertEqual(dest.read_bytes(), data)
             self.assertEqual(progress.done, 4)
             self.assertFalse(Path(str(dest)+'.part.json').exists())
+
+    def test_corrupted_completed_chunk_is_redownloaded(self):
+        data = b'abcdefgh'
+        calls = []
+        class Session:
+            def get(self, url, headers, **kwargs):
+                calls.append(headers['range'])
+                a, b = map(int, headers['range'][6:].split('-'))
+                return Response(206, data[a:b+1], f'bytes {a}-{b}/8')
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / 'asset'
+            Path(str(dest)+'.part').write_bytes(b'XXXXefgh')
+            Path(str(dest)+'.part.json').write_text(json.dumps({'size': 8, 'bounds': [[0,4],[4,8]], 'done': [True, True], 'hashes': [hashlib.sha256(b'abcd').hexdigest(), hashlib.sha256(b'efgh').hexdigest()]}))
+            progress = h.Progress('test', 4, tty=False)
+            h.parallel_download(Session, 'http://example/', dest, 8, '', progress, 2, chunk_min=1)
+            self.assertEqual(calls, ['bytes=0-3'])
+            self.assertEqual(dest.read_bytes(), data)
 
     def test_layout_mismatch_restarts_all_chunks(self):
         data = b'abcdefgh'
@@ -46,7 +64,7 @@ class ParallelResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / 'asset'
             Path(str(dest)+'.part').write_bytes(b'XXXXXXXX')
-            Path(str(dest)+'.part.json').write_text(json.dumps({'size': 9, 'bounds': [[0,4],[4,8]], 'done': [True,False]}))
+            Path(str(dest)+'.part.json').write_text(json.dumps({'size': 9, 'bounds': [[0,4],[4,8]], 'done': [True,False], 'hashes': [hashlib.sha256(b'abcd').hexdigest(), None]}))
             progress = h.Progress('test', 8, tty=False)
             h.parallel_download(Session, 'http://example/', dest, 8, '', progress, 2, chunk_min=1)
             self.assertEqual(set(calls), {'bytes=0-3', 'bytes=4-7'})
@@ -59,7 +77,7 @@ class ParallelResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / 'asset'
             Path(str(dest)+'.part').write_bytes(b'abcdXXXX')
-            Path(str(dest)+'.part.json').write_text(json.dumps({'size': 8, 'bounds': [[0,4],[4,8]], 'done': [True,False]}))
+            Path(str(dest)+'.part.json').write_text(json.dumps({'size': 8, 'bounds': [[0,4],[4,8]], 'done': [True,False], 'hashes': [hashlib.sha256(b'abcd').hexdigest(), None]}))
             progress = h.Progress('test', 4, tty=False)
             def stream(s, url, target, **kwargs):
                 target.write_bytes(b'abcdefgh')

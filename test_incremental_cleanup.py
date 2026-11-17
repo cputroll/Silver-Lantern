@@ -66,8 +66,8 @@ class IncrementalTests(unittest.TestCase):
             with patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to', side_effect=RuntimeError('stop')), redirect_stdout(out):
                 with self.assertRaises(RuntimeError):
                     h.install_game(object(), fixture(), Path(td))
-            self.assertEqual(check.call_args.args[1], 40 * 1024 ** 3)
-            self.assertIn('Needs about 40 GB free; the game itself takes about 33 GB', out.getvalue())
+            self.assertEqual(check.call_args.args[1], 44 * 1024 ** 3)
+            self.assertIn('Needs about 44 GB free; the game itself takes about 33 GB', out.getvalue())
             self.assertIn('resume', out.getvalue().lower())
             self.assertIn('bundle', out.getvalue().lower())
 

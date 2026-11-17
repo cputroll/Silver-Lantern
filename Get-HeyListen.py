@@ -819,6 +819,13 @@ def download_streams():
         return 6
 
 
+def assembly_workers():
+    try:
+        return max(1, min(8, int(os.environ.get('SILVER_LANTERN_ASSEMBLY_WORKERS', '4'))))
+    except ValueError:
+        return 4
+
+
 def chunk_layout(size, streams, chunk_min=CHUNK_MIN):
     width = max((size + streams - 1) // streams, chunk_min)
     return [[start, min(size, start + width)] for start in range(0, size, width)]
@@ -835,9 +842,29 @@ def chunk_state(dest, size, streams, chunk_min=CHUNK_MIN):
                 not all(type(x) is bool for x in state['done']) or
                 part.stat().st_size != size):
             raise ValueError('invalid chunk layout')
+        hashes = state.get('hashes', [])
+        with part.open('rb') as stream:
+            for i, ((start, end), done) in enumerate(zip(bounds, state['done'])):
+                if not done:
+                    continue
+                if i >= len(hashes) or not isinstance(hashes[i], str):
+                    state['done'][i] = False
+                    continue
+                digest = hashlib.sha256()
+                stream.seek(start)
+                remaining = end - start
+                while remaining:
+                    data = stream.read(min(1024 * 1024, remaining))
+                    if not data:
+                        break
+                    digest.update(data)
+                    remaining -= len(data)
+                if remaining or digest.hexdigest() != hashes[i]:
+                    state['done'][i] = False
+        state['hashes'] = (hashes + [None] * len(bounds))[:len(bounds)]
         return state
     except (OSError, ValueError, KeyError, TypeError):
-        return {'size': size, 'bounds': bounds, 'done': [False] * len(bounds)}
+        return {'size': size, 'bounds': bounds, 'done': [False] * len(bounds), 'hashes': [None] * len(bounds)}
 
 
 def parallel_download(session_factory, url, dest, size, expected_sha, progress, streams, chunk_min=CHUNK_MIN):
@@ -868,17 +895,20 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
             if r.status_code != 206 or (r.headers.get('content-range') or '').lower().strip() != expected_range:
                 raise ValueError('invalid chunk Content-Range')
             pos = start
+            digest = hashlib.sha256()
             with part.open('r+b') as f:
                 f.seek(start)
                 for data in r.iter_content(1024 * 1024):
                     if pos + len(data) > end:
                         raise ValueError('chunk exceeds expected size')
                     f.write(data)
+                    digest.update(data)
                     pos += len(data)
                     progress.add(len(data))
             if pos != end:
                 raise ValueError('short chunk')
             with lock:
+                state['hashes'][i] = digest.hexdigest()
                 state['done'][i] = True
                 save()
         finally:
@@ -1496,14 +1526,14 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     else:
         done(f"{len(pending)} to download ({human(download_bytes)})", None)
     if pending:
-        say("Needs about 40 GB free; the game itself takes about 33 GB.")
+        say("Needs about 44 GB free; the game itself takes about 33 GB.")
         say("Bundles are cleaned as files are installed; resume may re-fetch cleaned bundles.")
     if dry_run:
         return
     if pending:
         # Retaining assets requires space for the full download as well as the files.
         try:
-            minimum_gb = float(os.environ.get('SILVER_LANTERN_MIN_FREE_GB', '40'))
+            minimum_gb = float(os.environ.get('SILVER_LANTERN_MIN_FREE_GB', '44'))
             if not 0 <= minimum_gb < float('inf'):
                 raise ValueError
         except ValueError:
@@ -1561,6 +1591,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             target.parent.mkdir(parents=True, exist_ok=True)
             temp = target.with_name(target.name + '.heylisten-new')
             try:
+                file_hash = hashlib.sha256()
                 with temp.open('wb') as output:
                     for part in item['segments' if v2 else 'parts']:
                         with (cache / part['asset']).open('rb') as source:
@@ -1573,10 +1604,11 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                                     raise ValueError(f"short segment: {part['asset']}")
                                 output.write(chunk)
                                 segment_hash.update(chunk)
+                                file_hash.update(chunk)
                                 remaining -= len(chunk)
                             if segment_hash.hexdigest() != part['sha256']:
                                 raise ValueError(f"segment SHA-256 mismatch: {part['asset']}")
-                if temp.stat().st_size != item['size'] or sha256(temp) != item['sha256']:
+                if temp.stat().st_size != item['size'] or file_hash.hexdigest() != item['sha256']:
                     raise ValueError(f"assembled SHA-256 mismatch: {item['path']}")
                 temp.replace(target)
             finally:
