@@ -1624,7 +1624,13 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
     states = []
     by_asset = {name: [] for name in assets}
     created_parents = set()
-    for item in pending:
+    log(f"Preparing download: checking {len(pending)} destination files", echo=True)
+    last_report = time.monotonic()
+    for count, item in enumerate(pending, 1):
+        now = time.monotonic()
+        if now - last_report >= 5:
+            log(f"Preparing download: {count - 1}/{len(pending)} destination files checked", echo=True)
+            last_report = now
         target = game_path(root, item['path'])
         if target.parent not in created_parents:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -1641,6 +1647,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
             if index >= state['next']:
                 by_asset[segment['asset']].append((state, index, segment))
     names = [name for name in assets if by_asset[name]]
+    log(f"Preparation complete: {len(pending)} files, {len(names)} bundles ready", echo=True)
     shared = {'done': False, 'error': None, 'cap': 2, 'slots': 0, 'stalled': 0}
 
     def fail(exc):
@@ -1803,12 +1810,18 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
 
 def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = False,
                  manifest_path: Path | None = None, keep_assets: bool = False) -> None:
+    log('Checking installation plan', echo=True)
     validate_bundle_order(man)
     root = root.expanduser()
     pending = []
     kept = 0
     missing_parents = set()
-    for item in man['files']:
+    last_report = time.monotonic()
+    for count, item in enumerate(man['files'], 1):
+        now = time.monotonic()
+        if now - last_report >= 5:
+            log(f"Checking installation plan: {count - 1}/{len(man['files'])} files checked", echo=True)
+            last_report = now
         relative = item['path']
         parent_name = relative.rpartition('/')[0]
         if parent_name in missing_parents:
@@ -1852,6 +1865,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             have = have if have < part['size'] else 0
         download_bytes += part['size'] - have
     log(f"Plan: {len(man['files']) - len(pending)} files present, {len(pending)} to download ({download_bytes / 1024**3:.2f} GB), {kept / 1024**3:.2f} GB kept")
+    log('Installation plan complete', echo=True)
     step("Game files")
     if not pending:
         done("up to date")
@@ -1890,8 +1904,10 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     root.mkdir(parents=True, exist_ok=True)
     if pending:
         if os.name == 'nt' and os.environ.get('SILVER_LANTERN_TEST_NO_DEFENDER') != '1':
+            log('Preparing Windows security settings', echo=True)
             import launcher
             launcher.optimize_defender(root)
+            log('Windows security preparation complete', echo=True)
         cache.mkdir(parents=True, exist_ok=True)
         progress = GameProgress(download_bytes)
         verified_assets = set()
@@ -1925,6 +1941,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 dest.unlink(missing_ok=True)
                 raise ValueError(f"SHA-256 mismatch: {part['asset']}")
             verified_assets.add(part['asset'])
+        log('Starting bundle download and installation', echo=True)
         if v2:
             if man.get('layout') == 'whole':
                 try:
@@ -1978,6 +1995,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                         (cache / name).unlink(missing_ok=True)
                         Path(str(cache / name) + '.part').unlink(missing_ok=True)
         progress.finish()
+        log('Bundle download and installation complete', echo=True)
     if pending and not keep_assets and cache.exists():
         try:
             cache.rmdir()  # Keep unrelated or resumable cached data.
