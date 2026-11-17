@@ -1008,7 +1008,7 @@ class LauncherUI:
         events = self.events
         def check():
             try:
-                self.events.publish('status', 'Fetching manifest…')
+                events.publish('status', 'Fetching manifest…')
                 from curl_cffi import requests as curl_requests, CurlOpt
                 options = {CurlOpt.CONNECTTIMEOUT_MS: 10000, CurlOpt.TIMEOUT_MS: 0,
                            CurlOpt.LOW_SPEED_LIMIT: 1024, CurlOpt.LOW_SPEED_TIME: 30}
@@ -1016,18 +1016,18 @@ class LauncherUI:
                     try:
                         with curl_requests.Session(impersonate='chrome', curl_options=options) as client:
                             manifest = fetch_channel_manifest(self.folder, client)
-                            self.events.publish('status', 'Planning…')
+                            events.publish('status', 'Planning…')
                         break
                     except Exception:
                         if attempt:
                             raise
-                        self.events.publish('status', 'Connection stalled — retrying…')
+                        events.publish('status', 'Connection stalled — retrying…')
                 digest = manifest_digest(manifest)
-                self.events.publish('check', (manifest.get('revision'), digest))
+                events.publish('check', (manifest.get('revision'), digest))
             except Exception:
-                self.events.publish('offline', 'Could not reach the update server')
+                events.publish('offline', 'Could not reach the update server')
             try:
-                self.events.publish('status', 'Checking for updates…')
+                events.publish('status', 'Checking for updates…')
                 from curl_cffi import requests as curl_requests
                 for attempt in range(2):
                     try:
@@ -1041,13 +1041,13 @@ class LauncherUI:
                     except Exception:
                         if attempt:
                             raise
-                        self.events.publish('status', 'Connection stalled — retrying…')
-                self.events.publish('tool_check', release.get('tag_name', 'unknown'))
+                        events.publish('status', 'Connection stalled — retrying…')
+                events.publish('tool_check', release.get('tag_name', 'unknown'))
                 if installed(self.folder):
                     result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-File', str(next((p for p in (BASE / 'Update-Game.ps1', BASE / 'support' / 'Update-Game.ps1') if p.is_file()), BASE / 'Update-Game.ps1')), '-DryRun', '-GameFolder', str(self.folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-                    self.events.publish('upstream_check', result.returncode)
+                    events.publish('upstream_check', result.returncode)
             except Exception:
-                self.events.publish('offline', 'Could not reach the update server')
+                events.publish('offline', 'Could not reach the update server')
         threading.Thread(target=check, daemon=True).start()
 
     def buttons(self):
