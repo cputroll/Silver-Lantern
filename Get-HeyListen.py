@@ -806,6 +806,122 @@ def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = 
     return dest.stat().st_size
 
 
+PARALLEL_THRESHOLD = 64 * 1024 * 1024
+CHUNK_MIN = 16 * 1024 * 1024
+
+
+def download_streams():
+    try:
+        return max(1, min(16, int(os.environ.get('SILVER_LANTERN_DL_STREAMS', '6'))))
+    except ValueError:
+        return 6
+
+
+def chunk_layout(size, streams, chunk_min=CHUNK_MIN):
+    width = max((size + streams - 1) // streams, chunk_min)
+    return [[start, min(size, start + width)] for start in range(0, size, width)]
+
+
+def chunk_state(dest, size, streams, chunk_min=CHUNK_MIN):
+    part = Path(str(dest) + '.part')
+    side = Path(str(dest) + '.part.json')
+    bounds = chunk_layout(size, streams, chunk_min)
+    try:
+        state = json.loads(side.read_text(encoding='utf-8'))
+        if (state['size'] != size or state['bounds'] != bounds or
+                len(state['done']) != len(bounds) or
+                not all(type(x) is bool for x in state['done']) or
+                part.stat().st_size != size):
+            raise ValueError('invalid chunk layout')
+        return state
+    except (OSError, ValueError, KeyError, TypeError):
+        return {'size': size, 'bounds': bounds, 'done': [False] * len(bounds)}
+
+
+def parallel_download(session_factory, url, dest, size, expected_sha, progress, streams, chunk_min=CHUNK_MIN):
+    """Download into disjoint offsets; only fully completed regions are resumable."""
+    part = Path(str(dest) + '.part')
+    side = Path(str(dest) + '.part.json')
+    state = chunk_state(dest, size, streams, chunk_min)
+    bounds = state['bounds']
+    completed = sum(b - a for (a, b), done in zip(bounds, state['done']) if done)
+    lock = threading.Lock()
+    local = threading.local()
+
+    def save():
+        temp = Path(str(side) + '.tmp')
+        temp.write_text(json.dumps(state), encoding='utf-8')
+        os.replace(temp, side)
+
+    def worker(i, response=None):
+        start, end = bounds[i]
+        if response is None:
+            if not hasattr(local, 'session'):
+                local.session = session_factory()
+            r = local.session.get(url, headers={'range': f'bytes={start}-{end-1}', 'accept': '*/*'}, stream=True, timeout=120)
+        else:
+            r = response
+        try:
+            expected_range = f'bytes {start}-{end-1}/{size}'
+            if r.status_code != 206 or (r.headers.get('content-range') or '').lower().strip() != expected_range:
+                raise ValueError('invalid chunk Content-Range')
+            pos = start
+            with part.open('r+b') as f:
+                f.seek(start)
+                for data in r.iter_content(1024 * 1024):
+                    if pos + len(data) > end:
+                        raise ValueError('chunk exceeds expected size')
+                    f.write(data)
+                    pos += len(data)
+                    progress.add(len(data))
+            if pos != end:
+                raise ValueError('short chunk')
+            with lock:
+                state['done'][i] = True
+                save()
+        finally:
+            r.close()
+
+    pending = [i for i, done in enumerate(state['done']) if not done]
+    if not pending:
+        _replace_with_retry(part, dest)
+        side.unlink(missing_ok=True)
+        return
+    # Probe before allocating or changing the resume state.
+    first = pending[0]
+    a, b = bounds[first]
+    probe_session = session_factory()
+    probe = probe_session.get(url, headers={'range': f'bytes={a}-{b-1}', 'accept': '*/*'}, stream=True, timeout=120)
+    if probe.status_code == 200:
+        probe.close()
+        part.unlink(missing_ok=True)
+        side.unlink(missing_ok=True)
+        # Existing completed regions were excluded from the plan's total.
+        remaining_credit = size - completed
+        def credit(n):
+            nonlocal remaining_credit
+            amount = min(n, remaining_credit)
+            remaining_credit -= amount
+            progress.add(amount)
+        stream_to(probe_session, url, dest, expect=size, progress=credit, quiet=True)
+        return
+    if probe.status_code != 206 or (probe.headers.get('content-range') or '').lower().strip() != f'bytes {a}-{b-1}/{size}':
+        probe.close()
+        raise ValueError('invalid chunk Content-Range')
+    if not any(state['done']) or not part.exists() or part.stat().st_size != size or not side.exists():
+        with part.open('wb') as f:
+            f.truncate(size)
+        state['done'] = [False] * len(bounds)
+        save()
+    with ThreadPoolExecutor(max_workers=max(1, streams - 1)) as pool:
+        futures = [pool.submit(worker, i) for i in pending[1:]]
+        worker(first, probe)
+        for future in futures:
+            future.result()
+    _replace_with_retry(part, dest)
+    side.unlink(missing_ok=True)
+
+
 def source_part_tag(idx: int, src: dict) -> str:
     """Stable per-source suffix so partial files from different sources never mix."""
     ident = json.dumps([src.get("url"), src.get("parts"), src.get("size")], sort_keys=True)
@@ -1323,7 +1439,7 @@ def load_game_manifest(s, source: str) -> dict:
 
 
 class GameProgress(Progress):
-    """One combined bar across every game asset (several download threads)."""
+    """One combined bar across every game asset."""
 
     def __init__(self, total):
         super().__init__("Downloading", total)
@@ -1362,8 +1478,15 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
         partial = Path(str(cached) + '.part')
         if cached.is_file() and cached.stat().st_size == part['size'] and sha256(cached) == part['sha256']:
             continue
-        have = partial.stat().st_size if partial.is_file() else 0
-        download_bytes += part['size'] - (have if have < part['size'] else 0)
+        if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists() and sha256(partial) == part['sha256']:
+            continue
+        if part['size'] >= PARALLEL_THRESHOLD and download_streams() > 1:
+            state = chunk_state(cached, part['size'], download_streams())
+            have = sum(b - a for (a, b), done in zip(state['bounds'], state['done']) if done)
+        else:
+            have = partial.stat().st_size if partial.is_file() and not Path(str(partial) + '.json').exists() else 0
+            have = have if have < part['size'] else 0
+        download_bytes += part['size'] - have
     log(f"Plan: {len(man['files']) - len(pending)} files present, {len(pending)} to download ({download_bytes / 1024**3:.2f} GB), {kept / 1024**3:.2f} GB kept")
     step("Game files")
     if not pending:
@@ -1402,15 +1525,22 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 return
             dest.unlink(missing_ok=True)
             partial = Path(str(dest) + '.part')
-            if partial.is_file() and partial.stat().st_size == part['size']:
+            if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists():
                 if sha256(partial) == part['sha256']:
                     partial.replace(dest)
                     verified_assets.add(part['asset'])
                     return
                 partial.unlink()
-            # Each worker owns its HTTP session; sessions are not shared between threads.
-            worker = session() if s is None else s
-            stream_to(worker, GAME_ASSET_URL + quote(part['asset']), dest, expect=part['size'], progress=progress.add, quiet=True)
+            url = GAME_ASSET_URL + quote(part['asset'])
+            if part['size'] >= PARALLEL_THRESHOLD and download_streams() > 1:
+                parallel_download(session, url, dest, part['size'], part['sha256'], progress, download_streams())
+            else:
+                side = Path(str(partial) + '.json')
+                if side.exists():
+                    partial.unlink(missing_ok=True)
+                    side.unlink(missing_ok=True)
+                worker = session() if s is None else s
+                stream_to(worker, url, dest, expect=part['size'], progress=progress.add, quiet=True)
             if sha256(dest) != part['sha256']:
                 dest.unlink(missing_ok=True)
                 raise ValueError(f"SHA-256 mismatch: {part['asset']}")
