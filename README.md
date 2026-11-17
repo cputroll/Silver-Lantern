@@ -16,9 +16,20 @@ Silver Lantern installs the game for you and keeps it up to date.
 4. Wait for the progress bar while the game downloads. The first download is about 33 GB. Downloaded bundles are cleaned up automatically as installation proceeds.
 5. When installation finishes, the game opens automatically.
 
+**Advanced:** Run `HeyListen-Get.exe --builder-flow` to download the data package and open the Builder to compile locally, useful when prebuilt files are unavailable for your setup.
+
 ## Keeping it up to date
 
-Every run checks for updates to both the tool and the game and downloads only what changed. Nothing is ever rebuilt on your PC.
+Every normal run checks for updates to both the tool and the game and downloads only what changed. The normal install does not rebuild anything on your PC.
+
+## All command-line options
+
+- `--install-game [FOLDER]` installs or updates the prebuilt game files in the default folder or a folder you specify, without opening the game.
+- `--dry-run` shows what the prebuilt install would download without installing the game; the tool may still update itself.
+- `--prune` removes other files not in the game file list during a prebuilt install, except files in a `user` folder and certain manifest files.
+- `--update-game [FOLDER]` runs the classic game updater for the default folder or a folder you specify; it may rebuild the game locally.
+- `--update-on-launch` also runs a quiet check with the classic updater after the normal or Builder flow.
+- `--builder-flow` downloads the data package and opens the Builder for a local build.
 
 ## Troubleshooting
 
