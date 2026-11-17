@@ -1,3 +1,3 @@
-# Silver Lantern 1.5.3
+# Silver Lantern 1.5.4
 
-- Fixed: in-app updates could fail with an unrecognized-argument error and could interrupt a running install.
+- Shortcut now appears on the visible desktop on machines with OneDrive folder redirection; the game now starts fullscreen by default.

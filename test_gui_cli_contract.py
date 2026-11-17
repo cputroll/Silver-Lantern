@@ -13,7 +13,7 @@ class GuiCliContractTests(unittest.TestCase):
             ['--uninstall'],
         ]
         for args in cases:
-            with self.subTest(args=args), mock.patch.object(sys, 'argv', ['tool', *args]), mock.patch.object(h, 'relocate_transient', return_value=False), mock.patch.object(h, 'self_update_step', return_value=0), mock.patch.object(h, 'run_game_update', return_value=0), mock.patch.object(h, 'install_from_manifest'), mock.patch('launcher.uninstall', return_value=True), mock.patch.object(h, 'session'):
+            with self.subTest(args=args), mock.patch.object(sys, 'argv', ['tool', *args]), mock.patch.object(h, 'relocate_transient', return_value=False), mock.patch.object(h, 'self_update_step', return_value=0), mock.patch.object(h, 'run_game_update', return_value=0), mock.patch.object(h, 'install_from_manifest'), mock.patch.object(h, 'apply_preset_step'), mock.patch('launcher.uninstall', return_value=True), mock.patch.object(h, 'session'):
                 self.assertEqual(h.main(), 0)
 
     def test_bare_gui_dispatch(self):

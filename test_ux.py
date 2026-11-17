@@ -188,6 +188,28 @@ class DefaultFlowTests(unittest.TestCase):
         popen.assert_not_called()
         self.assertIn('double-click HeyListen.exe', out)
 
+    def test_fresh_install_applies_preset_to_shipped_ini(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td) / 'game'
+            def install(s, a, root):
+                (root / 'bin').mkdir(parents=True)
+                (root / 'bin' / 'HeyListen.exe').write_bytes(b'MZ')
+                (root / 'hookshot_options.ini').write_text('resolution=0\n')
+            args = mock.Mock(game_dir=str(folder), dry_run=False, no_preset=False, no_launch=True, update_on_launch=False)
+            with mock.patch.object(app, 'install_from_manifest', side_effect=install), mock.patch.object(app, 'detect_gpu_name', return_value=None):
+                self.assertEqual(app.run_default_flow(None, args), 0)
+            self.assertIn('fullscreen=1', (folder / 'hookshot_options.ini').read_text())
+
+    def test_explicit_install_applies_preset_to_shipped_ini(self):
+        with tempfile.TemporaryDirectory() as td:
+            folder = Path(td) / 'game'
+            def install(s, a, root):
+                root.mkdir(parents=True)
+                (root / 'hookshot_options.ini').write_text('resolution=0\n')
+            with mock.patch.object(sys, 'argv', ['app', '--install-game', str(folder), '--no-self-update', '--no-pause']), mock.patch.object(app, 'ui_init'), mock.patch.object(app, 'session'), mock.patch.object(app, 'install_from_manifest', side_effect=install), mock.patch.object(app, 'detect_gpu_name', return_value=None):
+                self.assertEqual(app.main(), 0)
+            self.assertIn('fullscreen=1', (folder / 'hookshot_options.ini').read_text())
+
     def test_existing_settings_are_kept(self):
         with mock.patch.object(app, 'apply_preset') as preset, \
              mock.patch.object(app.Path, 'exists', return_value=True):

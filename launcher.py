@@ -40,7 +40,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.5.3')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.5.4')
 
 
 def cli_command(*args):
@@ -65,8 +65,36 @@ def probe_writable(folder):
         probe.unlink(missing_ok=True)
 
 
+def _known_desktop():
+    if os.name != 'nt':
+        return None
+    try:
+        from ctypes import wintypes
+        class GUID(ctypes.Structure):
+            _fields_ = [('Data1', wintypes.DWORD), ('Data2', wintypes.WORD), ('Data3', wintypes.WORD), ('Data4', ctypes.c_ubyte * 8)]
+        desktop = GUID(0xB4BFCC3A, 0xDB1C, 0x4D44, (ctypes.c_ubyte * 8)(0x83, 0x4F, 0x28, 0x4F, 0xB3, 0x87, 0xCD, 0x39))
+        ole = ctypes.windll.ole32
+        shell = ctypes.windll.shell32
+        initialized = ole.CoInitializeEx(None, 2)
+        path = ctypes.c_wchar_p()
+        try:
+            shell.SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(ctypes.c_wchar_p)]
+            shell.SHGetKnownFolderPath.restype = ctypes.c_long
+            if shell.SHGetKnownFolderPath(ctypes.byref(desktop), 0, None, ctypes.byref(path)) == 0 and path.value:
+                return Path(path.value)
+        finally:
+            if path:
+                ole.CoTaskMemFree(path)
+            if initialized in (0, 1):
+                ole.CoUninitialize()
+    except (AttributeError, OSError, ValueError):
+        pass
+    return None
+
+
 def shortcut_path():
-    return Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Desktop' / (GAME_NAME + '.lnk')
+    desktop = _known_desktop() or Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Desktop'
+    return desktop / (GAME_NAME + '.lnk')
 
 
 def create_shortcut(folder, enabled=True):

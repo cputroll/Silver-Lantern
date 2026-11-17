@@ -74,6 +74,7 @@ $fg  = @{ Off = 0; Auto = 1; '2x' = 2 }[$FrameGeneration]
 $up  = @{ DLSS = 1; FSR3 = 3 }[$Upscaler]
 
 $wanted = [ordered]@{
+  fullscreen = 1          # borderless fullscreen (engine integer toggle)
   dlss       = $up        # 1 NVIDIA DLSS | 3 AMD FSR 3.1
   resolution = $res       # Performance = 50% = value 4 (same shares for DLSS and FSR)
   sharpness  = $Sharpness # DLSS is softer than the game's own: 80% is the documented pairing

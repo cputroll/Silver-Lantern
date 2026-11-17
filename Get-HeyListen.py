@@ -47,7 +47,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -56,6 +56,7 @@ UPDATE_ASSET = "HeyListen-Get.zip"
 SUMS_ASSET = "SHA256SUMS.txt"
 
 PRESET_DLSS = {         # engine/gpu/vk/vk_menu.cpp ini_key names
+    "fullscreen": "1",  # borderless fullscreen
     "dlss": "1",        # 1 = NVIDIA DLSS
     "resolution": "4",  # 4 = 50% = DLSS Performance
     "sharpness": "80",
@@ -65,6 +66,7 @@ PRESET_DLSS = {         # engine/gpu/vk/vk_menu.cpp ini_key names
     "options_version": "3",
 }
 PRESET_FSR = {
+    "fullscreen": "1",  # borderless fullscreen
     "dlss": "3",        # 3 = AMD FSR 3.1 (compiled into every build)
     "resolution": "4",  # 4 = 50% = FSR Performance
     "sharpness": "80",
@@ -2267,7 +2269,11 @@ def main() -> int:
     if builder_flow:
         return run_builder_flow(s, a)
     if a.install_game is not None:
-        install_from_manifest(s, a, Path(a.install_game).expanduser())
+        folder = Path(a.install_game).expanduser()
+        fresh_install = not (folder / 'hookshot_options.ini').exists()
+        install_from_manifest(s, a, folder)
+        if not a.dry_run and not a.no_preset:
+            apply_preset_step(folder, fresh_install=fresh_install)
         return 0
     return run_default_flow(s, a)
 
@@ -2332,9 +2338,9 @@ def finish_lines(folder: Path, launched: bool, preset: str | None = None) -> lis
     return lines
 
 
-def apply_preset_step(folder: Path) -> str | None:
+def apply_preset_step(folder: Path, fresh_install: bool = False) -> str | None:
     """Apply the GPU preset once (never over the user's own settings). Returns its label."""
-    if (folder / 'hookshot_options.ini').exists():
+    if not fresh_install and (folder / 'hookshot_options.ini').exists():
         log(f"preset skipped: {folder / 'hookshot_options.ini'} already exists")
         return None
     step("Graphics settings")
@@ -2354,13 +2360,14 @@ def apply_preset_step(folder: Path) -> str | None:
 def run_default_flow(s, a) -> int:
     """Double-click path: install the prebuilt game, set graphics, start it."""
     folder = Path(a.game_dir or default_game_folder()).expanduser()
+    fresh_install = not (folder / 'hookshot_options.ini').exists()
     install_from_manifest(s, a, folder)
     if a.dry_run:
         return 0
     if not (folder / 'bin' / 'HeyListen.exe').is_file():
         raise UserError("The game files were installed, but HeyListen.exe is missing.",
                         "Run this again. If it repeats, send the log file to the person who gave you this tool.")
-    preset = None if a.no_preset else apply_preset_step(folder)
+    preset = None if a.no_preset else apply_preset_step(folder, fresh_install=fresh_install)
     launched = False
     if not a.no_launch:
         exe = game_launcher(folder)
