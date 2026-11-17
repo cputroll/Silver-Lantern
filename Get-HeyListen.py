@@ -1526,7 +1526,15 @@ def restore_segment_checkpoint(temp, checkpoint, item):
         return 0, hashlib.sha256()
 
 
-def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
+class SegmentMismatch(ValueError):
+    def __init__(self, message, asset, path):
+        super().__init__(message)
+        self.asset = asset
+        self.path = path
+
+
+def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=False):
+
     """Download bundles in order while workers consume segments in file order."""
     cond = threading.Condition()
     bundles = deque()
@@ -1627,7 +1635,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
                             state['hasher'].update(data)
                             remaining -= len(data)
                     if segment_hash.hexdigest() != segment['sha256']:
-                        raise ValueError(f"segment SHA-256 mismatch: {segment['asset']}")
+                        raise SegmentMismatch(f"segment SHA-256 mismatch: {segment['asset']}", segment['asset'], state['item']['path'])
                     state['next'] += 1
                     if not state['direct'] and state['next'] < len(state['item']['segments']):
                         checkpoint = Path(str(state['temp']) + '.json')
@@ -1636,7 +1644,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
                         os.replace(staging, checkpoint)
                     if state['next'] == len(state['item']['segments']):
                         if state['temp'].stat().st_size != state['item']['size'] or state['hasher'].hexdigest() != state['item']['sha256']:
-                            raise ValueError(f"assembled SHA-256 mismatch: {state['item']['path']}")
+                            raise SegmentMismatch(f"assembled SHA-256 mismatch: {state['item']['path']}", segment['asset'], state['item']['path'])
                         if not state['direct']:
                             state['temp'].replace(state['target'])
                             Path(str(state['temp']) + '.json').unlink(missing_ok=True)
@@ -1683,10 +1691,22 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
         for thread in workers:
             thread.join()
     if shared['error']:
+        soft = soft_retry and isinstance(shared['error'], SegmentMismatch)
         for state in states:
             if state['started'] and not state['complete']:
-                state['temp'].unlink(missing_ok=True)
-        for name in names:
+                checkpoint = Path(str(state['temp']) + '.json')
+                if soft and not state['direct'] and checkpoint.exists():
+                    try:
+                        length = json.loads(checkpoint.read_text(encoding='utf-8'))['bytes_written']
+                        with state['temp'].open('r+b') as output:
+                            output.truncate(length)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        state['temp'].unlink(missing_ok=True)
+                        checkpoint.unlink(missing_ok=True)
+                else:
+                    state['temp'].unlink(missing_ok=True)
+                    checkpoint.unlink(missing_ok=True)
+        for name in ([shared['error'].asset] if soft else names):
             for suffix in ('', '.part', '.part.json'):
                 Path(str(cache / name) + suffix).unlink(missing_ok=True)
         raise shared['error']
