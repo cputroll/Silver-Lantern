@@ -43,7 +43,7 @@ class WindowsInstallTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, patch.object(launcher.sys, 'frozen', True, create=True), patch.object(launcher.sys, 'executable', str(Path(d) / 'SilverLantern.exe')), patch.object(launcher, 'powershell') as run:
             launcher.schedule_owned_cleanup()
         script = run.call_args.args[0]
-        self.assertIn('WaitForExit()', script)
+        self.assertIn('WaitForExit(30000)', script)
         self.assertIn('Start-Sleep', script)
         self.assertIn('Test-Path', script)
         self.assertIn('SilverLantern.exe', script)

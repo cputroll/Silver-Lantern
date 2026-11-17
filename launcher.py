@@ -325,14 +325,13 @@ def relocate_launcher(folder):
 def schedule_owned_cleanup():
     if not getattr(sys, 'frozen', False):
         return
-    folder = Path(sys.executable).resolve().parent
-    files = ','.join(ps_quote(folder / name) for name in OWNED_FILES)
+    exe = Path(sys.executable).resolve()
+    folder = exe.parent
     script = (f'$p=Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; '
-              'if($p){$p.WaitForExit()}; '
-              f'$files=@({files}); for($i=0;$i -lt 60;$i++) {{ '
-              '$files | ForEach-Object { Remove-Item -LiteralPath $_ -Force -ErrorAction SilentlyContinue }; '
-              'if(-not ($files | Where-Object { Test-Path -LiteralPath $_ })) { break }; Start-Sleep -Milliseconds 500 }; '
-              f'try {{ [System.IO.Directory]::Delete({ps_quote(folder / "support")}, $false) }} catch {{}}; '
+              'if($p -and -not $p.WaitForExit(30000)){exit}; '
+              f'$file={ps_quote(exe)}; for($i=0;$i -lt 60;$i++) {{ '
+              'Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue; '
+              'if(-not (Test-Path -LiteralPath $file)) { break }; Start-Sleep -Milliseconds 500 }; '
               f'try {{ [System.IO.Directory]::Delete({ps_quote(folder)}, $false) }} catch {{}}')
     powershell(script, wait=False)
 
@@ -1121,7 +1120,15 @@ class LauncherUI:
                 if self.folder == self.primary:
                     self.folder, self.status = resolve_folder(self.primary, self.fallback, probe_writable)
                 else: probe_writable(self.folder)
+                previous = load_game_folder()
                 self.save()
+                if getattr(sys, 'frozen', False) and relocate_launcher(self.folder):
+                    current = Path(sys.executable).resolve()
+                    fallback = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Programs' / 'Ocarina of Time'
+                    if current.name.casefold() == 'ocarina of time.exe' and (previous and current.parent == previous.resolve() or current.parent == fallback.resolve()) and current.parent != self.folder.resolve():
+                        schedule_owned_cleanup()
+                    self.running = False
+                    return
                 self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
                 self.set_screen('main')
             except OSError as exc:
