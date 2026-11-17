@@ -402,6 +402,13 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
     remove_registration()
     if STATE_DIR.exists():
         shutil.rmtree(STATE_DIR)
+    if had_folder:
+        try:
+            LOG.parent.mkdir(parents=True, exist_ok=True)
+            with LOG.open('a', encoding='utf-8') as log:
+                log.write(f'Unknown user files preserved: {unknown}\n')
+        except OSError:
+            pass
     schedule_owned_cleanup()
     return True
 

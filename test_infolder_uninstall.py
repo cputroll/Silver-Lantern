@@ -6,6 +6,13 @@ import launcher
 
 
 class InFolderUninstallTests(unittest.TestCase):
+    def test_preservation_count_is_logged(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); game = root / 'game'; game.mkdir(); (game / 'notes.txt').write_text('mine')
+            with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'confirm_uninstall', return_value=True), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'ownership_manifest', return_value=None), patch.object(launcher, 'shortcut_path', return_value=root / 'desktop.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'start.lnk'), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'LOG', root / 'uninstall.log'), patch.object(launcher, 'schedule_owned_cleanup'):
+                launcher.uninstall()
+            self.assertIn('Unknown user files preserved: 1', (root / 'uninstall.log').read_text())
+
     def test_fixed_item_under_symlink_is_not_removed(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); game = root / 'game'; game.mkdir(); outside = root / 'outside'; outside.mkdir()
