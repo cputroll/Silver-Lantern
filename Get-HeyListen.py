@@ -1534,23 +1534,28 @@ class SegmentMismatch(ValueError):
 
 
 def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=False):
-
     """Download bundles in order while workers consume segments in file order."""
     cond = threading.Condition()
     bundles = deque()
     states = []
     by_asset = {name: [] for name in assets}
+    created_parents = set()
     for item in pending:
         target = game_path(root, item['path'])
-        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.parent not in created_parents:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            created_parents.add(target.parent)
         direct = len(item['segments']) == 1
         state = {'item': item, 'target': target,
                  'temp': target if direct else target.with_name(target.name + '.heylisten-new'),
                  'direct': direct, 'next': 0, 'started': False, 'complete': False,
                  'hasher': hashlib.sha256(), 'lock': threading.Lock()}
+        if soft_retry and not direct:
+            state['next'], state['hasher'] = restore_segment_checkpoint(state['temp'], Path(str(state['temp']) + '.json'), item)
         states.append(state)
         for index, segment in enumerate(item['segments']):
-            by_asset[segment['asset']].append((state, index, segment))
+            if index >= state['next']:
+                by_asset[segment['asset']].append((state, index, segment))
     names = [name for name in assets if by_asset[name]]
     shared = {'done': False, 'error': None, 'cap': 2, 'slots': 0, 'stalled': 0}
 
@@ -1691,7 +1696,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
         for thread in workers:
             thread.join()
     if shared['error']:
-        soft = soft_retry and isinstance(shared['error'], SegmentMismatch)
+        soft = soft_retry is True and isinstance(shared['error'], SegmentMismatch)
         for state in states:
             if state['started'] and not state['complete']:
                 checkpoint = Path(str(state['temp']) + '.json')
@@ -1718,8 +1723,18 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     root = root.expanduser()
     pending = []
     kept = 0
+    missing_parents = set()
     for item in man['files']:
-        target = game_path(root, item['path'])
+        relative = item['path']
+        parent_name = relative.rpartition('/')[0]
+        if parent_name in missing_parents:
+            pending.append(item)
+            continue
+        target = game_path(root, relative)
+        if not target.parent.exists():
+            missing_parents.add(parent_name)
+            pending.append(item)
+            continue
         if target.is_file() and target.stat().st_size == item['size']:
             if item['size'] >= 256 * 1024 * 1024:
                 log(f"Checking SHA-256: {item['path']} ({human(item['size'])})")
@@ -1782,8 +1797,9 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
         verified_assets = set()
         def fetch(part):
             dest = cache / part['asset']
-            if part['asset'] in verified_assets:
+            if part['asset'] in verified_assets and dest.is_file():
                 return
+            verified_assets.discard(part['asset'])
             if dest.is_file() and dest.stat().st_size == part['size'] and sha256(dest) == part['sha256']:
                 verified_assets.add(part['asset'])
                 return
@@ -1809,8 +1825,16 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 dest.unlink(missing_ok=True)
                 raise ValueError(f"SHA-256 mismatch: {part['asset']}")
             verified_assets.add(part['asset'])
-        if v2 and man.get('layout') != 'whole':
-            assemble_segmented(pending, assets, cache, root, fetch, keep_assets)
+        if v2:
+            if man.get('layout') == 'whole':
+                try:
+                    assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=True)
+                except SegmentMismatch as error:
+                    verified_assets.discard(error.asset)
+                    remaining = [item for item in pending if not (game_path(root, item['path']).is_file() and sha256(game_path(root, item['path'])) == item['sha256'])]
+                    assemble_segmented(remaining, assets, cache, root, fetch, keep_assets, soft_retry='resume')
+            else:
+                assemble_segmented(pending, assets, cache, root, fetch, keep_assets)
         else:
             remaining_uses = {name: 0 for name in needed}
             for item in pending:
