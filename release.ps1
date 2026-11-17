@@ -32,7 +32,10 @@ try {
   Copy-Item sources.json, README.md, Apply-HeyListen-Preset.ps1, SilverLantern-Get.cmd, SilverLantern-Preset.cmd $stage
   $zip = Join-Path $out 'HeyListen-Get.zip'
   Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
-  $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $fs = [System.IO.File]::OpenRead($zip)
+  try { $hash = ([System.BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '').ToLowerInvariant() }
+  finally { $fs.Dispose(); $sha.Dispose() }
   [System.IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), "$hash  HeyListen-Get.zip`n", [System.Text.UTF8Encoding]::new($false))
   Write-Host "Packaged $zip ($hash)"
   if (-not $NoPublish) {
