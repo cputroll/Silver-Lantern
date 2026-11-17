@@ -38,6 +38,22 @@ class RenderDensityTests(unittest.TestCase):
         self.assertEqual(ttf.TTF_CloseFont.call_count, len(launcher.TYPE))
         painter.close()
 
+    def test_ring_spans_have_nonzero_height(self):
+        import ctypes
+        class Rect(ctypes.Structure):
+            _fields_ = [('x', ctypes.c_int), ('y', ctypes.c_int), ('w', ctypes.c_int), ('h', ctypes.c_int)]
+        s = mock.MagicMock()
+        s.SDL_Rect = Rect
+        def output_size(renderer, width, height):
+            width._obj.value, height._obj.value = 1280, 720
+            return 0
+        s.SDL_GetRendererOutputSize.side_effect = output_size
+        painter = launcher.Painter.__new__(launcher.Painter)
+        painter.s, painter.r = s, object()
+        painter.ring(50, 50, 240, 50, launcher.ACCENT, radius=10)
+        rects = s.SDL_RenderFillRects.call_args.args[1]
+        self.assertTrue(all(rect.h == 1 for rect in rects))
+
     def test_ring_outline_is_symmetric_and_even(self):
         # A rounded outline rasterized per device row must stay symmetric (even stroke).
         x0, x1 = 0.0, 100.0

@@ -838,6 +838,11 @@ def friendly_blocks(lines):
     return ' '.join(x for x in problem if x).strip(), ' '.join(x for x in action if x).strip(), details
 
 
+def gui_child_text(text):
+    """Remove console dot leaders without altering the underlying log."""
+    return re.sub(r'\s*(?:\.\s*){3,}', lambda m: ' ' if m.start() and text[:m.start()].rstrip().endswith(':') else ': ', text).strip()
+
+
 def worker_command(events, args):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -856,9 +861,12 @@ def worker_command(events, args):
                 log.write(line)
                 log.flush()
                 if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ')):
-                    last_line = line.strip()
-                    screen_lines.append(line.strip())
-                events.publish('progress', parse_progress(line) or {'text': line.strip()})
+                    last_line = gui_child_text(line)
+                    screen_lines.append(last_line)
+                progress = parse_progress(line) or {'text': line.strip()}
+                if 'text' in progress:
+                    progress['text'] = gui_child_text(progress['text'])
+                events.publish('progress', progress)
         code = process.wait()
         if events.cancelled.is_set():
             events.publish('cancelled', code)
@@ -1292,7 +1300,7 @@ class Painter:
             for a, b in segs:
                 pa, pb = int(round(a)), int(round(b))
                 if pb > pa:
-                    spans.append((ox + pa, oy + dy, pb - pa))
+                    spans.append((ox + pa, oy + dy, pb - pa, 1))
         if not spans:
             return
         s.SDL_SetRenderDrawColor(self.r, *color, int(max(0, min(255, alpha))))
@@ -1429,6 +1437,7 @@ class LauncherUI:
 
     def set_screen(self, screen):
         self.screen, self.focus = screen, 0
+        self.hover = None
         self.settings_first = 0
 
     # ---------------------------------------------------------------- graphics
@@ -1673,6 +1682,18 @@ class LauncherUI:
                 self.last_error = str(exc)
                 self.set_screen('error')
 
+    def pointer(self, x, y, click=False):
+        """Track hover separately; only a click moves keyboard/controller focus."""
+        self.hover = None
+        for hx, hy, hw, hh, index in self.hits:
+            if hx <= x < hx + hw and hy <= y < hy + hh and index < len(self.buttons()):
+                if not (self.screen == 'progress' and self.operation == 'tool'):
+                    self.hover = index
+                    if click:
+                        self.focus = index
+                        self.activate()
+                break
+
     def action(self, action):
         if self.screen == 'progress' and self.operation == 'tool':
             return
@@ -1814,11 +1835,12 @@ class LauncherUI:
         return label, None, None
 
     def draw_rows(self, p, labels, x, y, w, h, gap, dt, first=0):
-        """Stacked rows with one eased focus highlight; registers mouse targets."""
+        """Stacked rows with independent focus and hover; registers mouse targets."""
         for i, _ in enumerate(labels):
-            p.fill(x, y + i * (h + gap), w, h, SURFACE_HI, 165, 10)
+            hovered = getattr(self, 'hover', None) == first + i
+            p.fill(x, y + i * (h + gap), w, h, SURFACE_FOCUS if hovered else SURFACE_HI, 220 if hovered else 165, 10)
         if first <= self.focus < first + len(labels):
-            fy = self.ease('focus', y + (self.focus - first) * (h + gap), dt)
+            fy = y + (self.focus - first) * (h + gap)
             p.fill(x, fy, w, h, SURFACE_FOCUS, 255, 10)
             p.ring(x - FOCUS_GAP, fy - FOCUS_GAP, w + 2 * FOCUS_GAP, h + 2 * FOCUS_GAP, ACCENT, 255, 10 + FOCUS_GAP, 2)
         for i, label in enumerate(labels):
@@ -1881,7 +1903,7 @@ class LauncherUI:
         if cta:
             h = 68
             self.hits.append((x, top, w, h, 0))
-            p.fill(x, top, w, h, ACCENT, 255, 12)
+            p.fill(x, top, w, h, ACCENT, 210 if getattr(self, 'hover', None) == 0 and self.focus != 0 else 255, 12)
             if self.focus == 0:
                 p.ring(x - FOCUS_GAP, top - FOCUS_GAP, w + 2 * FOCUS_GAP, h + 2 * FOCUS_GAP, ACCENT, 220, 11 + FOCUS_GAP, 2)
             p.text('cta', cta, x + w // 2, top + (h - p.height('cta')) // 2, ACCENT_INK, max_width=w - 40, align='center')
@@ -2013,7 +2035,8 @@ class LauncherUI:
         for i, label in enumerate(self.GFX_ACTIONS):
             aw = p.measure('button', label)[0] + 40
             focused = picker is None and self.focus == i
-            p.fill(ax, ay, aw, ah, SURFACE_FOCUS if focused else SURFACE_HI, 255 if focused else 200, 10)
+            hovered = picker is None and getattr(self, 'hover', None) == i
+            p.fill(ax, ay, aw, ah, SURFACE_FOCUS if focused or hovered else SURFACE_HI, 255 if focused else 220 if hovered else 200, 10)
             if focused:
                 p.ring(ax - FOCUS_GAP, ay - FOCUS_GAP, aw + 2 * FOCUS_GAP, ah + 2 * FOCUS_GAP, ACCENT, 255, 10 + FOCUS_GAP, 2)
             p.text('button', label, ax + 20, ay + (ah - p.height('button')) // 2, ACCENT if i == 0 else INK)
@@ -2032,9 +2055,9 @@ class LauncherUI:
                 target = max(target, top + h + 12 - view_h)
         target = max(0, min(target, max(0, total - view_h)))
         self.gfx_scroll_target = target
-        scroll = self.ease('gfx_scroll', target, dt, rate=.06)
+        scroll = target
         s = p.s
-        s.SDL_RenderSetClipRect(p.r, s.SDL_Rect(x - 4, view_top, w + 8, view_h))
+        s.SDL_RenderSetClipRect(p.r, s.SDL_Rect(x - FOCUS_GAP - 2, view_top, w + 2 * FOCUS_GAP + 4, view_h))
         focus_y = None
         for kind, idx, top, h in rows:
             y = view_top + top - scroll
@@ -2043,11 +2066,12 @@ class LauncherUI:
             if kind == 'heading':
                 p.text('overline', idx.upper(), x + 2, y + 10, ACCENT)
                 continue
-            p.fill(x, y, w, h, SURFACE_HI, 150, 10)
+            hovered = picker is None and getattr(self, 'hover', None) == idx
+            p.fill(x, y, w, h, SURFACE_FOCUS if hovered else SURFACE_HI, 220 if hovered else 150, 10)
             if idx == self.focus and picker is None:
                 focus_y = y
         if focus_y is not None:
-            fy = self.ease('focus', focus_y, dt)
+            fy = focus_y
             p.fill(x, fy, w, 44, SURFACE_FOCUS, 255, 10)
             p.ring(x - FOCUS_GAP, fy - FOCUS_GAP, w + 2 * FOCUS_GAP, 44 + 2 * FOCUS_GAP, ACCENT, 255, 10 + FOCUS_GAP, 2)
         for kind, idx, top, h in rows:
@@ -2251,13 +2275,8 @@ class LauncherUI:
                     elif typ in (s.SDL_MOUSEMOTION, s.SDL_MOUSEBUTTONUP):
                         mx = event.motion.x if typ == s.SDL_MOUSEMOTION else event.button.x
                         my = event.motion.y if typ == s.SDL_MOUSEMOTION else event.button.y
-                        # The renderer reports mouse positions in logical (1280x720) coordinates.
-                        for hx, hy, hw, hh, index in self.hits:
-                            if hx <= mx < hx + hw and hy <= my < hy + hh and index < len(self.buttons()):
-                                if not (self.screen == 'progress' and self.operation == 'tool'):
-                                    self.focus = index
-                                    if typ == s.SDL_MOUSEBUTTONUP and event.button.button == s.SDL_BUTTON_LEFT: self.activate()
-                                break
+                        # SDL supplies logical coordinates; hover never replaces focus.
+                        self.pointer(mx, my, typ == s.SDL_MOUSEBUTTONUP and event.button.button == s.SDL_BUTTON_LEFT)
                 frame_now = time.monotonic()
                 dt, last = min(.1, frame_now - last), frame_now
                 output_w, output_h = ctypes.c_int(), ctypes.c_int()
