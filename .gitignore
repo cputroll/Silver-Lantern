@@ -1,0 +1,6 @@
+__pycache__/
+dist-release/
+*.log
+VERSION
+sources.cache.json
+.update-backup

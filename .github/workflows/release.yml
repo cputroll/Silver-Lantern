@@ -1,0 +1,41 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to release
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: python -m pip install curl_cffi pyinstaller
+      - name: Test packaged release
+        run: python -m unittest test_release
+      - name: Build release
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: ./release.ps1 -Tag $env:RELEASE_TAG -NoPublish
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            dist-release/HeyListen-Get.zip
+            dist-release/SHA256SUMS.txt
