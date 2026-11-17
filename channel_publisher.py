@@ -1,6 +1,32 @@
 """Validation primitives for publishing immutable game-channel pointers."""
 import re
+import hashlib
+from pathlib import Path
 import subprocess
+
+
+def publish_verified(assets, upload, verify, advance):
+    for asset in assets:
+        upload(asset)
+    for asset in assets:
+        verify(asset)
+    advance()
+
+
+def validate_assets(root, assets):
+    seen = set()
+    for asset in assets:
+        name = asset['asset']
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]*', name) or name.casefold() in seen:
+            raise ValueError('invalid or duplicate asset name')
+        seen.add(name.casefold())
+        path = Path(root) / name
+        h = hashlib.sha256()
+        with path.open('rb') as f:
+            for chunk in iter(lambda: f.read(8 * 1024 * 1024), b''):
+                h.update(chunk)
+        if path.stat().st_size != asset['size'] or h.hexdigest() != asset['sha256']:
+            raise ValueError('asset checksum mismatch')
 
 
 def advance_ref(worktree, remote):

@@ -41,6 +41,34 @@ class ChannelPublisherTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError):
                 channel_publisher.advance_ref(two, 'origin')
 
+    def test_validate_assets_rejects_mismatch_and_duplicate_names(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'unique.bin').write_bytes(b'abc')
+            asset = {'asset': 'unique.bin', 'size': 3, 'sha256': hashlib.sha256(b'abc').hexdigest()}
+            channel_publisher.validate_assets(root, [asset])
+            with self.assertRaises(ValueError):
+                channel_publisher.validate_assets(root, [asset, asset])
+            (root / 'unique.bin').write_bytes(b'bad')
+            with self.assertRaises(ValueError):
+                channel_publisher.validate_assets(root, [asset])
+
+    def test_publish_refuses_to_advance_on_verification_failure(self):
+        from unittest.mock import Mock
+        upload = Mock()
+        verify = Mock(side_effect=ValueError('bad hash'))
+        advance = Mock()
+        with self.assertRaises(ValueError):
+            channel_publisher.publish_verified(['a', 'b'], upload, verify, advance)
+        advance.assert_not_called()
+
+    def test_publishes_and_verifies_all_before_advancing(self):
+        from unittest.mock import Mock, call
+        events = []
+        channel_publisher.publish_verified(['a', 'b'], lambda x: events.append(('upload', x)), lambda x: events.append(('verify', x)), lambda: events.append(('advance',)))
+        self.assertEqual(events, [('upload', 'a'), ('upload', 'b'), ('verify', 'a'), ('verify', 'b'), ('advance',)])
+
     def test_pointer_rejects_bad_asset(self):
         with self.assertRaises(ValueError):
             channel_publisher.make_pointer(None, 1, '../bad', 'a' * 64)
