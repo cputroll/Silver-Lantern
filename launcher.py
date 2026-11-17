@@ -57,7 +57,7 @@ def play_tip(folder):
         keys = None
     first = (f'While playing, press {keys} for settings or to quit.' if keys else
              'While playing, open the game menu for settings or to quit.')
-    return first, 'To quit, select Quit and press A or Enter twice.'
+    return first
 
 
 def windows_animations_enabled():
@@ -1484,12 +1484,8 @@ class LauncherUI:
         p.scene()
         x = MARGIN
         if self.state in (State.READY, State.UPDATE_AVAILABLE):
-            first, second = play_tip(self.folder)
-            tip_y = 47 + tip_offset(time.monotonic(), getattr(self, 'snap', False) or self.reduce_motion)
-            p.fill(x, tip_y, 700, 78, SURFACE, 235, 10)
-            p.ring(x, tip_y, 700, 78, ACCENT, 180, 10, 1)
-            p.text('caption', first, x + 18, tip_y + 14, INK, max_width=664)
-            p.text('caption', second, x + 18, tip_y + 42, INK_DIM, max_width=664)
+            tip_y = 60 + tip_offset(time.monotonic(), getattr(self, 'snap', False) or self.reduce_motion)
+            p.text('body', play_tip(self.folder), x, tip_y, INK_DIM, max_width=CANVAS[0] - 2 * MARGIN)
         p.text('overline', 'THE LEGEND OF ZELDA', x + 2, 160, ACCENT)
         p.text('display', 'Ocarina of Time', x - 2, 176, INK, max_width=760)
         if self.state == State.PLAYING:

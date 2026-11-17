@@ -18,8 +18,7 @@ class TipTests(unittest.TestCase):
             for value, key in ((0, 'F1 or Insert'), (1, 'Insert'), (2, 'F1')):
                 content = f'menu_shortcut={value}\n'
                 ini.write_text(content)
-                self.assertIn(f'press {key} ', launcher.play_tip(folder)[0])
-                self.assertIn('Quit', launcher.play_tip(folder)[1])
+                self.assertEqual(launcher.play_tip(folder), f'While playing, press {key} for settings or to quit.')
                 self.assertEqual(ini.read_text(), content)
 
     def test_hero_tip_moves_without_overlapping_title_or_navigation(self):
@@ -38,12 +37,18 @@ class TipTests(unittest.TestCase):
                 ui.hits = []
                 with patch.object(launcher.time, 'monotonic', return_value=t):
                     ui.draw_hero(painter, .016)
-                frame = next(c.args for c in painter.fill.call_args_list if len(c.args) >= 4 and c.args[2:4] == (700, 78))
+                tips = [c for c in painter.text.call_args_list if 'While playing,' in c.args[1]]
+                self.assertEqual(len(tips), 1)
+                frame = tips[0].args
+                self.assertEqual(frame[0], 'body')
+                self.assertEqual(frame[4], launcher.INK_DIM)
                 frames.append(frame)
-                self.assertLess(frame[1] + frame[3], 160)
+                self.assertFalse(any(len(c.args) >= 4 and c.args[1] < 140 for c in painter.fill.call_args_list))
+                self.assertFalse(any(len(c.args) >= 4 and c.args[1] < 140 for c in painter.ring.call_args_list))
+                self.assertLess(frame[3] + 20, 160)
                 self.assertTrue(all(y >= 330 for _, y, _, _, _ in ui.hits))
                 self.assertIn(0, [h[4] for h in ui.hits])
-            self.assertNotEqual(frames[0][1], frames[1][1])
+            self.assertNotEqual(frames[0][3], frames[1][3])
 
     def test_reduced_motion_disables_bounce(self):
         with patch.object(launcher, 'windows_animations_enabled', return_value=False):
