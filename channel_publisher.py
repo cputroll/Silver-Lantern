@@ -1,5 +1,10 @@
 """Validation primitives for publishing immutable game-channel pointers."""
 import re
+import subprocess
+
+
+def advance_ref(worktree, remote):
+    subprocess.run(['git', 'push', remote, 'HEAD:refs/heads/game-channel'], cwd=worktree, check=True, timeout=60, capture_output=True)
 
 
 def make_pointer(old, revision, asset, digest):
