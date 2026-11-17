@@ -8,6 +8,13 @@ from test_game_sync import h
 
 
 class ManifestOwnershipTests(unittest.TestCase):
+    def test_installed_manifest_digest_uses_successful_install_cache(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self.assertIsNone(launcher.installed_manifest_digest(root))
+            h.cache_game_manifest(root, {'files': []})
+            self.assertEqual(launcher.installed_manifest_digest(root), launcher.manifest_digest({'files': []}))
+
     def test_cached_manifest_preferred(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); cache = root / '.heylisten-get' / 'game-manifest.json'

@@ -305,6 +305,18 @@ def cache_game_manifest(folder, manifest):
     os.replace(temp, cache)
 
 
+def manifest_digest(manifest):
+    return hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def installed_manifest_digest(folder):
+    try:
+        with (Path(folder) / '.heylisten-get' / 'game-manifest.json').open(encoding='utf-8') as source:
+            return manifest_digest(json.load(source))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
 def fetch_channel_manifest(folder, session):
     import game_channel
     import importlib.util
@@ -1009,13 +1021,7 @@ class LauncherUI:
                         if attempt:
                             raise
                         self.events.publish('status', 'Connection stalled — retrying…')
-                if isinstance(manifest.get('files'), list):
-                    try:
-                        cache_game_manifest(self.folder, manifest)
-                    except OSError:
-                        pass
-                # TODO v1.5: cache the verified manifest hash after installation.
-                digest = hashlib.sha256(json.dumps(manifest, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+                digest = manifest_digest(manifest)
                 self.events.publish('check', (manifest.get('revision'), digest))
             except Exception:
                 self.events.publish('offline', 'Could not reach the update server')
@@ -1355,7 +1361,7 @@ class LauncherUI:
             elif kind == 'check':
                 revision, digest = value
                 self.latest_manifest_hash = digest
-                if self.state == State.READY and self.config.get('manifest_hash') != digest:
+                if self.state == State.READY and installed_manifest_digest(self.folder) != digest:
                     self.state = State.UPDATE_AVAILABLE
                     self.status = 'A game data update may be available.'
                 else: self.status = 'Game data: ' + (str(revision) if revision is not None else 'unversioned')

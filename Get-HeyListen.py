@@ -2354,11 +2354,11 @@ def _install_from_manifest_locked(s, a, folder: Path) -> None:
         done("failed", "yellow")
         raise
     done("up to date")
-    if not a.dry_run:
-        cache_game_manifest(folder, game_manifest)
     local_manifest = None if a.game_manifest is None or urlparse(a.game_manifest).scheme in ('http', 'https') else Path(a.game_manifest).expanduser()
     with keep_awake():
         install_game(None, game_manifest, folder, a.dry_run, a.prune, local_manifest, a.keep_assets)
+    if not a.dry_run:
+        cache_game_manifest(folder, game_manifest)
 
 
 def game_launcher(folder: Path) -> Path:
