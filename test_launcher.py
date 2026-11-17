@@ -46,6 +46,11 @@ class TipTests(unittest.TestCase):
                 self.assertFalse(any(len(c.args) >= 4 and c.args[1] < 140 for c in painter.fill.call_args_list))
                 self.assertFalse(any(len(c.args) >= 4 and c.args[1] < 140 for c in painter.ring.call_args_list))
                 self.assertLess(frame[3] + 20, 160)
+                combo = [c.args for c in painter.text.call_args_list if 'Hold Start + Back' in c.args[1]]
+                self.assertEqual(len(combo), 1)
+                self.assertEqual(combo[0][4], launcher.INK_DIM)
+                self.assertEqual(combo[0][3], frame[3] + 28)
+                self.assertLess(combo[0][3] + 20, 160)
                 self.assertTrue(all(y >= 330 for _, y, _, _, _ in ui.hits))
                 self.assertIn(0, [h[4] for h in ui.hits])
             self.assertNotEqual(frames[0][3], frames[1][3])

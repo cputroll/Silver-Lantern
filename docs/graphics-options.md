@@ -91,6 +91,7 @@ launcher (Settings -> Graphics), `--graphics` and the presets all use one module
 
 | Key | Menu row | Values | Default | This PC | What it does |
 |---|---|---|---|---|---|
+| Launcher combo | Game menu | Hold Start + Back for 2 seconds on an XInput controller | Enabled while launcher runs | — | Opens the game's menu using its configured menu shortcut, only while the game is foreground. Native HID controllers (including Switch Pro and DualSense without XInput emulation) are not yet supported. |
 | `controller_in_background` | Controller in background | 0 Off, 1 On | Off | Off | Whether the controller plays while another window has the focus. |
 | `mouse_camera` | Mouse camera | 0 As the stick, 1 Native | As the stick | As the stick | How the captured mouse turns the camera. |
 | `mouse_sensitivity` | Mouse sensitivity | 10-500 step 10 (0.10 .. 5.00) | 1.00 | 1.00 | How far the camera turns for a mouse movement. |

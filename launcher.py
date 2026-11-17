@@ -60,6 +60,117 @@ def play_tip(folder):
     return first
 
 
+class MenuCombo:
+    def __init__(self):
+        self.started = None
+        self.fired = False
+
+    def update(self, start, back, now):
+        if not (start and back):
+            self.started, self.fired = None, False
+        elif self.started is None:
+            self.started = now
+        elif not self.fired and now - self.started >= 2:
+            self.fired = True
+            return True
+        return False
+
+
+def menu_combo_key(folder):
+    return 0x70 if game_settings.read_values(folder).get('menu_shortcut', 0) == 2 else 0x2d
+
+
+def game_is_foreground(pid):
+    user32 = ctypes.windll.user32
+    user32.GetForegroundWindow.restype = ctypes.c_void_p
+    hwnd = user32.GetForegroundWindow()
+    owner = ctypes.c_ulong()
+    if hwnd:
+        user32.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(owner))
+    return bool(hwnd and owner.value == pid)
+
+
+def send_menu_key(pid, key):
+    from ctypes import wintypes
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = [('wVk', wintypes.WORD), ('wScan', wintypes.WORD), ('dwFlags', wintypes.DWORD), ('time', wintypes.DWORD), ('dwExtraInfo', ctypes.c_size_t)]
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = [('dx', wintypes.LONG), ('dy', wintypes.LONG), ('mouseData', wintypes.DWORD), ('dwFlags', wintypes.DWORD), ('time', wintypes.DWORD), ('dwExtraInfo', ctypes.c_size_t)]
+    class HARDWAREINPUT(ctypes.Structure):
+        _fields_ = [('uMsg', wintypes.DWORD), ('wParamL', wintypes.WORD), ('wParamH', wintypes.WORD)]
+    class INPUT_UNION(ctypes.Union):
+        _fields_ = [('ki', KEYBDINPUT), ('mi', MOUSEINPUT), ('hi', HARDWAREINPUT)]
+    class INPUT(ctypes.Structure):
+        _fields_ = [('type', wintypes.DWORD), ('data', INPUT_UNION)]
+    if not game_is_foreground(pid):
+        return
+    inputs = (INPUT * 2)(INPUT(1, INPUT_UNION(ki=KEYBDINPUT(key, 0, 0, 0, 0))), INPUT(1, INPUT_UNION(ki=KEYBDINPUT(key, 0, 2, 0, 0))))
+    if ctypes.windll.user32.SendInput(2, inputs, ctypes.sizeof(INPUT)) != 2:
+        raise OSError('SendInput failed')
+
+
+class ComboWatcher:
+    def __init__(self, process, folder):
+        self.process, self.folder, self.holds = process, folder, {}
+
+    def tick(self, buttons, now):
+        try:
+            if self.process.poll() is not None:
+                return False
+            if not game_is_foreground(self.process.pid):
+                self.holds.clear()
+                return True
+            self.holds = {ident: self.holds.get(ident, MenuCombo()) for ident in buttons}
+            for ident, (start, back) in buttons.items():
+                if self.holds[ident].update(start, back, now):
+                    send_menu_key(self.process.pid, menu_combo_key(self.folder))
+            return True
+        except Exception as exc:
+            log_message(f'Controller menu watcher: {exc}')
+            return False
+
+
+class XInputGamepad(ctypes.Structure):
+    _fields_ = [('wButtons', ctypes.c_ushort), ('bLeftTrigger', ctypes.c_ubyte), ('bRightTrigger', ctypes.c_ubyte), ('sThumbLX', ctypes.c_short), ('sThumbLY', ctypes.c_short), ('sThumbRX', ctypes.c_short), ('sThumbRY', ctypes.c_short)]
+
+
+class XInputState(ctypes.Structure):
+    _fields_ = [('dwPacketNumber', ctypes.c_uint32), ('Gamepad', XInputGamepad)]
+
+
+def load_xinput():
+    for dll in ('xinput1_4', 'xinput1_3', 'xinput9_1_0'):
+        try:
+            get_state = ctypes.WinDLL(dll).XInputGetState
+            get_state.argtypes = (ctypes.c_uint32, ctypes.POINTER(XInputState))
+            get_state.restype = ctypes.c_uint32
+            return get_state
+        except (OSError, AttributeError):
+            continue
+    raise OSError('XInput unavailable')
+
+
+def watch_controller_combo(process, folder):
+    try:
+        get_state = load_xinput()
+        watcher = ComboWatcher(process, folder)
+        while process.poll() is None:
+            buttons = {}
+            for index in range(4):
+                state = XInputState()
+                result = get_state(index, ctypes.byref(state))
+                if result == 0:
+                    value = state.Gamepad.wButtons
+                    buttons[index] = (bool(value & 0x10), bool(value & 0x20))
+                elif result != 1167:
+                    raise OSError(f'XInputGetState failed: {result}')
+            if not watcher.tick(buttons, time.monotonic()):
+                break
+            time.sleep(0.05)
+    except Exception as exc:
+        log_message(f'Controller menu watcher: {exc}')
+
+
 def windows_animations_enabled():
     try:
         enabled = ctypes.c_int(1)
@@ -1457,7 +1568,13 @@ class LauncherUI:
         choice = buttons[self.focus]
         if choice == 'Play':
             try:
+                if hasattr(self, 'close_controllers'):
+                    self.close_controllers()
                 process = subprocess.Popen([str(self.folder / 'HeyListen.exe')], cwd=str(self.folder))
+                try:
+                    threading.Thread(target=watch_controller_combo, args=(process, self.folder), daemon=True).start()
+                except Exception as exc:
+                    log_message(f'Controller menu watcher: {exc}')
                 self.state = State.PLAYING
                 self.status = 'Playing...'
                 def wait_game():
@@ -1465,6 +1582,8 @@ class LauncherUI:
                     self.events.publish('game_done', None)
                 threading.Thread(target=wait_game, daemon=True).start()
             except OSError as exc:
+                if hasattr(self, 'open_controllers'):
+                    self.open_controllers()
                 self.last_error = str(exc)
                 self.set_screen('error')
         elif choice == 'Download': self.start_operation()
@@ -1746,6 +1865,7 @@ class LauncherUI:
         if self.state in (State.READY, State.UPDATE_AVAILABLE):
             tip_y = 60 + tip_offset(time.monotonic(), getattr(self, 'snap', False) or self.reduce_motion)
             p.text('body', play_tip(self.folder), x, tip_y, INK_DIM, max_width=CANVAS[0] - 2 * MARGIN)
+            p.text('body', 'Hold Start + Back for 2 seconds to open the game menu (XInput controllers).', x, tip_y + 28, INK_DIM, max_width=CANVAS[0] - 2 * MARGIN)
         p.text('overline', 'THE LEGEND OF ZELDA', x + 2, 160, ACCENT)
         p.text('display', 'Ocarina of Time', x - 2, 176, INK, max_width=760)
         if self.state == State.PLAYING:
@@ -2067,7 +2187,14 @@ class LauncherUI:
         s.SDL_RenderClear(renderer)
         s.SDL_RenderPresent(renderer)
         painter = Painter(s, ttf, renderer)
+        def close_pads():
+            for pad in self.controllers.values():
+                s.SDL_GameControllerClose(pad)
+            self.controllers.clear()
+        self.close_controllers = close_pads
         def open_pads():
+            if self.state == State.PLAYING:
+                return
             for i in range(s.SDL_NumJoysticks()):
                 if s.SDL_IsGameController(i):
                     p = s.SDL_GameControllerOpen(i)
@@ -2076,6 +2203,7 @@ class LauncherUI:
                         ident = s.SDL_JoystickInstanceID(joystick)
                         if ident in self.controllers: s.SDL_GameControllerClose(p)
                         else: self.controllers[ident] = p
+        self.open_controllers = open_pads
         open_pads()
         event = s.SDL_Event()
         scenes = iter(self.screenshot_scenes()) if screenshot else None
@@ -2088,7 +2216,10 @@ class LauncherUI:
         last = time.monotonic()
         try:
             while self.running:
+                was_playing = self.state == State.PLAYING
                 self.drain()
+                if was_playing and self.state != State.PLAYING:
+                    open_pads()
                 now = time.monotonic()
                 for action in self.mapper.tick(now): self.action(action)
                 while s.SDL_PollEvent(ctypes.byref(event)):
@@ -2100,12 +2231,16 @@ class LauncherUI:
                         pad = self.controllers.pop(event.cdevice.which, None)
                         if pad: s.SDL_GameControllerClose(pad)
                     elif typ in (s.SDL_CONTROLLERBUTTONDOWN, s.SDL_CONTROLLERBUTTONUP):
+                        if not (s.SDL_GetWindowFlags(window) & s.SDL_WINDOW_INPUT_FOCUS):
+                            continue
                         button = {s.SDL_CONTROLLER_BUTTON_A:'a', s.SDL_CONTROLLER_BUTTON_B:'b', s.SDL_CONTROLLER_BUTTON_START:'start', s.SDL_CONTROLLER_BUTTON_X:'x'}.get(event.cbutton.button)
                         direction = {s.SDL_CONTROLLER_BUTTON_DPAD_UP:'up', s.SDL_CONTROLLER_BUTTON_DPAD_DOWN:'down', s.SDL_CONTROLLER_BUTTON_DPAD_LEFT:'left', s.SDL_CONTROLLER_BUTTON_DPAD_RIGHT:'right'}.get(event.cbutton.button)
                         if direction and typ == s.SDL_CONTROLLERBUTTONDOWN: self.action(direction)
                         if button:
                             for action in self.mapper.feed({'type':'button','button':button,'down':typ == s.SDL_CONTROLLERBUTTONDOWN}, now): self.action(action)
                     elif typ == s.SDL_CONTROLLERAXISMOTION and event.caxis.axis in (0, 1):
+                        if not (s.SDL_GetWindowFlags(window) & s.SDL_WINDOW_INPUT_FOCUS):
+                            continue
                         self.axis[event.caxis.axis] = max(-1, event.caxis.value / 32767)
                         for action in self.mapper.feed({'type':'axis','x':self.axis[0],'y':self.axis[1]}, now): self.action(action)
                     elif typ == s.SDL_KEYDOWN and not event.key.repeat:
