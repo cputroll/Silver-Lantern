@@ -182,10 +182,11 @@ class GameChannelTests(unittest.TestCase):
 
     def test_gui_channel_fetch_uses_shared_resolver(self):
         import launcher
+        import tempfile
         from pathlib import Path
         from unittest.mock import patch
-        with patch.object(game_channel, 'fetch_for_folder', return_value={'files': []}) as fetch:
-            self.assertEqual(launcher.fetch_channel_manifest(Path('game'), Mock()), {'files': []})
+        with tempfile.TemporaryDirectory() as tmp, patch.object(game_channel, 'fetch_for_folder', return_value={'files': []}) as fetch:
+            self.assertEqual(launcher.fetch_channel_manifest(Path(tmp), Mock()), {'files': []})
             fetch.assert_called_once()
 
     def test_rejects_hash_mismatch(self):
