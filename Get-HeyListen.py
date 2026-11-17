@@ -37,6 +37,7 @@ import traceback
 import zipfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from collections import deque
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -1496,6 +1497,153 @@ def game_path(root: Path, relative: str) -> Path:
     return target
 
 
+def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
+    """Download bundles in order while workers consume segments in file order."""
+    cond = threading.Condition()
+    bundles = deque()
+    states = []
+    by_asset = {name: [] for name in assets}
+    for item in pending:
+        target = game_path(root, item['path'])
+        target.parent.mkdir(parents=True, exist_ok=True)
+        direct = len(item['segments']) == 1
+        state = {'item': item, 'target': target,
+                 'temp': target if direct else target.with_name(target.name + '.heylisten-new'),
+                 'direct': direct, 'next': 0, 'hasher': hashlib.sha256(), 'lock': threading.Lock()}
+        states.append(state)
+        for index, segment in enumerate(item['segments']):
+            by_asset[segment['asset']].append((state, index, segment))
+    names = [name for name in assets if by_asset[name]]
+    shared = {'done': False, 'error': None, 'cap': 2, 'slots': 0, 'stalled': 0}
+
+    def fail(exc):
+        with cond:
+            if shared['error'] is None:
+                shared['error'] = exc
+            cond.notify_all()
+
+    def remove_bundle(bundle):
+        for fd in bundle['fds'].values():
+            os.close(fd)
+        bundle['fds'].clear()
+        if not keep_assets:
+            bundle['path'].unlink(missing_ok=True)
+            Path(str(bundle['path']) + '.part').unlink(missing_ok=True)
+            Path(str(bundle['path']) + '.part.json').unlink(missing_ok=True)
+        bundles.remove(bundle)
+        shared['slots'] -= 1
+        cond.notify_all()
+
+    def worker():
+        ident = threading.get_ident()
+        try:
+            while True:
+                with cond:
+                    if shared['error']:
+                        return
+                    chosen = None
+                    for _ in range(len(bundles)):
+                        bundle = bundles[0]
+                        bundles.rotate(-1)
+                        if not bundle['pending']:
+                            continue
+                        state, index, segment = bundle['pending'][0]
+                        if index == state['next'] and state['lock'].acquire(False):
+                            bundle['pending'].popleft()
+                            chosen = bundle, state, index, segment
+                            break
+                    if not chosen:
+                        if shared['done'] and not bundles:
+                            return
+                        # Only count a stall when all outstanding work is blocked,
+                        # not while another worker is actively writing.
+                        active = any(b['refs'] > len(b['pending']) for b in bundles)
+                        if not active and (shared['slots'] >= shared['cap'] or (shared['done'] and bundles)):
+                            shared['stalled'] += 1
+                            if shared['cap'] == 2 and not shared['done']:
+                                shared['cap'] = 3
+                                cond.notify_all()
+                            elif shared['stalled'] >= 100:
+                                raise UserError('Segment scheduler cannot make progress.', 'Use a correctly packed game manifest.', 'manifest')
+                        cond.wait(0.05)
+                        continue
+                    shared['stalled'] = 0
+                bundle, state, index, segment = chosen
+                try:
+                    fd = bundle['fds'].get(ident)
+                    if fd is None:
+                        fd = os.open(bundle['path'], os.O_RDONLY | getattr(os, 'O_BINARY', 0))
+                        bundle['fds'][ident] = fd
+                    os.lseek(fd, segment['offset'], os.SEEK_SET)
+                    remaining = segment['length']
+                    segment_hash = hashlib.sha256()
+                    with state['temp'].open('wb' if index == 0 else 'ab') as output:
+                        while remaining:
+                            data = os.read(fd, min(remaining, 1024 * 1024))
+                            if not data:
+                                raise ValueError(f"short segment: {segment['asset']}")
+                            output.write(data)
+                            segment_hash.update(data)
+                            state['hasher'].update(data)
+                            remaining -= len(data)
+                    if segment_hash.hexdigest() != segment['sha256']:
+                        raise ValueError(f"segment SHA-256 mismatch: {segment['asset']}")
+                    state['next'] += 1
+                    if state['next'] == len(state['item']['segments']):
+                        if state['temp'].stat().st_size != state['item']['size'] or state['hasher'].hexdigest() != state['item']['sha256']:
+                            raise ValueError(f"assembled SHA-256 mismatch: {state['item']['path']}")
+                        if not state['direct']:
+                            state['temp'].replace(state['target'])
+                    with cond:
+                        bundle['refs'] -= 1
+                        if not bundle['refs']:
+                            remove_bundle(bundle)
+                        cond.notify_all()
+                finally:
+                    state['lock'].release()
+        except BaseException as exc:
+            fail(exc)
+        finally:
+            with cond:
+                for bundle in bundles:
+                    fd = bundle['fds'].pop(ident, None)
+                    if fd is not None:
+                        os.close(fd)
+
+    workers = [threading.Thread(target=worker) for _ in range(assembly_workers())]
+    for thread in workers:
+        thread.start()
+    try:
+        for name in names:
+            with cond:
+                while shared['slots'] >= shared['cap'] and not shared['error']:
+                    cond.wait(0.05)
+                if shared['error']:
+                    break
+            fetch(assets[name])
+            with cond:
+                bundle = {'path': cache / name, 'pending': deque(by_asset[name]),
+                          'refs': len(by_asset[name]), 'fds': {}}
+                bundles.append(bundle)
+                shared['slots'] += 1
+                cond.notify_all()
+    except BaseException as exc:
+        fail(exc)
+    finally:
+        with cond:
+            shared['done'] = True
+            cond.notify_all()
+        for thread in workers:
+            thread.join()
+    if shared['error']:
+        for state in states:
+            state['temp'].unlink(missing_ok=True)
+        for name in names:
+            for suffix in ('', '.part', '.part.json'):
+                Path(str(cache / name) + suffix).unlink(missing_ok=True)
+        raise shared['error']
+
+
 def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = False,
                  manifest_path: Path | None = None, keep_assets: bool = False) -> None:
     validate_bundle_order(man)
@@ -1590,47 +1738,50 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 dest.unlink(missing_ok=True)
                 raise ValueError(f"SHA-256 mismatch: {part['asset']}")
             verified_assets.add(part['asset'])
-        remaining_uses = {name: 0 for name in needed}
-        for item in pending:
-            for name in {part['asset'] for part in item['segments' if v2 else 'parts']}:
-                remaining_uses[name] += 1
-        for item in pending:
-            # Fetch only assets this file needs, in manifest order. Shared assets stay
-            # until their final pending file is fully assembled and verified.
-            names = list(dict.fromkeys(part['asset'] for part in item['segments' if v2 else 'parts']))
-            for name in names:
-                fetch(assets[name])
-            target = game_path(root, item['path'])
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temp = target.with_name(target.name + '.heylisten-new')
-            try:
-                file_hash = hashlib.sha256()
-                with temp.open('wb') as output:
-                    for part in item['segments' if v2 else 'parts']:
-                        with (cache / part['asset']).open('rb') as source:
-                            source.seek(part['offset'] if v2 else 0)
-                            remaining = part['length'] if v2 else part['size']
-                            segment_hash = hashlib.sha256()
-                            while remaining:
-                                chunk = source.read(min(remaining, 1024 * 1024))
-                                if not chunk:
-                                    raise ValueError(f"short segment: {part['asset']}")
-                                output.write(chunk)
-                                segment_hash.update(chunk)
-                                file_hash.update(chunk)
-                                remaining -= len(chunk)
-                            if segment_hash.hexdigest() != part['sha256']:
-                                raise ValueError(f"segment SHA-256 mismatch: {part['asset']}")
-                if temp.stat().st_size != item['size'] or file_hash.hexdigest() != item['sha256']:
-                    raise ValueError(f"assembled SHA-256 mismatch: {item['path']}")
-                temp.replace(target)
-            finally:
-                temp.unlink(missing_ok=True)
-            for name in names:
-                remaining_uses[name] -= 1
-                if remaining_uses[name] == 0 and not keep_assets:
-                    (cache / name).unlink(missing_ok=True)
-                    Path(str(cache / name) + '.part').unlink(missing_ok=True)
+        if v2 and man.get('layout') != 'whole':
+            assemble_segmented(pending, assets, cache, root, fetch, keep_assets)
+        else:
+            remaining_uses = {name: 0 for name in needed}
+            for item in pending:
+                for name in {part['asset'] for part in item['segments' if v2 else 'parts']}:
+                    remaining_uses[name] += 1
+            for item in pending:
+                # Fetch only assets this file needs, in manifest order. Shared assets stay
+                # until their final pending file is fully assembled and verified.
+                names = list(dict.fromkeys(part['asset'] for part in item['segments' if v2 else 'parts']))
+                for name in names:
+                    fetch(assets[name])
+                target = game_path(root, item['path'])
+                target.parent.mkdir(parents=True, exist_ok=True)
+                temp = target.with_name(target.name + '.heylisten-new')
+                try:
+                    file_hash = hashlib.sha256()
+                    with temp.open('wb') as output:
+                        for part in item['segments' if v2 else 'parts']:
+                            with (cache / part['asset']).open('rb') as source:
+                                source.seek(part['offset'] if v2 else 0)
+                                remaining = part['length'] if v2 else part['size']
+                                segment_hash = hashlib.sha256()
+                                while remaining:
+                                    chunk = source.read(min(remaining, 1024 * 1024))
+                                    if not chunk:
+                                        raise ValueError(f"short segment: {part['asset']}")
+                                    output.write(chunk)
+                                    segment_hash.update(chunk)
+                                    file_hash.update(chunk)
+                                    remaining -= len(chunk)
+                                if segment_hash.hexdigest() != part['sha256']:
+                                    raise ValueError(f"segment SHA-256 mismatch: {part['asset']}")
+                    if temp.stat().st_size != item['size'] or file_hash.hexdigest() != item['sha256']:
+                        raise ValueError(f"assembled SHA-256 mismatch: {item['path']}")
+                    temp.replace(target)
+                finally:
+                    temp.unlink(missing_ok=True)
+                for name in names:
+                    remaining_uses[name] -= 1
+                    if remaining_uses[name] == 0 and not keep_assets:
+                        (cache / name).unlink(missing_ok=True)
+                        Path(str(cache / name) + '.part').unlink(missing_ok=True)
         progress.finish()
     if not keep_assets and cache.exists():
         shutil.rmtree(cache)
