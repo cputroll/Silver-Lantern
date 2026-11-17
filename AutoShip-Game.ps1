@@ -131,7 +131,7 @@ try {
             [IO.File]::WriteAllText((Join-Path $channelWork 'channel.json'), $pointerJson + "`n", [Text.UTF8Encoding]::new($false))
             Run 'git' @('-C', $channelWork, 'add', '--', 'channel.json')
             Run 'git' @('-C', $channelWork, 'commit', '-m', "Channel revision $revision")
-            Run 'git' @('-C', $channelWork, 'push', 'origin', 'HEAD:game-channel')
+            Run 'git' @('-C', $channelWork, 'push', 'origin', 'HEAD:refs/heads/game-channel')
         } finally {
             Run 'git' @('worktree', 'remove', '--force', $channelWork)
         }

@@ -17,7 +17,7 @@ class ManifestServingTests(unittest.TestCase):
         self.assertIn(manifest_upload, script)
         # The channel pointer advances by fast-forward push before the legacy fixed
         # manifest is replaced, so clients never see a partial or inverted switch.
-        channel_push = "Run 'git' @('-C', $channelWork, 'push', 'origin', 'HEAD:game-channel')"
+        channel_push = "Run 'git' @('-C', $channelWork, 'push', 'origin', 'HEAD:refs/heads/game-channel')"
         legacy_upload = "Run 'gh' @('release', 'upload', 'game-v1', $legacy, '--clobber', '--repo', 'cputroll/Silver-Lantern')"
         self.assertIn(channel_push, script)
         self.assertIn(legacy_upload, script)
