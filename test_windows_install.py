@@ -17,7 +17,7 @@ class WindowsInstallTests(unittest.TestCase):
         self.assertEqual(link.call_args.args[0], expected_link)
         values = {call.args[1]: call.args[4] for call in registry.SetValueEx.call_args_list}
         self.assertEqual(values['DisplayName'], launcher.GAME_NAME)
-        self.assertEqual(values['UninstallString'], '"C:\\App\\SilverLantern.exe" --uninstall')
+        self.assertEqual(values['UninstallString'], f'"{Path("missing") / "Ocarina of Time.exe"}" --uninstall')
 
     def test_ready_starts_registration_even_without_desktop_shortcut(self):
         with patch.object(launcher.LauncherUI, 'check_updates'), patch.object(launcher, 'installed', return_value=True), patch.object(launcher.threading, 'Thread') as thread:

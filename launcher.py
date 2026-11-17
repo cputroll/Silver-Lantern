@@ -103,9 +103,7 @@ def create_shortcut(folder, enabled=True):
     if not enabled:
         link.unlink(missing_ok=True)
         return
-    target = folder / 'HeyListen.exe'
-    if not target.exists():
-        target = Path(sys.executable) if getattr(sys, 'frozen', False) else BASE / 'SilverLantern.exe'
+    target = Path(folder) / 'Ocarina of Time.exe'
     create_link(link, target, folder)
 
 
@@ -191,7 +189,8 @@ OWNED_FILES += tuple('support/' + name for name in OWNED_FILES if name not in ('
 def register_install(folder):
     if winreg is None:
         return
-    exe = Path(sys.executable)
+    exe = Path(folder) / 'Ocarina of Time.exe'
+    create_shortcut(Path(folder))
     link = start_menu_path()
     link.parent.mkdir(parents=True, exist_ok=True)
     create_link(link, exe, exe.parent)
