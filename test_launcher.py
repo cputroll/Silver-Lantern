@@ -282,6 +282,15 @@ class StateTests(unittest.TestCase):
                 ui.drain()
             start.assert_called_once_with(True)
 
+    def test_completed_update_clears_operation(self):
+        with patch.object(LauncherUI, 'check_updates'), patch.object(launcher, 'installed', return_value=True):
+            ui = LauncherUI()
+            ui.operation = 'update'
+            ui.events.publish('complete', None)
+            with patch.object(ui, 'shortcut_worker'):
+                ui.drain()
+            self.assertIsNone(ui.operation)
+
     def test_detected_game_update_does_not_interrupt_active_operation(self):
         with patch.object(LauncherUI, 'check_updates'), patch.object(launcher, 'installed_manifest_digest', return_value='old'):
             ui = LauncherUI()

@@ -1336,6 +1336,7 @@ class LauncherUI:
                     if match and not self.progress_info.get('total'):
                         self.progress_info = dict(self.progress_info, pct=min(100, int(match.group(1))))
             elif kind == 'complete':
+                self.operation = None
                 self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
                 self.status = 'Ready to play.' if self.state == State.READY else 'Installation completed but game files were not found.'
                 if self.state == State.READY:
