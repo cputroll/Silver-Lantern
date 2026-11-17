@@ -311,7 +311,7 @@ class StateTests(unittest.TestCase):
             folder = profile / "game's folder"
             folder.mkdir()
             (folder / 'HeyListen.exe').touch()
-            with patch.dict(os.environ, {'USERPROFILE': str(profile)}):
+            with patch.object(launcher, 'shortcut_path', return_value=profile / 'Desktop' / (launcher.GAME_NAME + '.lnk')):
                 create_shortcut(folder)
                 self.assertTrue((profile / 'Desktop' / (launcher.GAME_NAME + '.lnk')).is_file())
                 create_shortcut(folder, False)

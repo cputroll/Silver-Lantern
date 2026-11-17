@@ -1,3 +1,6 @@
-# Silver Lantern 1.6.1
+# Silver Lantern 1.6.2
 
-- Fixed: first run could crash while creating shortcuts; errors now show the in-app error screen.
+- Resume installs using an estimate of remaining disk space instead of requiring space for the entire game again.
+- Preserve existing files when launcher installation paths are occupied.
+- Fix settings footer overlap and improve installer error details.
+- Pixelation remains under investigation.

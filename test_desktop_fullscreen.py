@@ -7,6 +7,11 @@ from test_game_sync import h
 
 
 class DesktopFullscreenTests(unittest.TestCase):
+    def setUp(self):
+        override = patch.object(launcher, '_TEST_DESKTOP_DIR', None)
+        override.start()
+        self.addCleanup(override.stop)
+
     def test_known_folder_api_result(self):
         import ctypes
         from unittest.mock import MagicMock
