@@ -161,7 +161,7 @@ class DefaultFlowTests(unittest.TestCase):
                  mock.patch.object(app, 'session'), \
                  mock.patch.object(app, 'default_game_folder', return_value=str(folder)), \
                  mock.patch.object(app, 'check_self_update', side_effect=lambda *a: calls.append(('update',))), \
-                 mock.patch.object(app, 'load_game_manifest', side_effect=lambda s, src: calls.append(('manifest', src)) or {}), \
+                 mock.patch('game_channel.fetch_for_folder', side_effect=lambda *a, **k: calls.append(('manifest', app.GAME_MANIFEST_URL)) or {}), \
                  mock.patch.object(app, 'install_game', side_effect=install), \
                  mock.patch.object(app, 'detect_gpu_name', return_value=None), \
                  mock.patch.object(app, 'run_builder_flow', return_value=0) as builder, \
