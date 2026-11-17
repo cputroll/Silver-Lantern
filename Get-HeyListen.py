@@ -827,6 +827,80 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             path.unlink()
 
 
+def default_game_folder() -> str:
+    return str(Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Games' / 'HeyListen')
+
+
+UPDATE_LOG = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'HeyListenBuilder' / 'game-update-cli.log'
+
+
+def parse_update_line(line: str) -> dict:
+    if not line.startswith('HLUPDATE '):
+        return {}
+    payload = line[len('HLUPDATE '):].strip()
+    if payload.startswith('times '):
+        return dict(re.findall(r'([A-Za-z_][\w-]*)=([^\s]+)', payload))
+    key, sep, value = payload.partition('=')
+    return {key: value.strip()} if sep and re.fullmatch(r'[A-Za-z_][\w-]*', key) else {}
+
+
+def render_update_status(fields: dict) -> str | None:
+    version = lambda value: 'v' + str(value or '?').lstrip('vV')
+    old = version(fields.get('installed', fields.get('current')))
+    new = version(fields.get('latest', fields.get('available')))
+    status = fields.get('status')
+    if status in ('current', 'up-to-date'):
+        return f'Already up to date ({old}).'
+    if status in ('available', 'update-available'):
+        return f'Update available: {old} -> {new} (dry run).'
+    if status == 'updated':
+        return f"Updated {old} -> {new} in {fields.get('total', fields.get('seconds', '?'))}s."
+    if status == 'error':
+        return f"Update failed: {fields.get('error', fields.get('reason', 'unknown error'))}"
+    return None
+
+
+def update_exit_code(code: int) -> int:
+    return 0 if code in (0, 10) else 1
+
+
+def run_game_update(folder: Path, dry_run: bool = False, force: bool = False, silent: bool = False) -> int:
+    script = next((p for p in (HERE / 'Update-Game.ps1', Path.cwd() / 'Update-Game.ps1') if p.is_file()), None)
+    if script is None:
+        log('Update failed: Update-Game.ps1 not found.')
+        return 1
+    args = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script), '-GameFolder', str(folder)]
+    if dry_run:
+        args.append('-DryRun')
+    if force:
+        args.append('-Force')
+    fields = {}
+    shown = False
+    try:
+        UPDATE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        with UPDATE_LOG.open('a', encoding='utf-8', errors='replace') as output:
+            proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1)
+            for line in proc.stdout:
+                output.write(line)
+                output.flush()
+                parsed = parse_update_line(line)
+                fields.update(parsed)
+                # The script emits its error reason after status=error.
+                if not silent and parsed.get('status') not in (None, 'error'):
+                    message = render_update_status(fields)
+                    if message:
+                        log(message.encode('ascii', 'replace').decode('ascii'))
+                        shown = True
+            code = update_exit_code(proc.wait())
+        if silent or (not shown and (fields.get('status') == 'error' or code)):
+            message = render_update_status(fields) or 'Update failed: update check failed.'
+            log(message.encode('ascii', 'replace').decode('ascii'))
+        return code
+    except (OSError, ValueError) as e:
+        log(('Update failed: ' + str(e)).encode('ascii', 'replace').decode('ascii'))
+        return 1
+
+
 def main() -> int:
     if len(sys.argv) >= 5 and sys.argv[1] == "--apply-update-internal":
         _apply_update(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5:])
@@ -855,8 +929,14 @@ def main() -> int:
     ap.add_argument('--game-manifest', default=GAME_MANIFEST_URL, metavar='PATH_OR_URL')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--prune', action='store_true')
+    ap.add_argument('--update-game', nargs='?', const=default_game_folder(), metavar='FOLDER')
+    ap.add_argument('--update-dry-run', action='store_true')
+    ap.add_argument('--force-update', action='store_true')
+    ap.add_argument('--update-on-launch', action='store_true')
     a = ap.parse_args()
 
+    if a.update_game is not None:
+        return run_game_update(Path(a.update_game).expanduser(), dry_run=a.update_dry_run, force=a.force_update)
     if a.install_game is not None:
         s = session()
         game_manifest = load_game_manifest(s, a.game_manifest)
@@ -901,6 +981,11 @@ def main() -> int:
     if builder and not a.no_launch:
         log("Opening HeyListenBuilder — pick the .nup, tick NVIDIA DLSS, press “Build the game”.")
         subprocess.Popen([str(builder)], cwd=str(builder.parent))
+    if a.update_on_launch:
+        try:
+            run_game_update(Path(a.game_dir).expanduser(), dry_run=True, silent=True)
+        except Exception as e:
+            log(('Update failed: ' + str(e)).encode('ascii', 'replace').decode('ascii'))
     return 0
 
 
