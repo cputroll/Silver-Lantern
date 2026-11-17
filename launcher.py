@@ -20,6 +20,7 @@ try:
     import winreg
 except ImportError:
     winreg = None
+import game_settings
 
 ROOT = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 BASE = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
@@ -707,6 +708,7 @@ class LauncherUI:
         self.last_error = ''
         self.tool_update_available = False
         self.tool_handoff_started = False
+        self.gfx_values, self.gfx_picker, self.gfx_return, self.gfx_dlss_ok = {}, None, 0, True
         if self.state == State.READY and getattr(sys, 'frozen', False) and '--screenshot' not in sys.argv:
             threading.Thread(target=self.shortcut_worker, daemon=True).start()
         self.check_updates()
@@ -785,7 +787,12 @@ class LauncherUI:
         if self.screen == 'folder':
             return (['Update now'] if self.tool_update_available else []) + (['Use existing folder'] if legacy_exists(self.legacy) else []) + ['Use default folder', 'Choose another folder', 'Continue']
         if self.screen == 'settings':
-            return ['Change game folder', 'Speed up installs (one Windows permission, instant)', 'Desktop shortcut: ' + ('On' if self.config.get('shortcut', True) else 'Off'), 'Check for updates automatically: ' + ('On' if self.config.get('auto_tool_update', True) else 'Off'), 'Check for updates now', 'View log', 'Back']
+            return ['Change game folder', 'Speed up installs (one Windows permission, instant)', 'Graphics', 'Desktop shortcut: ' + ('On' if self.config.get('shortcut', True) else 'Off'), 'Check for updates automatically: ' + ('On' if self.config.get('auto_tool_update', True) else 'Off'), 'Check for updates now', 'View log', 'Back']
+        if self.screen == 'graphics':
+            if self.gfx_picker is not None:
+                opt = game_settings.BY_KEY[self.gfx_picker]
+                return [opt.text(v) for v in game_settings.allowed(opt.key, self.gfx_dlss_ok)]
+            return list(self.GFX_ACTIONS) + [o.label for o in game_settings.OPTIONS]
         if self.screen == 'progress':
             return [] if self.operation == 'tool' else ['Cancel']
         if self.screen == 'error':
@@ -800,6 +807,104 @@ class LauncherUI:
 
     def set_screen(self, screen):
         self.screen, self.focus = screen, 0
+
+    # ---------------------------------------------------------------- graphics
+    GFX_ACTIONS = ('Recommended for this PC', 'Reset to game defaults', 'Back')
+    GFX_PICKER_MIN = 7  # options with more values than this open a value list on A
+
+    def enter_graphics(self):
+        try:
+            self.gfx_values = game_settings.read_values(self.folder)
+        except OSError as exc:
+            self.last_error = f'Could not read the game settings: {exc}'
+            self.set_screen('error')
+            return
+        self.gfx_dlss_ok = game_settings.dlss_available(self.folder)
+        self.gfx_picker = None
+        self.set_screen('graphics')
+        self.focus = len(self.GFX_ACTIONS)
+        self.status = 'Changes are saved to the game at once. In game: F1 or Insert opens its own menu.'
+
+    def leave_graphics(self):
+        self.gfx_picker = None
+        self.set_screen('settings')
+        self.focus = 2
+
+    def gfx_option(self, index=None):
+        index = self.focus if index is None else index
+        index -= len(self.GFX_ACTIONS)
+        return game_settings.OPTIONS[index] if 0 <= index < len(game_settings.OPTIONS) else None
+
+    def gfx_write(self, key, value):
+        try:
+            self.gfx_values = game_settings.set_value(self.folder, key, value, self.gfx_values)
+            opt = game_settings.BY_KEY[key]
+            self.status = f'{opt.label}: {opt.text(self.gfx_values[key])}' + (' · applies after a restart' if opt.restart else ' · saved')
+        except OSError as exc:
+            self.status = f"Couldn't save: {exc}"
+
+    def gfx_step(self, direction):
+        opt = self.gfx_option()
+        if opt:
+            self.gfx_write(opt.key, game_settings.cycle(opt.key, self.gfx_values.get(opt.key, opt.default), direction, self.gfx_dlss_ok))
+
+    def gfx_apply_recommended(self):
+        def work():
+            try:
+                preset, why = game_settings.choose_preset(self.folder)
+                game_settings.write_values(self.folder, preset)
+                self.events.publish('graphics', ('Recommended applied: ' + why.split('-> ')[-1], game_settings.read_values(self.folder)))
+            except Exception as exc:
+                self.events.publish('graphics', (f"Couldn't apply the recommended settings: {exc}", None))
+        self.status = 'Detecting your graphics card…'
+        threading.Thread(target=work, daemon=True).start()
+
+    def gfx_activate(self):
+        buttons = self.buttons()
+        if not buttons:
+            return
+        if self.gfx_picker is not None:
+            values = game_settings.allowed(self.gfx_picker, self.gfx_dlss_ok)
+            self.gfx_write(self.gfx_picker, values[min(self.focus, len(values) - 1)])
+            self.gfx_picker, self.focus = None, self.gfx_return
+            return
+        choice = buttons[self.focus]
+        if choice == 'Back':
+            self.leave_graphics()
+        elif choice == 'Reset to game defaults':
+            try:
+                self.gfx_values = game_settings.reset_defaults(self.folder)
+                self.status = "Game defaults restored (your controls and bindings are kept)."
+            except OSError as exc:
+                self.status = f"Couldn't save: {exc}"
+        elif choice == 'Recommended for this PC':
+            self.gfx_apply_recommended()
+        else:
+            opt = self.gfx_option()
+            values = game_settings.allowed(opt.key, self.gfx_dlss_ok)
+            if len(values) > self.GFX_PICKER_MIN:
+                current = self.gfx_values.get(opt.key, opt.default)
+                self.gfx_picker, self.gfx_return = opt.key, self.focus
+                self.focus = values.index(current) if current in values else 0
+            else:
+                self.gfx_step(1)
+
+    def gfx_action(self, action):
+        """Graphics-only input; returns True when handled."""
+        if action in ('left', 'right'):
+            if self.gfx_picker is None:
+                if self.gfx_option():
+                    self.gfx_step(1 if action == 'right' else -1)
+                else:
+                    self.focus = max(0, min(len(self.GFX_ACTIONS) - 1, self.focus + (1 if action == 'right' else -1)))
+            return True
+        if action in ('back', 'cancel', 'menu'):
+            if self.gfx_picker is not None:
+                self.gfx_picker, self.focus = None, self.gfx_return
+            else:
+                self.leave_graphics()
+            return True
+        return False
 
     def start_tool_update(self):
         if self.operation == 'tool' and self.screen == 'progress':
@@ -832,6 +937,8 @@ class LauncherUI:
         threading.Thread(target=worker_command, args=(self.events, args), daemon=True).start()
 
     def activate(self):
+        if self.screen == 'graphics':
+            return self.gfx_activate()
         buttons = self.buttons()
         if not buttons:
             return
@@ -874,6 +981,7 @@ class LauncherUI:
             except Exception:
                 self.status = 'Unavailable'
         elif choice == 'Change game folder': self.set_screen('folder')
+        elif choice == 'Graphics': self.enter_graphics()
         elif choice.startswith('Desktop shortcut'):
             enabled = not self.config.get('shortcut', True)
             try:
@@ -915,6 +1023,8 @@ class LauncherUI:
 
     def action(self, action):
         if self.screen == 'progress' and self.operation == 'tool':
+            return
+        if self.screen == 'graphics' and self.gfx_action(action):
             return
         if action == 'up': self.focus = max(0, self.focus - 1)
         elif action == 'down': self.focus = min(len(self.buttons()) - 1, self.focus + 1)
@@ -993,6 +1103,11 @@ class LauncherUI:
                 self.operation = None
                 self.status = 'Silver Lantern is up to date.'
                 self.set_screen('main')
+            elif kind == 'graphics':
+                message, values = value
+                self.status = message
+                if values:
+                    self.gfx_values = values
             elif kind == 'upstream_check' and value == 10:
                 self.status = 'An upstream builder update is available.'
 
@@ -1203,6 +1318,133 @@ class LauncherUI:
             p.text('caption', self.status, x + 18, 630, INK_DIM, max_width=w - 18)
         self.draw_hints(p, [('A / ENTER', 'Select'), ('B / ESC', 'Back')])
 
+    GFX_ACTION_HELP = {'Recommended for this PC': "DLSS (NVIDIA RTX) or FSR 3.1 Performance with frame generation and pacing, picked for this PC's graphics card.",
+                       'Reset to game defaults': "Every option back to the game's own default. Your controls and bindings stay.",
+                       'Back': 'Back to the launcher settings.'}
+
+    def gfx_layout(self):
+        """(kind, payload, top, height) for the scrolling list: group headings and option rows."""
+        rows, y, group = [], 0, None
+        for i, o in enumerate(game_settings.OPTIONS):
+            if o.group != group:
+                group = o.group
+                y += 12 if rows else 0
+                rows.append(('heading', group, y, 30))
+                y += 30
+            rows.append(('option', len(self.GFX_ACTIONS) + i, y, 44))
+            y += 50
+        return rows, y
+
+    def draw_graphics(self, p, dt):
+        p.scene(scrim=215)
+        x, w = MARGIN, CANVAS[0] - 2 * MARGIN
+        values, picker = self.gfx_values, self.gfx_picker
+        p.text('overline', 'SETTINGS · GAME', x + 2, 56, ACCENT)
+        p.text('title', 'Graphics', x, 74, INK, max_width=400)
+        p.text('caption', str(game_settings.ini_path(self.folder)), x + w, 96, INK_FAINT, max_width=560, align='right', middle=True)
+        # Action buttons along the top.
+        ax, ay, ah = x, 138, 44
+        for i, label in enumerate(self.GFX_ACTIONS):
+            aw = p.measure('button', label)[0] + 40
+            focused = picker is None and self.focus == i
+            p.fill(ax, ay, aw, ah, SURFACE_FOCUS if focused else SURFACE_HI, 255 if focused else 200, 10)
+            if focused:
+                p.ring(ax, ay, aw, ah, ACCENT, 255, 10, 2)
+            p.text('button', label, ax + 20, ay + (ah - p.height('button')) // 2, ACCENT if i == 0 else INK)
+            if picker is None:
+                self.hits.append((ax, ay, aw, ah, i))
+            ax += aw + 12
+        # The scrolling, grouped option list.
+        rows, total = self.gfx_layout()
+        view_top, view_h = 200, 384
+        target = getattr(self, 'gfx_scroll_target', 0)
+        if self.focus < len(self.GFX_ACTIONS):
+            target = 0
+        for kind, idx, top, h in rows:
+            if kind == 'option' and idx == self.focus:
+                target = min(target, top - 42)
+                target = max(target, top + h + 12 - view_h)
+        target = max(0, min(target, max(0, total - view_h)))
+        self.gfx_scroll_target = target
+        scroll = self.ease('gfx_scroll', target, dt, rate=.06)
+        s = p.s
+        s.SDL_RenderSetClipRect(p.r, s.SDL_Rect(x - 4, view_top, w + 8, view_h))
+        focus_y = None
+        for kind, idx, top, h in rows:
+            y = view_top + top - scroll
+            if y + h < view_top or y > view_top + view_h:
+                continue
+            if kind == 'heading':
+                p.text('overline', idx.upper(), x + 2, y + 10, ACCENT)
+                continue
+            p.fill(x, y, w, h, SURFACE_HI, 150, 10)
+            if idx == self.focus and picker is None:
+                focus_y = y
+        if focus_y is not None:
+            fy = self.ease('focus', focus_y, dt)
+            p.fill(x, fy, w, 44, SURFACE_FOCUS, 255, 10)
+            p.ring(x, fy, w, 44, ACCENT, 255, 10, 2)
+        for kind, idx, top, h in rows:
+            y = view_top + top - scroll
+            if kind != 'option' or y + h < view_top or y > view_top + view_h:
+                continue
+            opt = self.gfx_option(idx)
+            value = values.get(opt.key, opt.default)
+            lock = game_settings.lock_reason(opt.key, values)
+            focused = idx == self.focus and picker is None
+            mid = y + (h - p.height('body')) // 2
+            right = x + w - 20
+            if focused:
+                right -= p.text('body', '›', right, mid, ACCENT, align='right') + 10
+            vw = p.text('body', opt.text(value), right, mid, INK_FAINT if lock else (ACCENT if focused else INK), max_width=300, align='right')
+            right -= vw + 10
+            if focused:
+                right -= p.text('body', '‹', right, mid, ACCENT, align='right') + 14
+            if lock:
+                right -= p.text('caption', lock, right, y + (h - p.height('caption')) // 2, INK_FAINT, max_width=280, align='right') + 16
+            elif opt.restart:
+                right -= p.text('caption', 'after restart', right, y + (h - p.height('caption')) // 2, INK_FAINT, align='right') + 16
+            p.text('button', opt.label, x + 20, y + (h - p.height('button')) // 2, INK if focused else (210, 215, 221), max_width=right - x - 30)
+            if picker is None and y >= view_top and y + h <= view_top + view_h:
+                self.hits.append((x, y, w, h, idx))
+        s.SDL_RenderSetClipRect(p.r, None)
+        if total > view_h:
+            thumb = max(40, view_h * view_h // total)
+            ty = view_top + (view_h - thumb) * scroll / max(1, total - view_h)
+            p.fill(x + w + 14, view_top, 4, view_h, (255, 255, 255), 25, 2)
+            p.fill(x + w + 14, ty, 4, thumb, ACCENT, 200, 2)
+        # Help for the focused row, then the status line.
+        opt = game_settings.BY_KEY[picker] if picker is not None else self.gfx_option()
+        help_text = opt.desc if opt else self.GFX_ACTION_HELP.get(self.GFX_ACTIONS[min(self.focus, len(self.GFX_ACTIONS) - 1)], '')
+        p.text('caption', help_text, x, 598, INK_DIM, max_width=w)
+        if self.status:
+            p.circle(x + 5, 628 + p.height('caption') // 2, 4, self.status_tone())
+            p.text('caption', self.status, x + 18, 628, INK_DIM, max_width=w - 18)
+        if picker is not None:
+            self.draw_gfx_picker(p, dt)
+            self.draw_hints(p, [('A / ENTER', 'Choose'), ('B / ESC', 'Cancel')])
+        else:
+            self.draw_hints(p, [('A / ENTER', 'Change'), ('← / →', 'Adjust'), ('B / ESC', 'Back')])
+
+    def draw_gfx_picker(self, p, dt):
+        opt = game_settings.BY_KEY[self.gfx_picker]
+        labels = self.buttons()
+        p.fill(0, 0, *CANVAS, SURFACE, 170)
+        pw, rh, gap = 460, 40, 6
+        ph = 84 + len(labels) * (rh + gap)
+        px, py = (CANVAS[0] - pw) // 2, max(40, (CANVAS[1] - ph) // 2 - 10)
+        p.fill(px, py, pw, ph, SURFACE, 250, 16)
+        p.ring(px, py, pw, ph, SURFACE_FOCUS, 255, 16, 2)
+        p.text('overline', 'CHOOSE A VALUE', px + 24, py + 18, ACCENT)
+        p.text('heading', opt.label, px + 24, py + 36, INK, max_width=pw - 48)
+        top = py + 72
+        self.draw_rows(p, labels, px + 20, top, pw - 40, rh, gap, dt)
+        allowed = game_settings.allowed(opt.key, self.gfx_dlss_ok)
+        current = self.gfx_values.get(opt.key, opt.default)
+        if current in allowed:
+            i = allowed.index(current)
+            p.text('caption', 'Current', px + pw - 40, top + i * (rh + gap) + (rh - p.height('caption')) // 2, ACCENT, align='right')
+
     def render(self, p, dt):
         self.hits = []
         count = len(self.buttons())
@@ -1210,6 +1452,7 @@ class LauncherUI:
             self.focus = count - 1
         if self.screen == 'main': self.draw_hero(p, dt)
         elif self.screen == 'progress': self.draw_progress(p, dt)
+        elif self.screen == 'graphics': self.draw_graphics(p, dt)
         else: self.draw_panel(p, dt)
 
     def screenshot_scenes(self):
@@ -1223,6 +1466,9 @@ class LauncherUI:
                 for key, value in values.items(): setattr(self, key, value)
                 self.focus = focus
             return name, setup
+        defaults = {o.key: o.default for o in game_settings.OPTIONS}
+        dlss_values = dict(defaults, **{k: int(v) for k, v in game_settings.PRESET_DLSS.items() if k in game_settings.BY_KEY})
+        fsr_values = dict(defaults, **{k: int(v) for k, v in game_settings.PRESET_FSR.items() if k in game_settings.BY_KEY}, hdr=1, output_res=2)
         info = {'phase': 'Downloading', 'done': int(20.83 * 1024 ** 3), 'total': int(33.05 * 1024 ** 3), 'speed': int(58.4 * 1024 ** 2), 'pct': 63}
         return [
             scene('main', 'main', State.READY, 'Silver Lantern is up to date.'),
@@ -1234,6 +1480,14 @@ class LauncherUI:
             scene('folder', 'folder', State.NOT_INSTALLED, '', focus=1, folder=long),
             scene('update', 'update', State.UPDATE_AVAILABLE),
             scene('error', 'error', State.ERROR, operation='download', last_error='Could not reach the update server. The connection stalled three times while downloading whole-07.bin from objects.githubusercontent.com; check your network and try again.'),
+            scene('graphics', 'graphics', State.READY, 'Frame generation: Auto · saved', focus=len(self.GFX_ACTIONS) + 1,
+                  gfx_values=dlss_values, gfx_picker=None, gfx_dlss_ok=True),
+            scene('graphics-fsr', 'graphics', State.READY, 'Recommended applied: FSR 3.1 Performance', focus=len(self.GFX_ACTIONS) + 16,
+                  gfx_values=fsr_values, gfx_picker=None, gfx_dlss_ok=False, folder=long),
+            scene('graphics-actions', 'graphics', State.READY, 'Changes are saved to the game at once. In game: F1 or Insert opens its own menu.', focus=0,
+                  gfx_values=dlss_values, gfx_picker=None, gfx_dlss_ok=True),
+            scene('graphics-picker', 'graphics', State.READY, '', focus=1, gfx_values=dlss_values, gfx_picker='frame_generation',
+                  gfx_return=len(self.GFX_ACTIONS) + 5, gfx_dlss_ok=True),
         ]
 
     def run(self, screenshot=None):
@@ -1289,7 +1543,7 @@ class LauncherUI:
                         if pad: s.SDL_GameControllerClose(pad)
                     elif typ in (s.SDL_CONTROLLERBUTTONDOWN, s.SDL_CONTROLLERBUTTONUP):
                         button = {s.SDL_CONTROLLER_BUTTON_A:'a', s.SDL_CONTROLLER_BUTTON_B:'b', s.SDL_CONTROLLER_BUTTON_START:'start', s.SDL_CONTROLLER_BUTTON_X:'x'}.get(event.cbutton.button)
-                        direction = {s.SDL_CONTROLLER_BUTTON_DPAD_UP:'up', s.SDL_CONTROLLER_BUTTON_DPAD_DOWN:'down'}.get(event.cbutton.button)
+                        direction = {s.SDL_CONTROLLER_BUTTON_DPAD_UP:'up', s.SDL_CONTROLLER_BUTTON_DPAD_DOWN:'down', s.SDL_CONTROLLER_BUTTON_DPAD_LEFT:'left', s.SDL_CONTROLLER_BUTTON_DPAD_RIGHT:'right'}.get(event.cbutton.button)
                         if direction and typ == s.SDL_CONTROLLERBUTTONDOWN: self.action(direction)
                         if button:
                             for action in self.mapper.feed({'type':'button','button':button,'down':typ == s.SDL_CONTROLLERBUTTONDOWN}, now): self.action(action)
@@ -1297,8 +1551,10 @@ class LauncherUI:
                         self.axis[event.caxis.axis] = max(-1, event.caxis.value / 32767)
                         for action in self.mapper.feed({'type':'axis','x':self.axis[0],'y':self.axis[1]}, now): self.action(action)
                     elif typ == s.SDL_KEYDOWN and not event.key.repeat:
-                        action = {s.SDLK_UP:'up',s.SDLK_w:'up',s.SDLK_DOWN:'down',s.SDLK_s:'down',s.SDLK_RETURN:'accept',s.SDLK_SPACE:'accept',s.SDLK_ESCAPE:'back',s.SDLK_BACKSPACE:'back',s.SDLK_F1:'menu',s.SDLK_TAB:'menu'}.get(event.key.keysym.sym)
+                        action = {s.SDLK_UP:'up',s.SDLK_w:'up',s.SDLK_DOWN:'down',s.SDLK_s:'down',s.SDLK_LEFT:'left',s.SDLK_a:'left',s.SDLK_RIGHT:'right',s.SDLK_d:'right',s.SDLK_RETURN:'accept',s.SDLK_SPACE:'accept',s.SDLK_ESCAPE:'back',s.SDLK_BACKSPACE:'back',s.SDLK_F1:'menu',s.SDLK_TAB:'menu'}.get(event.key.keysym.sym)
                         if action: self.action(action)
+                    elif typ == s.SDL_MOUSEWHEEL and self.screen == 'graphics':
+                        for _ in range(min(5, abs(event.wheel.y))): self.action('up' if event.wheel.y > 0 else 'down')
                     elif typ in (s.SDL_MOUSEMOTION, s.SDL_MOUSEBUTTONUP):
                         mx = event.motion.x if typ == s.SDL_MOUSEMOTION else event.button.x
                         my = event.motion.y if typ == s.SDL_MOUSEMOTION else event.button.y

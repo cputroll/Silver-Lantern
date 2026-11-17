@@ -16,7 +16,8 @@ class StateTests(unittest.TestCase):
             output = Path(d) / 'screen.bmp'
             result = subprocess.run([sys.executable, str(Path(launcher.__file__)), '--screenshot', str(output)], capture_output=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr.decode(errors='replace'))
-            for name in ('main', 'hero-download', 'progress', 'tool-update', 'settings', 'folder', 'update', 'error'):
+            for name in ('main', 'hero-download', 'progress', 'tool-update', 'settings', 'folder', 'update', 'error',
+                         'graphics', 'graphics-fsr', 'graphics-actions', 'graphics-picker'):
                 frame = output.with_name('screen-' + name + '.bmp')
                 # A full 1280x720x32 BMP; an empty or missing frame fails here.
                 self.assertGreater(frame.stat().st_size, 1280 * 720 * 3, name)
