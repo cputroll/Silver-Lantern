@@ -9,6 +9,16 @@ packer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(packer)
 
 class HybridPackTests(unittest.TestCase):
+    def test_unique_prefix_applies_to_assets_and_segments(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); source = root / 'src'; source.mkdir()
+            (source / 'a').write_bytes(b'abc')
+            result = packer.pack(source, root / 'out', limit=10240, prefix='v041-unique-')
+            name = result['assets'][0]['asset']
+            self.assertTrue(name.startswith('v041-unique-'))
+            self.assertEqual(result['files'][0]['segments'][0]['asset'], name)
+            self.assertTrue((root / 'out' / name).exists())
+
     def test_bounded_assets_and_split_file(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); source = root / 'src'; source.mkdir()

@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import tarfile
 import tempfile
@@ -44,7 +45,9 @@ class PackTest(unittest.TestCase):
                 self.assertEqual((root / 'out' / asset['asset']).read_bytes(), (root / 'again' / asset['asset']).read_bytes())
 
 
-def pack(source, out, limit=LIMIT):
+def pack(source, out, limit=LIMIT, prefix=''):
+    if not isinstance(prefix, str) or (prefix and not re.fullmatch(r'[A-Za-z0-9_-]+', prefix)):
+        raise ValueError('invalid asset prefix')
     if not 0 < limit < 2 * 1024**3:
         raise ValueError('bundle limit must be positive and below 2 GiB')
     source = source.resolve(); out = out.resolve()
@@ -80,7 +83,7 @@ def pack(source, out, limit=LIMIT):
             with path.open('rb') as src:
                 remaining = size
                 while remaining:
-                    chunk_index += 1; name = f'whole-chunk-{chunk_index:03d}.bin'; dest = out / name
+                    chunk_index += 1; name = f'{prefix}whole-chunk-{chunk_index:03d}.bin'; dest = out / name
                     h = hashlib.sha256(); length = min(limit, remaining); left = length
                     with dest.open('wb') as dst:
                         while left:
@@ -94,7 +97,7 @@ def pack(source, out, limit=LIMIT):
             if bundle and ((bundle.tell() + needed) // 10240 + 1) * 10240 > limit:
                 finish_bundle()
             if not bundle:
-                bundle_index += 1; bundle_path = out / f'whole-bundle-{bundle_index:03d}.tar'; bundle = bundle_path.open('wb')
+                bundle_index += 1; bundle_path = out / f'{prefix}whole-bundle-{bundle_index:03d}.tar'; bundle = bundle_path.open('wb')
             bundle.write(header); offset = bundle.tell(); h = hashlib.sha256()
             with path.open('rb') as src:
                 left = size
@@ -115,11 +118,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--source', type=Path); parser.add_argument('--out', type=Path)
     parser.add_argument('--manifest-out', type=Path); parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--prefix', default='')
     args = parser.parse_args()
     if args.self_test:
         return 0 if unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(PackTest)).wasSuccessful() else 1
     if not args.source or not args.out: parser.error('--source and --out are required')
-    result = pack(args.source, args.out)
+    result = pack(args.source, args.out, prefix=args.prefix)
     target = args.manifest_out or args.out / 'game-manifest.json'
     target.write_text(json.dumps(result, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     return 0
