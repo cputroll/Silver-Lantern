@@ -2164,8 +2164,10 @@ def ensure_cli_console():
 
 
 def main() -> int:
-    if relocate_transient():
-        return 0
+    if getattr(sys, 'frozen', False) and not any(arg in sys.argv[1:] for arg in ('--cli', '--apply-update-internal', '--uninstall', '--self-test', '--screenshot')):
+        import launcher
+        if launcher.relocate_launcher(launcher.resolve_game_folder()):
+            return 0
     cli_requested = '--cli' in sys.argv[1:]
     if cli_requested:
         sys.argv.remove('--cli')

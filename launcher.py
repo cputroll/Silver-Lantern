@@ -295,6 +295,34 @@ def resolve_game_folder():
         return fallback
 
 
+def relocate_launcher(folder):
+    if not getattr(sys, 'frozen', False):
+        return False
+    source = Path(sys.executable).resolve()
+    fallback = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Programs' / 'Ocarina of Time'
+    try:
+        probe_writable(folder)
+        destination = Path(folder)
+    except OSError:
+        destination = fallback
+        probe_writable(destination)
+    target = destination / 'Ocarina of Time.exe'
+    if source == target.resolve():
+        return False
+    staging = target.with_name(target.name + '.tmp')
+    try:
+        shutil.copy2(source, staging)
+        os.replace(staging, target)
+    finally:
+        staging.unlink(missing_ok=True)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with LOG.open('a', encoding='utf-8') as log:
+        log.write(f'Launcher relocation: {target}\n')
+    register_install(destination)
+    subprocess.Popen([str(target), *sys.argv[1:]], close_fds=False)
+    return True
+
+
 def schedule_owned_cleanup():
     if not getattr(sys, 'frozen', False):
         return
@@ -767,7 +795,7 @@ class LauncherUI:
             self.config = json.loads(CONFIG.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             self.config = {}
-        self.folder = Path(self.config.get('game_dir', self.legacy if legacy_exists(self.legacy) else self.primary))
+        self.folder = resolve_game_folder()
         self.screen = 'main' if self.config else 'folder'
         self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
         self.focus = 0
