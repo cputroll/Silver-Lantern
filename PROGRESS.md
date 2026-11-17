@@ -7,7 +7,8 @@
 - [x] v1.4.1 speed fix DONE (b8d66a8, lane ses_e182acbf3ffeMeMvIv7qOSRW0c): parallel ranged-chunk downloads, 6 streams default, preallocated .part + sidecar, 119 tests, live 800 MB bundle at 70.0 MB/s vs ~14 MB/s baseline.
 - [x] v1.4.1 program presence (same lane): Start Menu shortcut (Programs, not a pin) + HKCU uninstall entry + --uninstall mode that removes game folder, shortcuts, registry, and the program folder (delayed self-delete). Owner: 'should show up in Start, uninstall like a normal program.'
 - [x] v1.4.1 no-extract zip-run (implemented; live proof pending): transient-run detection (exe under %TEMP% from Explorer zip-run) -> self-install to %LOCALAPPDATA%\Programs\Silver Lantern with arg passthrough + relaunch; embedded sources.json URL fallback; locked-target relaunch; README leads with 'no extraction needed'.
-- [ ] SHIP v1.4.1: versions and notes updated; full serial suite 128 passed including packaging. Pending tag, CI, release verification, live zip-run and timed friend simulation.
-- [ ] After v1.4.1: final report and delete the goal scheduled task.
+- [x] SHIPPED v1.4.1 (tag 1f8c10e, workflow 44022594832 green): published ZIP SHA256 verified, both EXEs identical, version/self-test pass, live zip-run self-install proof passed (stable EXE installed + relaunched 1.4.1, profile removed). Timed clean install: **21 MB/s / ~16-18 min** — only 1.5x, because downloads still stall while each bundle is hashed/assembled.
+- [ ] v1.4.2 pipeline overlap (lane ses_e182acbf3ffeMeMvIv7qOSRW0c, dispatched): assemble bundle N on a worker while N+1 downloads, max 2 bundles on disk, preflight 40->44, single-pass file hashing (drop second read). Live target ~60+ MB/s sustained.
+- [ ] Then: v1.4.2 ship + final timed friend-sim, final report, delete goal task.
 Known/accepted: update zip+checksum share a trust source (unsigned); prebuilt game files and Nintendo art published in the program (owner's direction); public names stay neutral ('Silver Lantern').
 Backlog (v1.5.0): manifest hash-cache baseline; H4 retries/backoff; H2 signing; SmartScreen copy; UI polish leftovers (zip/.cmd cleanup, --preset-only).
