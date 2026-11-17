@@ -34,8 +34,8 @@ try {
         exit 0
     }
     if ($DryRun) {
-        Log 'Plan: rebuild with Update-Game.ps1; pack with pack-game.py; upload with --clobber; commit and push manifest.'
-        Write-Output 'GAMESHIP plan=rebuild,pack,upload-clobber,commit-manifest'
+        Log 'Plan: rebuild, pack, upload new bundles without overwriting, commit manifest, then replace its serving asset.'
+        Write-Output 'GAMESHIP plan=rebuild,pack,upload-additive,commit-manifest,upload-manifest'
         Write-Output "GAMESHIP status=available installed=$installed latest=$latest"
         exit 10
     }
@@ -52,8 +52,14 @@ try {
         if (@($manifest.assets).Count -lt 2) { throw 'fewer than two assets' }
         $tokenFile = Join-Path $env:USERPROFILE '.heylisten-get\github-token.txt'
         if (-not $env:GH_TOKEN -and (Test-Path -LiteralPath $tokenFile)) { $env:GH_TOKEN = (Get-Content -LiteralPath $tokenFile -Raw).Trim() }
+        $releaseAssets = gh release view game-v1 --repo cputroll/Silver-Lantern --json assets | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) { throw 'Could not list existing release assets' }
+        $existing = @($releaseAssets.assets | ForEach-Object { $_.name })
         foreach ($asset in $manifest.assets) {
-            Run 'gh' @('release', 'upload', 'game-v1', (Join-Path $work $asset.asset), '--clobber', '--repo', 'cputroll/Silver-Lantern')
+            if ($existing -contains $asset.asset) { throw "Bundle asset already exists: $($asset.asset); choose unique names before publishing" }
+        }
+        foreach ($asset in $manifest.assets) {
+            Run 'gh' @('release', 'upload', 'game-v1', (Join-Path $work $asset.asset), '--repo', 'cputroll/Silver-Lantern')
         }
         $verify = Join-Path $work 'verify'; New-Item -ItemType Directory -Path $verify | Out-Null
         foreach ($asset in @($manifest.assets | Select-Object -First 2)) {
@@ -71,6 +77,10 @@ try {
         Run 'git' @('commit', '-m', "Publish game revision $revision", '--', 'game-manifest.json')
         Run 'git' @('pull', '--rebase', 'origin', 'main')
         Run 'git' @('push', 'origin', 'HEAD:main')
+        Run 'gh' @('release', 'upload', 'game-v1', $repoManifest, '--clobber', '--repo', 'cputroll/Silver-Lantern')
+        $manifestVerify = Join-Path $work 'manifest-verify'; New-Item -ItemType Directory -Path $manifestVerify | Out-Null
+        Run 'gh' @('release', 'download', 'game-v1', '--repo', 'cputroll/Silver-Lantern', '--pattern', 'game-manifest.json', '--dir', $manifestVerify)
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $manifestVerify 'game-manifest.json')).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $repoManifest).Hash) { throw 'manifest asset verification failed' }
         Log "Shipped revision=$revision assets=$(@($manifest.assets).Count)"
         Write-Output "GAMESHIP status=shipped revision=$revision assets=$(@($manifest.assets).Count)"
         exit 10

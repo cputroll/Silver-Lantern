@@ -26,7 +26,19 @@ STATE_DIR = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'SilverLant
 CONFIG = STATE_DIR / 'launcher.json'
 LOG = STATE_DIR / 'launcher.log'
 GAME_NAME = 'Legend of Zelda Ocarina of Time'
-MANIFEST_URL = 'https://raw.githubusercontent.com/cputroll/Silver-Lantern/main/game-manifest.json'
+MANIFEST_URL = 'https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/game-manifest.json'
+
+
+def game_manifest_url():
+    try:
+        value = json.loads((BASE / 'sources.json').read_text(encoding='utf-8-sig')).get('game', {}).get('game_manifest_url')
+        if isinstance(value, str) and value.startswith('https://'):
+            return value
+    except (OSError, ValueError, AttributeError):
+        pass
+    return MANIFEST_URL
+
+
 APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.5.0')
 
 
@@ -452,7 +464,7 @@ class LauncherUI:
     def check_updates(self):
         def check():
             try:
-                req = urllib.request.Request(MANIFEST_URL, headers={'User-Agent': 'SilverLantern'})
+                req = urllib.request.Request(game_manifest_url(), headers={'User-Agent': 'SilverLantern'})
                 with urllib.request.urlopen(req, timeout=10) as response:
                     manifest = json.load(response)
                 # TODO v1.5: cache the verified manifest hash after installation.

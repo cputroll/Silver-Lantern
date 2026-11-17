@@ -6,6 +6,7 @@
     "description": "Update these values and re-upload this file (or the whole tool) to change where the game comes from, without touching the script. Set manifest_url to the raw URL of this file on GitHub so every install picks up new links by itself; empty means local only."
   },
   "game": {
+    "game_manifest_url": "https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/game-manifest.json",
     "title": "Data package (v131072)",
     "title_id": "0400486024DEC000",
     "update": "v131072",

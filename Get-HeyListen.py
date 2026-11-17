@@ -1386,7 +1386,7 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
 
 
 # ---------------------------------------------------------------- main
-GAME_MANIFEST_URL = "https://raw.githubusercontent.com/cputroll/Silver-Lantern/main/game-manifest.json"
+GAME_MANIFEST_URL = "https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/game-manifest.json"
 GAME_ASSET_URL = "https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/"
 
 
@@ -2040,7 +2040,8 @@ def main() -> int:
     ap.add_argument("--self-update-from", metavar="ZIP",
                     help="install a release zip from a local path (testing)")
     ap.add_argument('--install-game', nargs='?', const=str(Path(os.environ.get('USERPROFILE', str(Path.home()))) / 'Games' / 'HeyListen'), metavar='FOLDER')
-    ap.add_argument('--game-manifest', default=GAME_MANIFEST_URL, metavar='PATH_OR_URL')
+    import launcher
+    ap.add_argument('--game-manifest', default=launcher.game_manifest_url(), metavar='PATH_OR_URL')
     ap.add_argument('--dry-run', action='store_true')
     ap.add_argument('--keep-assets', action='store_true', help='Keep downloaded game assets after installation')
     ap.add_argument('--prune', action='store_true')
