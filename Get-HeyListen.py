@@ -2346,7 +2346,8 @@ def _install_from_manifest_locked(s, a, folder: Path) -> None:
         with stream_session() as manifest_session:
             if a.game_manifest is None:
                 import game_channel
-                game_manifest = game_channel.fetch_for_folder(folder, lambda url: game_channel.fetch_bytes(manifest_session, url), lambda data: parse_game_manifest(data.decode('utf-8-sig')))
+                import launcher
+                game_manifest = game_channel.fetch_for_folder(folder, lambda url: game_channel.fetch_bytes(manifest_session, url), lambda data: parse_game_manifest(data.decode('utf-8-sig')), legacy_url=launcher.game_manifest_url())
             else:
                 game_manifest = load_game_manifest(manifest_session, a.game_manifest)
     except Exception:

@@ -314,7 +314,7 @@ def fetch_channel_manifest(folder, session):
         parser = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(parser)
     with game_channel.install_lock(folder):
-        return game_channel.fetch_for_folder(folder, lambda url: game_channel.fetch_bytes(session, url), lambda data: parser.parse_game_manifest(data.decode('utf-8-sig')))
+        return game_channel.fetch_for_folder(folder, lambda url: game_channel.fetch_bytes(session, url), lambda data: parser.parse_game_manifest(data.decode('utf-8-sig')), legacy_url=game_manifest_url())
 
 
 def fetch_ownership_manifest():

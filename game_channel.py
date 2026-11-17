@@ -128,14 +128,14 @@ def fetch_bytes(session, url, max_bytes=None):
         response.close()
 
 
-def fetch_for_folder(folder, fetch, validate):
+def fetch_for_folder(folder, fetch, validate, legacy_url=LEGACY_URL):
     minimum_revision, expected_digest = load_state(folder)
     try:
         pointer = fetch(CHANNEL_URL)
     except FileNotFoundError:
         if minimum_revision:
             raise
-        return validate(fetch(LEGACY_URL))
+        return validate(fetch(legacy_url))
     data, revision, digest = resolve_info(fetch, minimum_revision, expected_digest, pointer)
     result = validate(data)
     save_state(folder, revision, digest)
