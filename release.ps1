@@ -37,9 +37,10 @@ try {
   }
   $iconPath = (Resolve-Path (Join-Path $here 'assets\silver-lantern.ico')).Path
   $sdlDll = (Resolve-Path $sdlDll).Path
+  $backdrop = (Resolve-Path (Join-Path $here 'assets\ui-backdrop.bmp')).Path
   $ttfDll = (python -c "import pathlib,sdl2dll; print(pathlib.Path(sdl2dll.__file__).parent / 'dll' / 'SDL2_ttf.dll')").Trim()
   if (-not (Test-Path $ttfDll -PathType Leaf)) { throw 'SDL2_ttf.dll not found; install launcher-requirements.txt.' }
-  python -m PyInstaller --noconfirm --clean --onefile --name SilverLantern --icon $iconPath --hidden-import launcher --hidden-import curl_cffi --collect-all curl_cffi --add-binary "${sdlDll};." --add-binary "${ttfDll};." --distpath $stage --workpath $build --specpath $spec Get-HeyListen.py
+  python -m PyInstaller --noconfirm --clean --onefile --name SilverLantern --icon $iconPath --hidden-import launcher --hidden-import curl_cffi --collect-all curl_cffi --add-binary "${sdlDll};." --add-binary "${ttfDll};." --add-data "${backdrop};assets" --distpath $stage --workpath $build --specpath $spec Get-HeyListen.py
   if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)." }
   $exe = Join-Path $stage 'SilverLantern.exe'
   if (-not (Test-Path $exe -PathType Leaf)) { throw 'PyInstaller did not produce SilverLantern.exe.' }
