@@ -28,6 +28,17 @@ class CrashHotfixTests(unittest.TestCase):
             text = (Path(d) / 'log').read_text()
             self.assertIn('desktop denied', text); self.assertIn('start denied', text); self.assertIn('registry denied', text)
 
+    def test_powershell_failure_with_absent_streams_does_not_stop_relocation(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); source = root / 'source.exe'; source.write_bytes(b'exe')
+            registry = MagicMock(); registry.REG_SZ = 1; registry.REG_DWORD = 4
+            failure = subprocess.CalledProcessError(1, 'powershell', stderr=b'simulated stderr detail')
+            with patch.object(launcher.sys, 'frozen', True, create=True), patch.object(launcher.sys, 'executable', str(source)), patch.object(launcher.sys, 'stdout', None), patch.object(launcher.sys, 'stderr', None), patch.object(launcher, 'LOG', root / 'log'), patch.object(launcher, 'winreg', registry), patch.object(launcher, 'shortcut_path', return_value=root / 'desktop' / 'app.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'start' / 'app.lnk'), patch.object(launcher, 'powershell', side_effect=failure) as ps, patch.object(launcher.subprocess, 'Popen') as spawn:
+                self.assertTrue(launcher.relocate_launcher(root / 'game'))
+                self.assertEqual(ps.call_count, 4)
+                spawn.assert_called_once()
+            self.assertIn('simulated stderr detail', (root / 'log').read_text())
+
     def test_registration_exception_does_not_stop_relocation(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); source = root / 'source.exe'; source.write_bytes(b'exe')

@@ -163,7 +163,7 @@ def defender_elevated(folder, enable):
 
 def defender_config():
     try:
-        return json.loads(CONFIG.read_text(encoding='utf-8'))
+        return json.loads(CONFIG.read_text(encoding='utf-8-sig'))
     except (OSError, ValueError, TypeError):
         return {}
 
@@ -316,7 +316,7 @@ def manifest_owned_files(folder, manifest):
 
 def load_game_folder():
     try:
-        value = json.loads(CONFIG.read_text(encoding='utf-8')).get('game_dir')
+        value = json.loads(CONFIG.read_text(encoding='utf-8-sig')).get('game_dir')
         return Path(value).expanduser() if value else None
     except (OSError, ValueError, TypeError):
         return None
@@ -845,7 +845,7 @@ class LauncherUI:
         self.fallback = self.profile / 'Games' / GAME_NAME
         self.legacy = self.profile / 'Games' / 'HeyListen'
         try:
-            self.config = json.loads(CONFIG.read_text(encoding='utf-8'))
+            self.config = json.loads(CONFIG.read_text(encoding='utf-8-sig'))
         except (OSError, ValueError):
             self.config = {}
         self.folder = self.fallback if startup_error is not None else resolve_game_folder()
