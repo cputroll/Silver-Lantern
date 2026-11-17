@@ -23,7 +23,7 @@ CONFIG = STATE_DIR / 'launcher.json'
 LOG = STATE_DIR / 'launcher.log'
 GAME_NAME = 'Legend of Zelda Ocarina of Time'
 MANIFEST_URL = 'https://raw.githubusercontent.com/cputroll/Silver-Lantern/main/game-manifest.json'
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.3.0')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.4.0')
 
 
 def cli_command(*args):
