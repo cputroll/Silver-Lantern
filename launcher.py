@@ -80,6 +80,54 @@ def powershell(script, wait=True):
     return subprocess.Popen(args, creationflags=flags, close_fds=True)
 
 
+def defender_elevated(folder, enable):
+    if os.name != 'nt':
+        return False
+    cmd = ('Add-MpPreference' if enable else 'Remove-MpPreference') + ' -ExclusionPath ' + ps_quote(folder) + ' -ErrorAction Stop'
+    encoded = base64.b64encode(cmd.encode('utf-16le')).decode('ascii')
+    script = ("$ErrorActionPreference='Stop'; try { $p=Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden "
+              "-ArgumentList '-NoProfile -NonInteractive -EncodedCommand " + encoded + "'; if ($null -eq $p) { exit 1 }; exit $p.ExitCode } catch { exit 1 }")
+    try:
+        powershell(script)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def defender_config():
+    try:
+        return json.loads(CONFIG.read_text(encoding='utf-8'))
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def optimize_defender(folder):
+    config = defender_config()
+    folder = Path(folder).resolve()
+    if config.get('defender_state') == 'on':
+        if config.get('defender_path') == str(folder):
+            return True
+        # Never lose track of an exclusion when the game folder changes.
+        return False
+    print('Optimizing for a faster install — click Yes if Windows asks.', flush=True)
+    success = defender_elevated(folder, True)
+    config['defender_state'] = 'on' if success else 'unknown'
+    if success:
+        config['defender_path'] = str(folder)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = CONFIG.with_suffix('.tmp')
+    tmp.write_text(json.dumps(config), encoding='utf-8')
+    os.replace(tmp, CONFIG)
+    return success
+
+
+def remove_defender_exclusion():
+    config = defender_config()
+    if config.get('defender_state') == 'on' and config.get('defender_path'):
+        return defender_elevated(Path(config['defender_path']), False)
+    return True
+
+
 def create_link(link, target, working_dir):
     script = '$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut(' + ps_quote(link) + '); $l.TargetPath=' + ps_quote(target) + '; $l.WorkingDirectory=' + ps_quote(working_dir) + '; $l.Save()'
     powershell(script)
@@ -156,7 +204,8 @@ def uninstall(keep_saves=False):
     if input('Continue? [y/N] ').strip().lower() != 'y':
         print('Uninstall cancelled.')
         return False
-    if folder and folder.exists():
+    had_folder = bool(folder and folder.exists())
+    if had_folder:
         game = folder.resolve()
         home = Path.home().resolve()
         state = STATE_DIR.resolve()
@@ -167,6 +216,8 @@ def uninstall(keep_saves=False):
             game = folder.resolve()
             if program == game or program.is_relative_to(game):
                 raise RuntimeError('Cannot safely remove a game folder containing the launcher; move the launcher first.')
+        if not remove_defender_exclusion():
+            raise RuntimeError('Could not remove the Windows Defender exclusion; retry uninstall or remove it in Windows Security.')
         if keep_saves:
             for child in folder.iterdir():
                 if child.name.casefold() == 'user':
@@ -177,6 +228,8 @@ def uninstall(keep_saves=False):
                     child.unlink()
         else:
             shutil.rmtree(folder)
+    if not had_folder and not remove_defender_exclusion():
+        raise RuntimeError('Could not remove the Windows Defender exclusion; retry uninstall or remove it in Windows Security.')
     shortcut_path().unlink(missing_ok=True)
     shortcut_path().with_name('Silver Lantern.lnk').unlink(missing_ok=True)
     start_menu_path().unlink(missing_ok=True)
@@ -372,6 +425,10 @@ class LauncherUI:
         self.check_updates()
 
     def save(self):
+        persisted = defender_config()
+        for key in ('defender_state', 'defender_path'):
+            if key in persisted:
+                self.config[key] = persisted[key]
         self.config['game_dir'] = str(self.folder)
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         tmp = CONFIG.with_suffix('.tmp')
@@ -405,7 +462,7 @@ class LauncherUI:
         if self.screen == 'folder':
             return (['Update now'] if self.tool_update_available else []) + (['Use existing folder'] if legacy_exists(self.legacy) else []) + ['Use default folder', 'Choose another folder', 'Continue']
         if self.screen == 'settings':
-            return ['Change game folder', 'Desktop shortcut: ' + ('On' if self.config.get('shortcut', True) else 'Off'), 'Check for updates automatically: ' + ('On' if self.config.get('auto_tool_update', True) else 'Off'), 'Check for updates now', 'View log', 'Back']
+            return ['Change game folder', 'Speed up installs (one Windows permission, instant)', 'Desktop shortcut: ' + ('On' if self.config.get('shortcut', True) else 'Off'), 'Check for updates automatically: ' + ('On' if self.config.get('auto_tool_update', True) else 'Off'), 'Check for updates now', 'View log', 'Back']
         if self.screen == 'progress':
             return [] if self.operation == 'tool' else ['Cancel']
         if self.screen == 'error':
@@ -479,6 +536,8 @@ class LauncherUI:
             STATE_DIR.mkdir(parents=True, exist_ok=True)
             LOG.touch(exist_ok=True)
             os.startfile(LOG)
+        elif choice == 'Speed up installs (one Windows permission, instant)':
+            self.status = 'Optimization will be attempted with the next install plan.'
         elif choice == 'Change game folder': self.set_screen('folder')
         elif choice.startswith('Desktop shortcut'):
             enabled = not self.config.get('shortcut', True)
@@ -653,19 +712,23 @@ class LauncherUI:
                         my = event.motion.y if typ == s.SDL_MOUSEMOTION else event.button.y
                         w, h = ctypes.c_int(), ctypes.c_int(); s.SDL_GetWindowSize(window, ctypes.byref(w), ctypes.byref(h))
                         x, y = mx * 1280 / max(w.value, 1), my * 720 / max(h.value, 1)
-                        index = int((y - 210) // 65)
-                        if 250 <= x <= 1030 and 0 <= index < len(self.buttons()) and 210 + index * 65 <= y < 266 + index * 65:
+                        spacing = 50 if self.screen == 'settings' else 65
+                        height = 44 if self.screen == 'settings' else 56
+                        index = int((y - 210) // spacing)
+                        if 250 <= x <= 1030 and 0 <= index < len(self.buttons()) and 210 + index * spacing <= y < 210 + height + index * spacing:
                             self.focus = index
                             if typ == s.SDL_MOUSEBUTTONUP and event.button.button == s.SDL_BUTTON_LEFT: self.activate()
                 s.SDL_SetRenderDrawColor(renderer, 18, 26, 32, 255); s.SDL_RenderClear(renderer)
                 text('SILVER LANTERN', 65, 45, (230, 198, 130))
                 titles = {'main':'Welcome', 'folder':'Where should the game go?', 'settings':'Settings', 'progress':'Working...', 'error':'Something went wrong', 'update':'Update the game?'}
                 text(titles[self.screen], 250, 130)
+                spacing = 50 if self.screen == 'settings' else 65
+                height = 44 if self.screen == 'settings' else 56
                 for i, label in enumerate(self.buttons()):
                     selected = i == self.focus
                     s.SDL_SetRenderDrawColor(renderer, *( (90, 108, 100, 255) if selected else (42, 54, 58, 255) ))
-                    rect = s.SDL_Rect(250, 210 + i * 65, 780, 56); s.SDL_RenderFillRect(renderer, ctypes.byref(rect))
-                    text(label, 275, 220 + i * 65)
+                    rect = s.SDL_Rect(250, 210 + i * spacing, 780, height); s.SDL_RenderFillRect(renderer, ctypes.byref(rect))
+                    text(label, 275, 220 + i * spacing)
                 if self.screen == 'error': text(self.last_error[:70], 65, 580, (255, 180, 160))
                 elif self.screen == 'progress': text(self.progress[:80], 65, 580)
                 else: text(self.status[:80], 65, 580)

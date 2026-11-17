@@ -43,6 +43,37 @@ class SegmentSchedulerTests(unittest.TestCase):
             self.assertFalse((root / 'file').exists())
             self.assertFalse(any((root / '.heylisten-parts').iterdir()))
 
+    def test_valve_reports_unconsumable_segments(self):
+        data = b'x'
+        # Asset order intentionally contradicts segment order; call the scheduler
+        # directly so the manifest validator cannot reject it first.
+        assets = {str(i): {'asset': str(i), 'size': 1, 'sha256': digest(data)} for i in range(4)}
+        item = {'path': 'file', 'size': 4, 'sha256': digest(data * 4),
+                'segments': [{'asset': str(i), 'offset': 0, 'length': 1, 'sha256': digest(data)} for i in (3, 2, 1, 0)]}
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            def fetch(asset):
+                (root / asset['asset']).write_bytes(data)
+            with patch.object(h, 'assembly_workers', return_value=4):
+                with self.assertRaisesRegex(h.UserError, 'cannot make progress'):
+                    h.assemble_segmented([item], assets, root, root, fetch, False)
+            self.assertFalse((root / 'file.heylisten-new').exists())
+            self.assertFalse(any(root.iterdir()))
+
+    def test_abort_does_not_delete_untouched_existing_target(self):
+        data = b'x'
+        man = {'version': 2, 'build': 'game-v1', 'total_bytes': 2,
+               'assets': [{'asset': 'a', 'size': 1, 'sha256': digest(data)}],
+               'files': [{'path': 'old', 'size': 1, 'sha256': digest(data),
+                          'segments': [{'asset': 'a', 'offset': 0, 'length': 1, 'sha256': digest(data)}]}]}
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'old').write_bytes(b'old content')
+            with patch.object(h, 'stream_to', side_effect=RuntimeError('download failed')), patch.object(h, 'check_disk_space'):
+                with self.assertRaisesRegex(RuntimeError, 'download failed'):
+                    h.install_game(object(), man, root)
+            self.assertEqual((root / 'old').read_bytes(), b'old content')
+
     def test_one_segment_is_written_directly(self):
         data = b'direct data'
         man = {'version': 2, 'build': 'game-v1', 'total_bytes': len(data),

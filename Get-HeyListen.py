@@ -1509,7 +1509,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
         direct = len(item['segments']) == 1
         state = {'item': item, 'target': target,
                  'temp': target if direct else target.with_name(target.name + '.heylisten-new'),
-                 'direct': direct, 'next': 0, 'hasher': hashlib.sha256(), 'lock': threading.Lock()}
+                 'direct': direct, 'next': 0, 'started': False, 'complete': False,
+                 'hasher': hashlib.sha256(), 'lock': threading.Lock()}
         states.append(state)
         for index, segment in enumerate(item['segments']):
             by_asset[segment['asset']].append((state, index, segment))
@@ -1520,11 +1521,20 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
         with cond:
             if shared['error'] is None:
                 shared['error'] = exc
+                for bundle in bundles:
+                    bundle['pending'].clear()
             cond.notify_all()
+
+    def close_fd(fd):
+        try:
+            os.close(fd)
+        except OSError as exc:
+            if exc.errno != errno.EBADF:
+                raise
 
     def remove_bundle(bundle):
         for fd in bundle['fds'].values():
-            os.close(fd)
+            close_fd(fd)
         bundle['fds'].clear()
         if not keep_assets:
             bundle['path'].unlink(missing_ok=True)
@@ -1578,6 +1588,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
                     remaining = segment['length']
                     segment_hash = hashlib.sha256()
                     with state['temp'].open('wb' if index == 0 else 'ab') as output:
+                        state['started'] = True
                         while remaining:
                             data = os.read(fd, min(remaining, 1024 * 1024))
                             if not data:
@@ -1594,6 +1605,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
                             raise ValueError(f"assembled SHA-256 mismatch: {state['item']['path']}")
                         if not state['direct']:
                             state['temp'].replace(state['target'])
+                        state['complete'] = True
                     with cond:
                         bundle['refs'] -= 1
                         if not bundle['refs']:
@@ -1608,7 +1620,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
                 for bundle in bundles:
                     fd = bundle['fds'].pop(ident, None)
                     if fd is not None:
-                        os.close(fd)
+                        close_fd(fd)
 
     workers = [threading.Thread(target=worker) for _ in range(assembly_workers())]
     for thread in workers:
@@ -1637,7 +1649,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets):
             thread.join()
     if shared['error']:
         for state in states:
-            state['temp'].unlink(missing_ok=True)
+            if state['started'] and not state['complete']:
+                state['temp'].unlink(missing_ok=True)
         for name in names:
             for suffix in ('', '.part', '.part.json'):
                 Path(str(cache / name) + suffix).unlink(missing_ok=True)
@@ -1706,6 +1719,9 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             check_disk_space(root, need)
     root.mkdir(parents=True, exist_ok=True)
     if pending:
+        if os.name == 'nt' and os.environ.get('SILVER_LANTERN_TEST_NO_DEFENDER') != '1':
+            import launcher
+            launcher.optimize_defender(root)
         cache.mkdir(parents=True, exist_ok=True)
         progress = GameProgress(download_bytes)
         verified_assets = set()

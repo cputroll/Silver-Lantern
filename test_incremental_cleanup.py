@@ -29,24 +29,41 @@ class IncrementalTests(unittest.TestCase):
         disk.start()
         self.addCleanup(disk.stop)
 
-    def test_shared_bundle_removed_only_after_last_file_before_next_fetch(self):
+    def test_shared_bundle_lifetime_and_overlapping_download(self):
+        import threading
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            events = []
-            def stream(s, url, dest, **kw):
-                name = url.rsplit('/', 1)[-1]
-                events.append(name)
-                if name == 'b':
+            b_started = threading.Event()
+            read_started = threading.Event()
+            real_read, real_unlink = h.os.read, Path.unlink
+            seen = []
+            def read(fd, size):
+                if not b_started.is_set():
+                    read_started.set()
+                    if not b_started.wait(5):
+                        raise AssertionError('second download did not overlap assembly')
+                return real_read(fd, size)
+            def unlink(path, *args, **kwargs):
+                if path == root / '.heylisten-parts' / 'a' and path.exists():
                     self.assertEqual((root / 'one').read_bytes(), b'a')
                     self.assertEqual((root / 'two').read_bytes(), b'b')
-                    self.assertFalse((root / '.heylisten-parts' / 'a').exists())
+                return real_unlink(path, *args, **kwargs)
+            def stream(s, url, dest, **kw):
+                name = url.rsplit('/', 1)[-1]
+                if name == 'b':
+                    self.assertTrue(read_started.wait(5))
+                    self.assertTrue((root / '.heylisten-parts' / 'a').exists())
+                    b_started.set()
+                seen.append(name)
+                self.assertLessEqual(len(list((root / '.heylisten-parts').iterdir())), 2)
                 data = {'a': b'ab', 'b': b'c'}[name]
                 dest.write_bytes(data)
                 kw['progress'](len(data))
-            with patch.object(h, 'stream_to', side_effect=stream), redirect_stdout(io.StringIO()):
+            with patch.object(h, 'stream_to', side_effect=stream), patch.object(h.os, 'read', side_effect=read), patch.object(Path, 'unlink', unlink), redirect_stdout(io.StringIO()):
                 h.install_game(object(), fixture(), root)
-            self.assertEqual(events, ['a', 'b'])
+            self.assertEqual(seen, ['a', 'b'])
             self.assertEqual((root / 'three').read_bytes(), b'c')
+            self.assertFalse((root / '.heylisten-parts').exists())
 
     def test_preflight_override_zero_disables_check(self):
         with tempfile.TemporaryDirectory() as td, patch.dict('os.environ', {'SILVER_LANTERN_MIN_FREE_GB': '0'}), patch.object(h, 'check_disk_space') as check, patch.object(h, 'stream_to', side_effect=RuntimeError('stop')), redirect_stdout(io.StringIO()):
