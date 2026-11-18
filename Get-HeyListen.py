@@ -2151,6 +2151,47 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
         raise shared['error']
 
 
+def running_launcher_paths():
+    """Return accessible running executable paths, conservatively protecting them all."""
+    paths = {Path(sys.executable).resolve()}
+    if os.name != 'nt':
+        return paths
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    class ProcessEntry(ctypes.Structure):
+        _fields_ = [('size', wintypes.DWORD), ('usage', wintypes.DWORD), ('pid', wintypes.DWORD),
+                    ('heap', ctypes.c_size_t), ('module', wintypes.DWORD), ('threads', wintypes.DWORD),
+                    ('parent', wintypes.DWORD), ('priority', ctypes.c_long), ('flags', wintypes.DWORD),
+                    ('exe', wintypes.WCHAR * 260)]
+    snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
+    if snapshot == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        entry = ProcessEntry(); entry.size = ctypes.sizeof(entry)
+        kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+        kernel.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry)]
+        valid = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while valid:
+            handle = kernel.OpenProcess(0x1000, False, entry.pid)
+            if handle:
+                try:
+                    buf = ctypes.create_unicode_buffer(32768); length = wintypes.DWORD(len(buf))
+                    if kernel.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(length)):
+                        paths.add(Path(buf.value).resolve())
+                finally:
+                    kernel.CloseHandle(handle)
+            valid = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel.CloseHandle(snapshot)
+    return paths
+
+
 def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = False,
                  manifest_path: Path | None = None, keep_assets: bool = False) -> None:
     log('Checking installation plan', echo=True)
@@ -2159,6 +2200,8 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     pending = []
     kept = 0
     inventory = destination_inventory(root)
+    running = {os.path.normcase(str(p.resolve())) for p in running_launcher_paths()}
+    running.add(os.path.normcase(str(Path(sys.executable).resolve())))
     last_report = time.monotonic()
     for count, item in enumerate(man['files'], 1):
         now = time.monotonic()
@@ -2166,8 +2209,11 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             log(f"Checking installation plan: {count - 1}/{len(man['files'])} files checked", echo=True)
             last_report = now
         relative = item['path']
+        target = game_path(root, relative)
+        if os.path.normcase(str(target.resolve())) in running:
+            log('launcher executable left in place; the launcher updates itself separately')
+            continue
         if inventory.get(relative) == item['size']:
-            target = game_path(root, relative)
             if item['size'] >= 256 * 1024 * 1024:
                 log(f"Checking SHA-256: {item['path']} ({human(item['size'])})")
             if sha256(target, progress=item['size'] >= 256 * 1024 * 1024) == item['sha256']:
