@@ -634,37 +634,61 @@ def resolve_game_folder():
         return fallback
 
 
-def _cleanup_stale_siblings(destination, keep):
-    """Delete stacked ``Ocarina of Time-<random>.exe`` launcher copies, keeping only `keep`.
+def _launcher_records(destination):
+    try:
+        records = json.loads((Path(destination) / '.heylisten-get' / 'launcher-copies.json').read_text(encoding='utf-8'))
+        return records if isinstance(records, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
-    Never removes the copy in use: the running executable is skipped explicitly, and any
-    still-running (locked) sibling simply fails to delete and is left alone.
-    """
+
+def _launcher_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _save_launcher_records(destination, records):
+    import tempfile
+    directory = Path(destination) / '.heylisten-get'
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(dir=directory, prefix='launcher-copies-', suffix='.tmp')
     try:
-        keep_resolved = Path(keep).resolve()
-    except OSError:
-        keep_resolved = Path(keep)
-    running = None
-    if getattr(sys, 'frozen', False):
+        with os.fdopen(fd, 'w', encoding='utf-8') as out:
+            json.dump(records, out)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(name, directory / 'launcher-copies.json')
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def _record_launcher_copy(destination, target):
+    records = _launcher_records(destination)
+    records[Path(target).name] = _launcher_hash(target)
+    _save_launcher_records(destination, records)
+
+
+def _cleanup_stale_siblings(destination, keep):
+    destination = Path(destination)
+    records = _launcher_records(destination)
+    keep = Path(keep).resolve()
+    running = Path(sys.executable).resolve() if getattr(sys, 'frozen', False) else None
+    for name, digest in list(records.items()):
+        if not isinstance(name, str) or not re.fullmatch(r'Ocarina of Time-[^/\\]+\.exe', name, re.IGNORECASE):
+            continue
+        stale = destination / name
         try:
-            running = Path(sys.executable).resolve()
-        except OSError:
-            running = None
-    try:
-        candidates = list(Path(destination).glob('Ocarina of Time-*.exe'))
-    except OSError:
-        return
-    for stale in candidates:
-        try:
-            resolved = stale.resolve()
+            if stale.is_symlink() or stale.resolve() in (keep, running):
+                continue
+            if _launcher_hash(stale) == digest:
+                stale.unlink()
+                del records[name]
         except OSError:
             continue
-        if resolved == keep_resolved or (running is not None and resolved == running):
-            continue
-        try:
-            stale.unlink()
-        except OSError:
-            pass
+    _save_launcher_records(destination, records)
 
 
 def relocate_launcher(folder):
@@ -702,6 +726,7 @@ def relocate_launcher(folder):
                 copy.close()
                 target.unlink(missing_ok=True)
                 raise
+    _record_launcher_copy(destination, target)
     log_message(f'Launcher relocation: {target}')
     try:
         register_install(destination, exe=target)
