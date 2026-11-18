@@ -63,6 +63,18 @@ class VerifyWriteBoundaryTests(unittest.TestCase):
         with self.assertRaises(h.InvalidGamePath):
             h.verify_write_boundary(self.root, other / 'x.bin', 'x.bin')
 
+    def test_stat_failure_fails_closed(self):
+        target = self.root / 'romfs' / 'file.zs'
+        (self.root / 'romfs').mkdir()
+        real_stat = h.os.stat
+        def denying(path, *a, **k):
+            if str(path).endswith('romfs'):
+                raise PermissionError(5, 'Access is denied')
+            return real_stat(path, *a, **k)
+        with patch.object(h.os, 'stat', side_effect=denying):
+            with self.assertRaises(h.InvalidGamePath):
+                h.verify_write_boundary(self.root, target, 'romfs/file.zs')
+
 
 class JunctionSwapDuringAssemblyTests(unittest.TestCase):
     def setUp(self):

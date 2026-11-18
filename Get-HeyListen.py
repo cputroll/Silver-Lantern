@@ -2015,12 +2015,13 @@ def verify_write_boundary(root: Path, target: Path, entry: str) -> None:
     `game_path` validated the entry when the work was scheduled, but assembly
     can run for minutes before the final placement. This re-walks every
     existing ancestor from the install root down and fails closed if any
-    component became a reparse point or resolved containment broke, so a
-    directory swapped for a junction after validation can never receive a
-    game file. Staging files are created exclusively, so their names cannot
-    be pre-planted. Residual window: microseconds between this check and the
-    open/replace, against a same-user local actor; remote package entries are
-    refused by validation and by this check alike."""
+    component became a reparse point, could not be inspected, or resolved
+    containment broke, so a junction swapped in after validation is refused.
+    Staging files are created exclusively, so their names cannot be
+    pre-planted. This narrows the substitution window to the microseconds
+    between this check and the open/replace against a same-user local
+    actor; it does not eliminate it, and remote package entries are refused
+    by validation and by this check alike."""
     chain = []
     current = target
     while current != root:
@@ -2030,11 +2031,19 @@ def verify_write_boundary(root: Path, target: Path, entry: str) -> None:
             raise InvalidGamePath(root.resolve(), entry, 'boundary left the install directory')
         current = parent
     for path in reversed(chain):
-        kind = _leftover_kind(path)
         final = path == target
-        if kind == 'reparse':
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            continue  # not created yet; created via exclusive staging or mkdir
+        except OSError as exc:
+            # Ancestor inspection failed (permissions, shadowed path): the
+            # confinement of this write is unknown, so refuse it.
+            raise InvalidGamePath(root.resolve(), entry,
+                                  f'boundary check failed at {str(path)!r}: {exc.strerror}')
+        if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT:
             raise InvalidGamePath(root.resolve(), entry, f'reparse point at {str(path)!r}')
-        if final and kind == 'other':
+        if final and not stat.S_ISREG(info.st_mode):
             raise InvalidGamePath(root.resolve(), entry, f'not a regular file at {str(path)!r}')
     try:
         resolved_target = _comparable_resolved_path(target.resolve())
