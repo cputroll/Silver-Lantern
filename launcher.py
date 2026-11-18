@@ -24,6 +24,7 @@ try:
 except ImportError:
     winreg = None
 import game_settings
+from update_resources import resolve_update_script
 try:
     import build_flags
 except ModuleNotFoundError as exc:
@@ -72,7 +73,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.1')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.2')
 
 
 def play_tip(folder):
@@ -1683,7 +1684,10 @@ class LauncherUI:
                         events.publish('status', 'Connection stalled — retrying…')
                 events.publish('tool_check', release.get('tag_name', 'unknown'))
                 if installed(self.folder):
-                    result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-File', str(next((p for p in (BASE / 'Update-Game.ps1', BASE / 'support' / 'Update-Game.ps1') if p.is_file()), BASE / 'Update-Game.ps1')), '-DryRun', '-GameFolder', str(self.folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                    script = resolve_update_script(BASE)
+                    if script is None:
+                        raise FileNotFoundError('Update-Game.ps1 not found')
+                    result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-File', str(script), '-DryRun', '-GameFolder', str(self.folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                     events.publish('upstream_check', result.returncode)
             except Exception:
                 log_message('Update check failed:\n' + traceback.format_exc())

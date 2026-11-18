@@ -43,18 +43,22 @@ k.CloseHandle(handle)
         h.assemble_segmented([item], {'bundle': {'asset': 'bundle'}}, root, root, lambda _: None, True)
 
     def test_locked_destination_retries_until_released(self):
-        import threading
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp); target = root / 'Ocarina of Time.exe'; target.write_bytes(b'old')
             proc = self.lock(target)
-            timer = threading.Timer(.3, proc.terminate); timer.start()
+            def release_on_retry(message):
+                if 'Windows is checking the game files' in message and proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=5)
             try:
-                with patch.object(h, 'say') as say:
+                with patch.object(h, 'say', side_effect=release_on_retry) as say:
                     self.assemble(root)
                 self.assertEqual(target.read_bytes(), b'new game')
                 self.assertTrue(any('Windows is checking the game files' in str(c) for c in say.call_args_list))
             finally:
-                timer.cancel(); proc.wait(timeout=5)
+                if proc.poll() is None:
+                    proc.terminate()
+                proc.wait(timeout=5)
 
     def test_deadline_reports_friendly_error_without_traceback(self):
         with tempfile.TemporaryDirectory() as temp:

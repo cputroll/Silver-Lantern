@@ -65,10 +65,9 @@ def pack(source, out, limit=LIMIT, prefix='', include_settings=False):
             if (lower.endswith(('.log', '.update-backup')) or '.heylisten-new' in lower
                     or (lower == 'hookshot_options.ini' and not include_settings)):
                 continue
-            # Launcher-owned executables from launcher.OWNED_FILES: root supports
-            # all three; support/ contains the two main launcher binaries only.
+            # Launcher-owned executables at the root and in support/.
             rel = (Path(root) / name).relative_to(source).as_posix().lower()
-            if rel in {'silverlantern.exe', 'heylisten-get.exe', 'run silver lantern.exe',
+            if rel in {'ocarina of time.exe', 'silverlantern.exe', 'heylisten-get.exe', 'run silver lantern.exe',
                        'support/silverlantern.exe', 'support/heylisten-get.exe'}:
                 continue
             paths.append(Path(root) / name)

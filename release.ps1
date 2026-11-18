@@ -46,7 +46,7 @@ try {
   if (Test-Path (Join-Path $here 'build_flags.py')) { throw 'Unexpected source-tree build_flags.py; remove it before packaging.' }
   $flagsDir = Join-Path $out 'flags'
   Write-BuildFlags -Directory $flagsDir -Qa:$Qa
-  python -m PyInstaller --paths $flagsDir --hidden-import build_flags --noconfirm --clean --onefile --noconsole --name SilverLantern --icon $iconPath --hidden-import launcher --hidden-import curl_cffi --collect-all curl_cffi --add-binary "${sdlDll};." --add-binary "${ttfDll};." --add-data "${backdrop};assets" --distpath $stage --workpath $build --specpath $spec Get-HeyListen.py
+  python -m PyInstaller --paths $flagsDir --hidden-import build_flags --noconfirm --clean --onefile --noconsole --name SilverLantern --icon $iconPath --hidden-import launcher --hidden-import curl_cffi --collect-all curl_cffi --add-binary "${sdlDll};." --add-binary "${ttfDll};." --add-data "${backdrop};assets" --add-data "${here}\Update-Game.ps1;." --add-data "${here}\Apply-HeyListen-Preset.ps1;." --distpath $stage --workpath $build --specpath $spec Get-HeyListen.py
   if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)." }
   $exe = Join-Path $stage 'SilverLantern.exe'
   if (-not (Test-Path $exe -PathType Leaf)) { throw 'PyInstaller did not produce SilverLantern.exe.' }

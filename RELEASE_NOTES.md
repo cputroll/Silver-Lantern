@@ -1,6 +1,6 @@
-# Silver Lantern 1.6.2
+# Silver Lantern 1.7.2
 
-- Resume installs using an estimate of remaining disk space instead of requiring space for the entire game again.
-- Preserve existing files when launcher installation paths are occupied.
-- Fix settings footer overlap and improve installer error details.
-- Pixelation remains under investigation.
+- Keep the game updater and preset available when the launcher relocates itself.
+- Improve handling of a changed installation folder during file assembly.
+- Keep the launcher executable out of newly packed game updates.
+- Expand packaged-install and update safety checks.
