@@ -5,6 +5,20 @@ from qa.simulate_friend import fixture_manifest, run_check
 
 
 class SimulatorTests(unittest.TestCase):
+    def test_traceback_classifier_and_log_window(self):
+        from qa.simulate_friend import has_crash_traceback, log_window
+        self.assertFalse(has_crash_traceback('[12:00:00] recoverable-retry: Traceback (most recent call last):\nrecoverable-retry: PermissionError: locked\n'))
+        self.assertTrue(has_crash_traceback('[12:00:00] Traceback (most recent call last):\nPermissionError: crash\n'))
+        self.assertTrue(has_crash_traceback('recoverable-retry: Traceback (most recent call last):\n[12:00:01] Traceback (most recent call last):\n'))
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'test.log'
+            p.write_text('Traceback old\n', encoding='utf-8')
+            offset = p.stat().st_size
+            with p.open('a', encoding='utf-8') as f: f.write('safe\n')
+            self.assertFalse(has_crash_traceback(log_window(p, offset)))
+            with p.open('a', encoding='utf-8') as f: f.write('Traceback new\n')
+            self.assertTrue(has_crash_traceback(log_window(p, offset)))
+
     def test_recycled_pid_is_not_a_live_tracked_process(self):
         from qa.simulate_friend import live_identities
         self.assertEqual(live_identities({(12, 100)}, {12: 200}), set())

@@ -78,6 +78,21 @@ def live_identities(tracked, current):
     return {(pid, created) for pid, created in tracked if current.get(pid) == created}
 
 
+def has_crash_traceback(text):
+    import re
+    for line in text.splitlines():
+        line = re.sub(r'^\[\d\d:\d\d:\d\d\] ', '', line)
+        if 'Traceback' in line and not line.startswith('recoverable-retry:'):
+            return True
+    return False
+
+
+def log_window(path, offset):
+    with path.open('rb') as stream:
+        stream.seek(offset if path.stat().st_size >= offset else 0)
+        return stream.read().decode('utf-8', errors='replace')
+
+
 def run_check(name, artifacts, check):
     path = artifacts / (name + '.log')
     try:
@@ -585,6 +600,8 @@ def main():
                 by_pid[row['ProcessId']] = row
         return descendant_identities(list(by_pid.values()), root_pid)
 
+    log_offsets = {}
+
     def safety():
         import ctypes
         import subprocess as sp
@@ -607,7 +624,7 @@ def main():
         for log in artifacts.rglob('*.log'):
             if log.parent == artifacts:
                 continue  # Harness failure logs intentionally contain diagnostic tracebacks.
-            if 'Traceback' in log.read_text(encoding='utf-8', errors='replace'):
+            if has_crash_traceback(log_window(log, log_offsets.get(log, 0))):
                 raise RuntimeError('traceback in ' + str(log))
         return 'No unhandled-exception window, isolated packaged process, or profile traceback found.'
 
@@ -632,6 +649,7 @@ def main():
     try:
         results = []
         for name, check in checks:
+            log_offsets = {p: p.stat().st_size for p in artifacts.rglob('*.log') if p.parent != artifacts}
             tracked = set()
             stop = threading.Event()
             def monitor():

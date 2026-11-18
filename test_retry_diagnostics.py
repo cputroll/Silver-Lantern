@@ -10,6 +10,31 @@ import launcher
 
 
 class RetryDiagnosticsTests(unittest.TestCase):
+    def test_recoverable_retry_traceback_is_labeled_on_every_line(self):
+        operation = mock.Mock(side_effect=[PermissionError('locked'), None])
+        with mock.patch.object(app, 'log') as logger, mock.patch.object(app.time, 'sleep'):
+            app._retry_locked(operation)
+        traces = [str(c.args[0]) for c in logger.call_args_list if 'Traceback' in str(c.args[0])]
+        self.assertEqual(len(traces), 1)
+        self.assertTrue(all(line.startswith('recoverable-retry:') for line in traces[0].splitlines()))
+
+    def test_expected_parent_exit_is_not_logged_as_crash(self):
+        with mock.patch.object(app, 'log') as logger:
+            app._log_assembly_exception(app.ParentExited())
+        self.assertNotIn('Traceback', str(logger.call_args))
+        with mock.patch.object(app, 'log') as logger:
+            try:
+                raise RuntimeError('real crash')
+            except RuntimeError as exc:
+                app._log_assembly_exception(exc)
+        self.assertIn('Traceback', str(logger.call_args))
+
+    def test_nonretryable_error_traceback_remains_plain(self):
+        with mock.patch.object(app, 'log') as logger:
+            with self.assertRaises(FileNotFoundError):
+                app._retry_locked(mock.Mock(side_effect=FileNotFoundError('missing')))
+        self.assertTrue(any(str(c.args[0]).startswith('Traceback') for c in logger.call_args_list))
+
     def test_lock_timeout_is_not_network_or_generic(self):
         err = game_channel.LockTimeout('PRIVATE LOCK DETAILS')
         friendly = app.friendly(err)

@@ -711,9 +711,10 @@ def _retry_locked(operation, budget=60.0, executable=False, path=None):
                 log(f'File lock released path={path} elapsed_seconds={time.monotonic() - started:.3f} attempts={attempt}')
             return result
         except OSError as exc:
-            log(traceback.format_exc())
             if not isinstance(exc, PermissionError) and getattr(exc, 'winerror', None) not in (32, 33):
+                log(traceback.format_exc())
                 raise
+            log('\n'.join('recoverable-retry: ' + line for line in traceback.format_exc().splitlines()))
             now = time.monotonic()
             waited = _FILE_LOCK_WAITED.get(key, 0.0) if key is not None else 0.0
             remaining = deadline - now
@@ -1987,6 +1988,13 @@ class SegmentMismatch(ValueError):
         self.path = path
 
 
+def _log_assembly_exception(exc):
+    if isinstance(exc, ParentExited):
+        log('Parent exited; assembly stopping')
+    else:
+        log(traceback.format_exc())
+
+
 def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=False):
     """Download bundles in order while workers consume segments in file order."""
     cond = threading.Condition()
@@ -2133,7 +2141,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                 finally:
                     state['lock'].release()
         except BaseException as exc:
-            log(traceback.format_exc())
+            _log_assembly_exception(exc)
             fail(exc)
         finally:
             with cond:
@@ -2161,7 +2169,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                 shared['slots'] += 1
                 cond.notify_all()
     except BaseException as exc:
-        log(traceback.format_exc())
+        _log_assembly_exception(exc)
         fail(exc)
     finally:
         with cond:
