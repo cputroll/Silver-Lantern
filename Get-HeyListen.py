@@ -28,6 +28,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -763,6 +764,66 @@ def _open_with_retry(path: Path, mode: str):
     return _retry_locked(open_if_alive, path=path)
 
 
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+
+
+def _leftover_kind(path: Path) -> str:
+    """Classify what occupies `path` without following it.
+
+    Returns 'absent', 'plain' (a regular file of ours), 'reparse' (a symlink,
+    junction, or any other reparse point), or 'other' (anything else)."""
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return 'absent'
+    if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+        return 'reparse'
+    return 'plain' if stat.S_ISREG(info.st_mode) else 'other'
+
+
+def _refuse_staging_leftover(path: Path) -> None:
+    raise UserError(
+        f'The game folder contains an invalid leftover link: {path}.',
+        f'Delete that item (it is not part of the game) and run this again. Nothing it points to was changed.',
+        'invalid leftover link')
+
+
+def _create_staging_exclusive(path: Path, attempts: int = 3):
+    """Open a staging or checkpoint file for writing with exclusive create
+    (O_CREAT|O_EXCL). An existing name fails EEXIST and is never followed or
+    truncated: a reparse point is refused with a classified error so its
+    referent stays untouched, while a plain leftover of ours from an
+    interrupted run is replaced. The handle is created and held by this run,
+    so the race is closed by construction."""
+    for _ in range(attempts):
+        try:
+            check_parent_alive()
+            return path.open('xb')
+        except FileExistsError:
+            kind = _leftover_kind(path)
+            if kind == 'plain':
+                # Nothing verified this leftover, so replace it; appending
+                # through an unverified name is never an option.
+                _retry_locked(lambda: path.unlink(missing_ok=True), path=path)
+            elif kind != 'absent':
+                _refuse_staging_leftover(path)
+    _refuse_staging_leftover(path)
+
+
+def _open_staging_append(path: Path):
+    """Append to a staging file that this run created or whose content a
+    checkpoint already verified. The name is revalidated at use so a link
+    swapped in since then is refused instead of followed."""
+    if _leftover_kind(path) == 'reparse':
+        _refuse_staging_leftover(path)
+    return _open_with_retry(path, 'ab')
+
+
+def _write_staging_exclusive(path: Path, data: bytes) -> None:
+    with _create_staging_exclusive(path) as stream:
+        stream.write(data)
+
+
 @contextlib.contextmanager
 def keep_awake():
     """Stop the PC sleeping mid-download (ES_CONTINUOUS | ES_SYSTEM_REQUIRED)."""
@@ -1160,7 +1221,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
 
     def save():
         temp = Path(str(side) + '.tmp')
-        temp.write_text(json.dumps(state), encoding='utf-8')
+        _write_staging_exclusive(temp, json.dumps(state).encode('utf-8'))
         _replace_with_retry(temp, side)
 
     def worker(i, response=None, retries_used=0):
@@ -1959,6 +2020,10 @@ def restore_segment_checkpoint(temp, checkpoint, item):
     """Trust a retained prefix only after checking every segment hash."""
     hasher = hashlib.sha256()
     try:
+        if _leftover_kind(checkpoint) == 'reparse' or _leftover_kind(temp) == 'reparse':
+            # A link planted over a staging or checkpoint name is never read
+            # through; dropping both removes only the link itself.
+            raise ValueError('leftover link in place of a checkpoint')
         info = json.loads(checkpoint.read_text(encoding='utf-8'))
         index = info['next_index']
         if type(index) is not int or not 0 < index < len(item['segments']):
@@ -2109,7 +2174,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                         if state['temp'].parent not in created_parents:
                             state['temp'].parent.mkdir(parents=True, exist_ok=True)
                             created_parents.add(state['temp'].parent)
-                    with _open_with_retry(state['temp'], 'wb' if index == 0 else 'ab') as output:
+                    with (_create_staging_exclusive(state['temp']) if index == 0
+                          else _open_staging_append(state['temp'])) as output:
                         state['started'] = True
                         while remaining:
                             check_parent_alive()
@@ -2128,7 +2194,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                     if not state['direct'] and state['next'] < len(state['item']['segments']):
                         checkpoint = Path(str(state['temp']) + '.json')
                         staging = Path(str(checkpoint) + '.tmp')
-                        staging.write_text(json.dumps({'next_index': state['next'], 'bytes_written': state['temp'].stat().st_size}), encoding='utf-8')
+                        _write_staging_exclusive(staging, json.dumps(
+                            {'next_index': state['next'], 'bytes_written': state['temp'].stat().st_size}).encode('utf-8'))
                         _replace_with_retry(staging, checkpoint)
                     if state['next'] == len(state['item']['segments']):
                         if state['temp'].stat().st_size != state['item']['size'] or state['hasher'].hexdigest() != state['item']['sha256']:
@@ -2188,6 +2255,10 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                 checkpoint = Path(str(state['temp']) + '.json')
                 if soft and not state['direct'] and checkpoint.exists():
                     try:
+                        if _leftover_kind(state['temp']) != 'plain':
+                            # Revalidate at use: only a plain file this run
+                            # verified may be truncated, never a swapped link.
+                            raise ValueError('staging file was replaced')
                         length = json.loads(checkpoint.read_text(encoding='utf-8'))['bytes_written']
                         with state['temp'].open('r+b') as output:
                             output.truncate(length)
@@ -2405,7 +2476,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 try:
                     file_hash = hashlib.sha256()
                     check_parent_alive()
-                    with _open_with_retry(temp, 'wb') as output:
+                    with _create_staging_exclusive(temp) as output:
                         for part in item['segments' if v2 else 'parts']:
                             with (cache / part['asset']).open('rb') as source:
                                 source.seek(part['offset'] if v2 else 0)
