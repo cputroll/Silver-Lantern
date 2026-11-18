@@ -45,7 +45,7 @@ class PackTest(unittest.TestCase):
                 self.assertEqual((root / 'out' / asset['asset']).read_bytes(), (root / 'again' / asset['asset']).read_bytes())
 
 
-def pack(source, out, limit=LIMIT, prefix=''):
+def pack(source, out, limit=LIMIT, prefix='', include_settings=False):
     if not isinstance(prefix, str) or (prefix and not re.fullmatch(r'[A-Za-z0-9_-]+', prefix)):
         raise ValueError('invalid asset prefix')
     if not 0 < limit < 2 * 1024**3:
@@ -56,11 +56,19 @@ def pack(source, out, limit=LIMIT, prefix=''):
     out.mkdir(parents=True, exist_ok=True)
     paths = []
     for root, dirs, files in os.walk(source, followlinks=False):
-        dirs[:] = sorted(d for d in dirs if d.lower() not in ('user', 'dist-release'))
+        dirs[:] = sorted(d for d in dirs if d.lower() not in ('user', 'dist-release', '.heylisten-get', '.heylisten-parts') and not d.lower().startswith('.heylisten-new'))
         for name in dirs + files:
             if (Path(root) / name).is_symlink():
                 raise ValueError('symlinks are not supported')
-        paths.extend(Path(root) / n for n in files if not n.lower().endswith('.log'))
+        for name in files:
+            lower = name.lower()
+            if (lower.endswith(('.log', '.update-backup')) or '.heylisten-new' in lower
+                    or (lower == 'hookshot_options.ini' and not include_settings)):
+                continue
+            if Path(root) == source and lower.endswith('.exe') and lower.startswith(
+                    ('ocarina of time', 'run silver lantern', 'silverlantern')):
+                continue
+            paths.append(Path(root) / name)
     paths.sort(key=lambda p: p.relative_to(source).as_posix())
     manifest = {'version': 2, 'build': 'game-v1', 'layout': 'whole', 'total_bytes': 0, 'files': [], 'assets': []}
     bundle = None; bundle_path = None; bundle_index = 0; chunk_index = 0
@@ -119,11 +127,12 @@ def main():
     parser.add_argument('--source', type=Path); parser.add_argument('--out', type=Path)
     parser.add_argument('--manifest-out', type=Path); parser.add_argument('--self-test', action='store_true')
     parser.add_argument('--prefix', default='')
+    parser.add_argument('--include-settings', action='store_true', help='include hookshot_options.ini (excluded by default because it is user data)')
     args = parser.parse_args()
     if args.self_test:
         return 0 if unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(PackTest)).wasSuccessful() else 1
     if not args.source or not args.out: parser.error('--source and --out are required')
-    result = pack(args.source, args.out, prefix=args.prefix)
+    result = pack(args.source, args.out, prefix=args.prefix, include_settings=args.include_settings)
     target = args.manifest_out or args.out / 'game-manifest.json'
     target.write_text(json.dumps(result, ensure_ascii=False, separators=(',', ':')) + '\n', encoding='utf-8')
     return 0
