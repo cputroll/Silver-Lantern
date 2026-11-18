@@ -689,6 +689,41 @@ def _record_launcher_copy(destination, target):
     _save_launcher_records(destination, records)
 
 
+def _delete_verified_launcher(path, expected):
+    # A deny-write/deny-delete handle prevents a pathname swap while hashing.
+    # Delete through that same handle, never through the subsequently looked-up path.
+    if os.name != 'nt':
+        return False  # No equivalent portable atomic verify-and-delete primitive.
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    kernel.SetFileInformationByHandle.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateFileW(str(path), 0x80000000 | 0x00010000, 1, None, 3, 0x00200000, None)
+    if handle == ctypes.c_void_p(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
+    with os.fdopen(fd, 'rb') as stream:
+        digest = hashlib.sha256()
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+        if digest.hexdigest() != expected:
+            return False
+        disposition = wintypes.BOOL(True)
+        if not kernel.SetFileInformationByHandle(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return True
+
+
 def _cleanup_stale_siblings(destination, keep):
     destination = Path(destination)
     records = _launcher_records(destination)
@@ -701,8 +736,7 @@ def _cleanup_stale_siblings(destination, keep):
         try:
             if stale.is_symlink() or stale.resolve() in (keep, running):
                 continue
-            if _launcher_hash(stale) == digest:
-                stale.unlink()
+            if _delete_verified_launcher(stale, digest):
                 del records[name]
         except OSError:
             continue
