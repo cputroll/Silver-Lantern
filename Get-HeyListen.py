@@ -2018,10 +2018,10 @@ def verify_write_boundary(root: Path, target: Path, entry: str) -> None:
     component became a reparse point, could not be inspected, or resolved
     containment broke, so a junction swapped in after validation is refused.
     Staging files are created exclusively, so their names cannot be
-    pre-planted. This narrows the substitution window to the microseconds
-    between this check and the open/replace against a same-user local
-    actor; it does not eliminate it, and remote package entries are refused
-    by validation and by this check alike."""
+    pre-planted. This narrows, but does not eliminate, the substitution
+    window between this check and the open/replace against a same-user
+    local actor; remote package entries are refused by validation and by
+    this check alike."""
     chain = []
     current = target
     while current != root:
@@ -2049,7 +2049,9 @@ def verify_write_boundary(root: Path, target: Path, entry: str) -> None:
         resolved_target = _comparable_resolved_path(target.resolve())
         resolved_root = _comparable_resolved_path(root.resolve())
     except OSError:
-        raise InvalidGamePath(root.resolve(), entry, 'boundary resolution failed')
+        # Never resolve again inside the handler: a failing resolve must
+        # surface as the classified error, not a raw OSError.
+        raise InvalidGamePath(root, entry, 'boundary resolution failed')
     if not resolved_target.is_relative_to(resolved_root):
         raise InvalidGamePath(resolved_root, entry, 'boundary containment failed')
 
