@@ -781,7 +781,13 @@ def relocate_launcher(folder):
                     copy.close()
                     target.unlink(missing_ok=True)
                     raise
+        if _launcher_hash(source) != _launcher_hash(target):
+            raise OSError('Launcher copy verification failed; please retry.')
         _record_launcher_copy(destination, target)
+        try:
+            _cleanup_stale_siblings(destination, target)
+        except Exception as exc:
+            log_message(f'Launcher cleanup: {exc}')
         log_message(f'Launcher relocation: {target}')
         try:
             register_install(destination, exe=target)
