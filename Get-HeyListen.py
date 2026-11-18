@@ -1804,8 +1804,8 @@ def restore_segment_checkpoint(temp, checkpoint, item):
                     raise ValueError('checkpoint hash mismatch')
         return index, hasher
     except (OSError, ValueError, KeyError, TypeError):
-        temp.unlink(missing_ok=True)
-        checkpoint.unlink(missing_ok=True)
+        _retry_locked(lambda: temp.unlink(missing_ok=True))
+        _retry_locked(lambda: checkpoint.unlink(missing_ok=True))
         return 0, hashlib.sha256()
 
 
