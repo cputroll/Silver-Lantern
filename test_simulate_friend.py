@@ -1,0 +1,18 @@
+import tempfile
+import unittest
+from pathlib import Path
+from qa.simulate_friend import fixture_manifest, run_check
+
+
+class SimulatorTests(unittest.TestCase):
+    def test_fixture_manifest_contains_small_valid_asset(self):
+        with tempfile.TemporaryDirectory() as d:
+            manifest = fixture_manifest(Path(d))
+            self.assertLess(manifest.stat().st_size, 10000)
+            self.assertTrue(list((Path(d) / 'assets').glob('*.tar')))
+
+    def test_seeded_failure_is_reported(self):
+        with tempfile.TemporaryDirectory() as d:
+            ok = run_check('seeded crash', Path(d), lambda: (_ for _ in ()).throw(RuntimeError('seeded crash')))
+            self.assertFalse(ok)
+            self.assertIn('seeded crash', (Path(d) / 'seeded crash.log').read_text())

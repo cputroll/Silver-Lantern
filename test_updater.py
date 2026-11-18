@@ -12,6 +12,20 @@ app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
 
 class UpdaterTests(unittest.TestCase):
+    def test_unsigned_local_update_refused_without_test_seam(self):
+        with mock.patch.dict('os.environ', {'SILVER_LANTERN_ALLOW_LOCAL_UPDATE': ''}), mock.patch.object(sys, 'frozen', True, create=True), mock.patch.object(app, '_self_update_started', False):
+            with self.assertRaisesRegex(ValueError, 'unsigned local updates are disabled'):
+                app.check_self_update(mock.Mock(), {}, [], 'fixture.zip')
+
+    def test_local_update_requires_explicit_test_opt_in(self):
+        with tempfile.TemporaryDirectory() as td:
+            target = Path(td) / 'old.exe'; target.write_bytes(b'old')
+            archive = Path(td) / 'release.zip'; archive.write_bytes(b'fixture')
+            with mock.patch.dict('os.environ', {'SILVER_LANTERN_ALLOW_LOCAL_UPDATE': '1'}), mock.patch.object(sys, 'frozen', True, create=True), mock.patch.object(sys, 'executable', str(target)), mock.patch.object(app, '_self_update_started', False), mock.patch.object(app, 'stage_executable', return_value=Path(td) / 'replacement.exe'), mock.patch.object(app.subprocess, 'Popen') as launch:
+                with self.assertRaises(SystemExit):
+                    app.check_self_update(mock.Mock(), {}, ['--self-update'], str(archive))
+                self.assertTrue(launch.called)
+
     def test_file_replace_waits_for_transient_windows_lock(self):
         locked = OSError('sharing violation')
         locked.winerror = 32

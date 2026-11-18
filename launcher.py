@@ -27,11 +27,13 @@ BASE = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) el
 STATE_DIR = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'SilverLantern'
 CONFIG = STATE_DIR / 'launcher.json'
 LOG = STATE_DIR / 'launcher.log'
-# Test-only isolation overrides, read once: registry parent under HKCU and shortcut directories.
-# Empty/unset values preserve normal Windows registration and known-folder behavior.
+# Test-only isolation overrides, read once: registry parent under HKCU, shortcut directories,
+# and a local game manifest for the GUI install worker.
+# Empty/unset values preserve normal registration, known folders, and game channel behavior.
 _TEST_REG_ROOT = os.environ.get('SILVER_LANTERN_REG_ROOT') or r'Software\Microsoft\Windows\CurrentVersion\Uninstall'
 _TEST_DESKTOP_DIR = os.environ.get('SILVER_LANTERN_DESKTOP_DIR') or None
 _TEST_STARTMENU_DIR = os.environ.get('SILVER_LANTERN_STARTMENU_DIR') or None
+_TEST_GAME_MANIFEST = os.environ.get('SILVER_LANTERN_GAME_MANIFEST') or None
 GAME_NAME = 'Legend of Zelda Ocarina of Time'
 MANIFEST_URL = 'https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/game-manifest.json'
 
@@ -495,6 +497,8 @@ def fetch_channel_manifest(folder, session):
         spec = importlib.util.spec_from_file_location('silver_manifest_parser', ROOT / 'Get-HeyListen.py')
         parser = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(parser)
+    if _TEST_GAME_MANIFEST:
+        return parser.parse_game_manifest(Path(_TEST_GAME_MANIFEST).read_text(encoding='utf-8-sig'))
     with game_channel.install_lock(folder):
         return game_channel.fetch_for_folder(folder, lambda url: game_channel.fetch_bytes(session, url), lambda data: parser.parse_game_manifest(data.decode('utf-8-sig')), legacy_url=game_manifest_url())
 
@@ -1705,6 +1709,8 @@ class LauncherUI:
         self.state = State.UPDATING if update else State.DOWNLOADING
         self.events = ProgressEvents()
         args = ['--no-self-update', '--update-game' if update else '--install-game', str(self.folder)]
+        if _TEST_GAME_MANIFEST and not update:
+            args += ['--game-manifest', _TEST_GAME_MANIFEST]
         self.set_screen('progress')
         threading.Thread(target=worker_command, args=(self.events, args), daemon=True).start()
 

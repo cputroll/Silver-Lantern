@@ -1409,7 +1409,21 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
         log("Self-update is available only for the packaged executable.")
         return
     if local_zip:
-        raise ValueError("unsigned local updates are disabled")
+        # Test-only opt-in: never accept unsigned local updates by default.
+        if os.environ.get('SILVER_LANTERN_ALLOW_LOCAL_UPDATE') != '1':
+            raise ValueError("unsigned local updates are disabled")
+        target = Path(sys.executable).resolve()
+        stage = Path(tempfile.mkdtemp(prefix='.heylisten-update-', dir=target.parent))
+        try:
+            replacement = stage_executable(Path(local_zip).resolve(strict=True), stage, target.name)
+            helper = stage / 'update-helper.exe'
+            shutil.copy2(target, helper)
+            subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), '--update-only-internal', 'local fixture'], cwd=str(target.parent))
+            _self_update_started = True
+        except BaseException:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+        sys.exit(0)
     # Executable updates must not be redirected by the mutable sources manifest.
     rel = latest_app_release(s, "cputroll/Silver-Lantern")
     if rel is None:
@@ -1465,6 +1479,17 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
 # ---------------------------------------------------------------- main
 GAME_MANIFEST_URL = "https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/game-manifest.json"
 GAME_ASSET_URL = "https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/"
+
+
+def game_asset_base():
+    """Allow only a loopback fixture server for isolated test downloads."""
+    value = os.environ.get('SILVER_LANTERN_TEST_ASSET_URL')
+    if not value:
+        return GAME_ASSET_URL
+    parsed = urlparse(value)
+    if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or not parsed.port or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError('fixture asset URL must be an HTTP 127.0.0.1 endpoint')
+    return value.rstrip('/') + '/'
 
 
 def validate_bundle_order(man):
@@ -1965,7 +1990,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                     verified_assets.add(part['asset'])
                     return
                 partial.unlink()
-            url = GAME_ASSET_URL + quote(part['asset'])
+            url = game_asset_base() + quote(part['asset'])
             if part['size'] >= PARALLEL_THRESHOLD and download_streams() > 1:
                 parallel_download(stream_session, url, dest, part['size'], part['sha256'], progress, download_streams())
             else:
