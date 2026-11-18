@@ -877,6 +877,12 @@ def gui_child_text(text):
     return re.sub(r'\s*(?:\.\s*){3,}', lambda m: ' ' if m.start() and text[:m.start()].rstrip().endswith(':') else ': ', text).strip()
 
 
+def friendly_gui_text(text):
+    """Remove console formatting and filesystem paths from friend-facing prose."""
+    text = gui_child_text(text)
+    return re.sub(r'(?i)(?:[a-z]:[\\/]|\\\\|/)[^\s,;]+', 'a file', text)
+
+
 CHILD_IDLE_TIMEOUT = 120
 
 
@@ -962,7 +968,7 @@ def worker_command(events, args):
                     message += ' What to do: ' + action
             else:
                 message = 'Problem: The installation could not finish. What to do: Please try again.'
-            events.publish('error', message)
+            events.publish('error', friendly_gui_text(message))
     except Exception as exc:
         log_message(f'Game installation or update failed: {exc}')
         events.publish('error', str(exc))
@@ -983,7 +989,7 @@ def tool_update_worker(events, args):
                     message += ' What to do: ' + gui_child_text(action)
             else:
                 message = 'Problem: The launcher update could not finish. What to do: Please try again later.'
-            events.publish('error', message)
+            events.publish('error', friendly_gui_text(message))
         elif 'SILVERLANTERN_UPDATE_HANDOFF' in output.splitlines():
             events.publish('tool_complete', 0)
         else:

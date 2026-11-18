@@ -185,6 +185,12 @@ class StateTests(unittest.TestCase):
         self.assertNotIn('Details were saved to:', error)
         self.assertNotIn('C:\\temp\\HeyListen-Get.log', error)
 
+    def test_friendly_gui_text_redacts_paths_and_console_leaders(self):
+        text = launcher.friendly_gui_text(r'Problem: C:\Users\friend\file.bin failed ... retry /home/friend/file.bin')
+        self.assertNotIn(r'C:\Users', text)
+        self.assertNotIn('/home/friend', text)
+        self.assertNotIn('...', text)
+
     def test_friendly_blocks_prefers_the_last_problem(self):
         lines = ['  Problem: first problem', '  What to do: first action',
                  '  Problem: second problem', '  What to do: second action',
