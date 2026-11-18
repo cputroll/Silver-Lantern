@@ -42,6 +42,14 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 
 try:
+    import build_flags
+except ModuleNotFoundError as exc:
+    if exc.name != 'build_flags' or getattr(sys, 'frozen', False):
+        raise
+    from types import SimpleNamespace
+    build_flags = SimpleNamespace(QA_SEAMS=True)
+
+try:
     from curl_cffi import requests
 except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
@@ -1462,7 +1470,7 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
         return
     if local_zip:
         # Test-only opt-in: never accept unsigned local updates by default.
-        if os.environ.get('SILVER_LANTERN_ALLOW_LOCAL_UPDATE') != '1':
+        if not build_flags.QA_SEAMS or os.environ.get('SILVER_LANTERN_ALLOW_LOCAL_UPDATE') != '1':
             raise ValueError("unsigned local updates are disabled")
         target = Path(sys.executable).resolve()
         stage = Path(tempfile.mkdtemp(prefix='.heylisten-update-', dir=target.parent))
@@ -1541,7 +1549,7 @@ GAME_ASSET_URL = "https://github.com/cputroll/Silver-Lantern/releases/download/g
 
 def game_asset_base():
     """Allow only a loopback fixture server for isolated test downloads."""
-    value = os.environ.get('SILVER_LANTERN_TEST_ASSET_URL')
+    value = os.environ.get('SILVER_LANTERN_TEST_ASSET_URL') if build_flags.QA_SEAMS else None
     if not value:
         return GAME_ASSET_URL
     parsed = urlparse(value)
@@ -2370,6 +2378,7 @@ def main() -> int:
         return 0
     ap = argparse.ArgumentParser(description="One-click HeyListen + game downloader")
     ap.add_argument('--gui', action='store_true', help=argparse.SUPPRESS)
+    ap.add_argument('--internal-trust-check', action='store_true', help=argparse.SUPPRESS)
     ap.add_argument("--manifest", help="sources.json path or URL (default: next to this script)")
     ap.add_argument("--out", default=None,
                     help="folder for the .nup and builder (default: Downloads)")
@@ -2413,6 +2422,17 @@ def main() -> int:
     a = ap.parse_args()
     if getattr(sys, 'frozen', False):
         ensure_cli_console()
+
+    if a.internal_trust_check:
+        try:
+            check_self_update(None, {}, [], 'nonexistent-fixture.zip')
+        except ValueError as exc:
+            refused = str(exc) == 'unsigned local updates are disabled'
+        else:
+            refused = False
+        print(json.dumps({'manifest_override': launcher._TEST_GAME_MANIFEST,
+                          'asset_url': game_asset_base(), 'local_update_refused': refused}))
+        return 0
 
     if a.uninstall:
         import launcher

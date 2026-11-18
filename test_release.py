@@ -23,6 +23,7 @@ class ReleaseTests(unittest.TestCase):
         subprocess.run(['powershell', '-NoProfile', '-File', str(root / 'release.ps1'), '-Tag', 'v' + version, '-NoPublish'], cwd=root, check=True, timeout=600)
         output = root / 'dist-release'
         archive = output / 'HeyListen-Get.zip'
+        subprocess.run(['python', str(root / 'qa' / 'check_production_trust.py'), '--zip', str(archive)], cwd=root, check=True, timeout=120)
         sums = (output / 'SHA256SUMS.txt').read_text(encoding='utf-8-sig').splitlines()
         self.assertIn(hashlib.sha256(archive.read_bytes()).hexdigest() + '  HeyListen-Get.zip', sums)
         with zipfile.ZipFile(archive) as z:

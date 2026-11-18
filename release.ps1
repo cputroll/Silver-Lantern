@@ -2,11 +2,14 @@
 [CmdletBinding()]
 param(
   [Parameter(Mandatory)] [string]$Tag,
-  [switch]$NoPublish
+  [switch]$NoPublish,
+  [switch]$Qa
 )
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $here 'build-flags.ps1')
+if ($Qa -and -not $NoPublish) { throw 'QA builds cannot be published.' }
 Push-Location $here
 try {
   $version = (Get-Content sources.json -Raw | ConvertFrom-Json).tool.version
@@ -40,7 +43,10 @@ try {
   $backdrop = (Resolve-Path (Join-Path $here 'assets\ui-backdrop.bmp')).Path
   $ttfDll = (python -c "import pathlib,sdl2dll; print(pathlib.Path(sdl2dll.__file__).parent / 'dll' / 'SDL2_ttf.dll')").Trim()
   if (-not (Test-Path $ttfDll -PathType Leaf)) { throw 'SDL2_ttf.dll not found; install launcher-requirements.txt.' }
-  python -m PyInstaller --noconfirm --clean --onefile --noconsole --name SilverLantern --icon $iconPath --hidden-import launcher --hidden-import curl_cffi --collect-all curl_cffi --add-binary "${sdlDll};." --add-binary "${ttfDll};." --add-data "${backdrop};assets" --distpath $stage --workpath $build --specpath $spec Get-HeyListen.py
+  if (Test-Path (Join-Path $here 'build_flags.py')) { throw 'Unexpected source-tree build_flags.py; remove it before packaging.' }
+  $flagsDir = Join-Path $out 'flags'
+  Write-BuildFlags -Directory $flagsDir -Qa:$Qa
+  python -m PyInstaller --paths $flagsDir --hidden-import build_flags --noconfirm --clean --onefile --noconsole --name SilverLantern --icon $iconPath --hidden-import launcher --hidden-import curl_cffi --collect-all curl_cffi --add-binary "${sdlDll};." --add-binary "${ttfDll};." --add-data "${backdrop};assets" --distpath $stage --workpath $build --specpath $spec Get-HeyListen.py
   if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed ($LASTEXITCODE)." }
   $exe = Join-Path $stage 'SilverLantern.exe'
   if (-not (Test-Path $exe -PathType Leaf)) { throw 'PyInstaller did not produce SilverLantern.exe.' }
@@ -69,13 +75,14 @@ try {
   Copy-Item $sdlDll $support
   Copy-Item sources.json, README.md, Apply-HeyListen-Preset.ps1, SilverLantern-Get.cmd, SilverLantern-Preset.cmd, Update-Game.ps1, Watch-Game.ps1, SilverLantern-AutoUpdate.cmd $support
   [System.IO.File]::WriteAllText((Join-Path $stage 'Read me.txt'), "Double-click Run Silver Lantern.exe to start.`r`nMore information is in the support folder.`r`n", [System.Text.UTF8Encoding]::new($false))
-  $zip = Join-Path $out 'HeyListen-Get.zip'
+  $artifactName = Get-BuildArtifactName -Qa:$Qa
+  $zip = Join-Path $out $artifactName
   Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
   $sha = [System.Security.Cryptography.SHA256]::Create()
   $fs = [System.IO.File]::OpenRead($zip)
   try { $hash = ([System.BitConverter]::ToString($sha.ComputeHash($fs)) -replace '-', '').ToLowerInvariant() }
   finally { $fs.Dispose(); $sha.Dispose() }
-  [System.IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), "$hash  HeyListen-Get.zip`n", [System.Text.UTF8Encoding]::new($false))
+  if (-not $Qa) { [System.IO.File]::WriteAllText((Join-Path $out 'SHA256SUMS.txt'), "$hash  $artifactName`n", [System.Text.UTF8Encoding]::new($false)) }
   Write-Host "Packaged $zip ($hash)"
   if (-not $NoPublish) {
     gh release create $Tag $zip (Join-Path $out 'SHA256SUMS.txt') --title "HeyListen Get $Tag" --generate-notes

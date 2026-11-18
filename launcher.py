@@ -21,6 +21,13 @@ try:
 except ImportError:
     winreg = None
 import game_settings
+try:
+    import build_flags
+except ModuleNotFoundError as exc:
+    if exc.name != 'build_flags' or getattr(sys, 'frozen', False):
+        raise
+    from types import SimpleNamespace
+    build_flags = SimpleNamespace(QA_SEAMS=True)
 
 ROOT = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 BASE = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
@@ -33,7 +40,7 @@ LOG = STATE_DIR / 'launcher.log'
 _TEST_REG_ROOT = os.environ.get('SILVER_LANTERN_REG_ROOT') or r'Software\Microsoft\Windows\CurrentVersion\Uninstall'
 _TEST_DESKTOP_DIR = os.environ.get('SILVER_LANTERN_DESKTOP_DIR') or None
 _TEST_STARTMENU_DIR = os.environ.get('SILVER_LANTERN_STARTMENU_DIR') or None
-_TEST_GAME_MANIFEST = os.environ.get('SILVER_LANTERN_GAME_MANIFEST') or None
+_TEST_GAME_MANIFEST = (os.environ.get('SILVER_LANTERN_GAME_MANIFEST') or None) if build_flags.QA_SEAMS else None
 _TEST_GUI_INSTALL = os.environ.get('SILVER_LANTERN_TEST_GUI_INSTALL') == '1'
 _TEST_VIDEO_DRIVER = os.environ.get('SDL_VIDEODRIVER')
 
