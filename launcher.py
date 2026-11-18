@@ -472,6 +472,21 @@ def installed_manifest_digest(folder):
         return None
 
 
+def channel_error_message(exc):
+    import game_channel
+    if isinstance(exc, game_channel.StaleChannel):
+        return 'Problem: The update information is out of date. What to do: Try again later.'
+    if isinstance(exc, game_channel.CorruptState):
+        return 'Problem: The saved update information is damaged. What to do: Contact support for help repairing it.'
+    if isinstance(exc, game_channel.ChecksumMismatch):
+        return 'Problem: The update information failed its safety check. What to do: Try again later.'
+    if isinstance(exc, TimeoutError):
+        return 'Problem: Another installation or update is busy. What to do: Wait for it to finish, then retry.'
+    if isinstance(exc, ValueError):
+        return 'Problem: The update information is invalid. What to do: Try again later.'
+    return 'Problem: Could not reach the update server. What to do: Check your connection and retry.'
+
+
 def fetch_channel_manifest(folder, session):
     import game_channel
     import importlib.util
@@ -1452,14 +1467,15 @@ class LauncherUI:
                             manifest = fetch_channel_manifest(self.folder, client)
                             events.publish('status', 'Planning…')
                         break
-                    except Exception:
-                        if attempt:
+                    except Exception as exc:
+                        if attempt or isinstance(exc, (ValueError, TimeoutError)):
                             raise
                         events.publish('status', 'Connection stalled — retrying…')
                 digest = manifest_digest(manifest)
                 events.publish('check', (manifest.get('revision'), digest))
-            except Exception:
-                events.publish('offline', 'Could not reach the update server')
+            except Exception as exc:
+                log_message(f'Game channel check failed: {exc}')
+                events.publish('offline', channel_error_message(exc))
             try:
                 events.publish('status', 'Checking for updates…')
                 from curl_cffi import requests as curl_requests

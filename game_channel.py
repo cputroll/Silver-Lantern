@@ -13,15 +13,28 @@ ASSET_BASE = 'https://github.com/cputroll/Silver-Lantern/releases/download/game-
 LEGACY_URL = ASSET_BASE + 'game-manifest.json'
 
 
+class CorruptState(ValueError):
+    """Saved channel state cannot be trusted."""
+
+
+class ChecksumMismatch(ValueError):
+    """Channel content did not match its verified digest."""
+
+
 def load_state(folder):
     path = Path(folder) / '.heylisten-get' / 'channel-state.json'
     try:
         state = json.loads(path.read_text(encoding='utf-8'))
     except FileNotFoundError:
         return 0, None
-    revision, digest = state['revision'], state['sha256']
+    except (ValueError, UnicodeError) as exc:
+        raise CorruptState('invalid saved game channel state') from exc
+    try:
+        revision, digest = state['revision'], state['sha256']
+    except (KeyError, TypeError) as exc:
+        raise CorruptState('invalid saved game channel state') from exc
     if type(revision) is not int or revision < 1 or not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
-        raise ValueError('invalid saved game channel state')
+        raise CorruptState('invalid saved game channel state')
     return revision, digest
 
 
@@ -101,7 +114,7 @@ def resolve_info(fetch, minimum_revision=0, expected_digest=None, pointer_data=N
         raise ValueError('game channel revision changed content')
     data = fetch(ASSET_BASE + name)
     if hashlib.sha256(data).hexdigest() != digest:
-        raise ValueError('game channel manifest checksum mismatch')
+        raise ChecksumMismatch('game channel manifest checksum mismatch')
     return data, revision, digest
 
 
