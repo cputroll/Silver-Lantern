@@ -467,6 +467,9 @@ def friendly(exc: BaseException, resumable_bytes: int = 0) -> UserError:
     """Map a raw exception to a UserError (problem / what to do / short form)."""
     if isinstance(exc, UserError):
         return exc
+    if isinstance(exc, InvalidGamePath):
+        return UserError(f'The game package contains an invalid entry: {exc.entry}',
+                         'Tell the person who provided the game package.', 'invalid game package')
     resumes = " It resumes where it left off." if resumable_bytes else ""
     if resumable_bytes:
         resumes = f" It picks up where it left off ({human(resumable_bytes)} is already saved)."
@@ -1876,10 +1879,16 @@ class GameProgress(Progress):
         super().__init__("Downloading", total)
 
 
+class InvalidGamePath(ValueError):
+    def __init__(self, root, entry):
+        self.entry = entry
+        super().__init__(f'manifest path escapes install directory: {entry!r}; install directory: {root}')
+
+
 def game_path(root: Path, relative: str) -> Path:
     target = root.joinpath(*relative.split('/'))
     if not target.resolve().is_relative_to(root.resolve()):
-        raise ValueError('manifest path escapes install directory')
+        raise InvalidGamePath(root.resolve(), relative)
     return target
 
 
