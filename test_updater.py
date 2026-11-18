@@ -66,6 +66,31 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn('Ocarina of Time.exe', app.friendly(raised.exception).problem)
         self.assertIn('Wait a minute', app.friendly(raised.exception).action)
 
+    def test_executable_write_waits_past_two_minutes_and_logs(self):
+        clock = [0.0]
+        error = PermissionError(13, 'locked', 'game.exe.heylisten-new')
+        error.winerror = 32
+        def attempt(*args, **kwargs):
+            if clock[0] < 300:
+                raise error
+            return mock.MagicMock()
+        with mock.patch.object(Path, 'open', side_effect=attempt), mock.patch.object(app.time, 'monotonic', side_effect=lambda: clock[0]), mock.patch.object(app.time, 'sleep', side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), mock.patch.object(app, 'say') as say, mock.patch.object(app, 'log') as log:
+            app._open_with_retry(Path('game.exe.heylisten-new'), 'wb')
+        self.assertGreaterEqual(clock[0], 300)
+        self.assertTrue(say.called)
+        self.assertTrue(any('298.000' in str(c) and '32' in str(c) for c in log.call_args_list))
+        self.assertTrue(any('Windows is checking the game files' in str(c) for c in say.call_args_list))
+
+    def test_executable_rename_expiry_has_antivirus_action(self):
+        clock = [0.0]
+        error = PermissionError(13, 'locked', 'game.exe.heylisten-new')
+        with mock.patch.object(Path, 'replace', side_effect=error), mock.patch.object(app.time, 'monotonic', side_effect=lambda: clock[0]), mock.patch.object(app.time, 'sleep', side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), mock.patch.object(app, 'say'):
+            with self.assertRaises(PermissionError) as raised:
+                app._replace_with_retry(Path('game.exe.heylisten-new'), Path('game.exe'))
+        self.assertEqual(clock[0], 600)
+        self.assertEqual(app.friendly(raised.exception).problem, 'Windows is still protecting a game file.')
+        self.assertEqual(app.friendly(raised.exception).action, 'Leave this window open - it usually finishes by itself - or allow this app in your antivirus and press Retry.')
+
     def _run_update(self, args):
         release = {'tag_name': 'v999.0.0', 'assets': [
             {'name': app.UPDATE_ASSET, 'browser_download_url': 'zip', 'size': 3},

@@ -6,6 +6,25 @@ import launcher
 
 
 class DefenderTests(unittest.TestCase):
+    def setUp(self):
+        for name in ('defender_active', 'defender_exclusion_present'):
+            patcher = patch.object(launcher, name, return_value=True)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_missing_readback_retries_and_logs(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'CONFIG', Path(d) / 'launcher.json'), patch.object(launcher, 'defender_active', return_value=True), patch.object(launcher, 'defender_elevated', return_value=True) as add, patch.object(launcher, 'defender_exclusion_present', side_effect=[False, True]), patch.object(launcher, 'log_message') as log:
+            self.assertTrue(launcher.optimize_defender(Path(d) / 'game'))
+            self.assertEqual(add.call_count, 2)
+            self.assertTrue(any('verified=False' in str(c) for c in log.call_args_list))
+            self.assertTrue(any('verified=True' in str(c) for c in log.call_args_list))
+
+    def test_third_party_antivirus_skips_exclusion(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'defender_active', return_value=False), patch.object(launcher, 'defender_elevated') as add, patch.object(launcher, 'log_message') as log:
+            self.assertFalse(launcher.optimize_defender(Path(d) / 'game'))
+            add.assert_not_called()
+            self.assertFalse(any('optimizing' in str(c).lower() for c in log.call_args_list))
+
     def test_failed_permission_is_recorded_and_not_reprompted(self):
         with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'CONFIG', Path(d) / 'launcher.json'), patch.object(launcher, 'defender_elevated', side_effect=[False, True]) as elevated:
             self.assertFalse(launcher.optimize_defender(Path(d) / 'game'))

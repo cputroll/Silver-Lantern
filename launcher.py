@@ -366,20 +366,62 @@ def defender_config():
         return {}
 
 
+def defender_active():
+    if os.name != 'nt':
+        return False
+    script = ("$p=Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntivirusProduct -ErrorAction Stop; "
+              "$active=@($p | Where-Object { (($_.productState -shr 12) -band 15) -eq 1 }); "
+              "if ($active.Count -eq 0) { exit 2 }; "
+              "if (@($active | Where-Object { $_.displayName -notmatch 'Windows Defender|Microsoft Defender' }).Count) { exit 1 }; exit 0")
+    try:
+        powershell(script, timeout=15)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def defender_exclusion_present(folder):
+    script = ("$paths=(Get-MpPreference -ErrorAction Stop).ExclusionPath; "
+              "$wanted=[IO.Path]::GetFullPath(" + ps_quote(folder) + ").TrimEnd('\\'); "
+              "foreach ($p in $paths) { if ([string]::Equals([IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($p)).TrimEnd('\\'), $wanted, [StringComparison]::OrdinalIgnoreCase)) { exit 0 } }; exit 1")
+    try:
+        powershell(script, timeout=15)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def optimize_defender(folder):
     config = defender_config()
     folder = Path(folder).resolve()
+    if not defender_active():
+        log_message('Defender is not the active antivirus or its status is unavailable; continuing with file-lock waiting.')
+        return False
     state = config.get('defender_state')
     if state == 'on':
         if config.get('defender_path') == str(folder):
-            return True
-        # Never lose track of an exclusion when the game folder changes.
-        return False
+            verified = defender_exclusion_present(folder)
+            log_message(f'Defender existing exclusion verified={verified} path={folder}')
+            if verified:
+                return True
+            state = None
+        else:
+            # Never lose track of an exclusion when the game folder changes.
+            return False
     if state in ('unknown', 'declined'):
         # Previously denied or timed out; don't nag every run. Clear the config to ask again.
         return False
     log_message('Waiting for Windows permission… click Yes if Windows asks.')
-    success = defender_elevated(folder, True)
+    success = False
+    for attempt in range(1, 3):
+        added = defender_elevated(folder, True)
+        verified = defender_exclusion_present(folder) if added else False
+        log_message(f'Defender exclusion attempt={attempt} added={added} verified={verified} path={folder}')
+        if verified:
+            success = True
+            break
+        if not added:
+            break
     config['defender_state'] = 'on' if success else 'declined'
     if success:
         config['defender_path'] = str(folder)

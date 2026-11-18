@@ -478,9 +478,14 @@ def friendly(exc: BaseException, resumable_bytes: int = 0) -> UserError:
                          "disk full", resumable_bytes)
     if isinstance(exc, PermissionError) or (isinstance(exc, OSError) and winerror in (32, 33, 5)):
         name = Path(getattr(exc, "filename", None) or "a file").name
+        if getattr(exc, '_exe_lock_expired', False):
+            return UserError('Windows is still protecting a game file.',
+                             'Leave this window open - it usually finishes by itself - or allow this app in your antivirus and press Retry.',
+                             'file in use', resumable_bytes)
+        action = ("Wait a minute and run this again. If it keeps happening, allow "
+                  "SilverLantern.exe in your antivirus.")
         return UserError(f"Windows wouldn't let this tool use {name}. Usually antivirus is still scanning it.",
-                         "Wait a minute and run this again. If it keeps happening, allow "
-                         "SilverLantern.exe in your antivirus.", "file in use", resumable_bytes)
+                         action, "file in use", resumable_bytes)
     status = _http_status(exc)
     if status in (403, 404, 410) or "no download link on" in str(exc):
         return UserError("All download links are currently unavailable.",
@@ -574,34 +579,56 @@ def check_parent_alive():
             raise ParentExited() from None
 
 
-def _retry_locked(operation, budget=60.0):
+def _is_executable_path(path):
+    name = Path(path).name.lower()
+    return name.endswith('.exe') or '.exe.' in name
+
+
+def _retry_locked(operation, budget=60.0, executable=False):
     """Retry a file operation while Windows or antivirus holds the file."""
     delays = (1, 2, 5, 10)
-    deadline = time.monotonic() + budget
+    started = time.monotonic()
+    deadline = started + budget
     attempt = 0
     while True:
         check_parent_alive()
         try:
-            return operation()
+            result = operation()
+            if attempt:
+                log(f'File lock released elapsed_seconds={time.monotonic() - started:.3f} attempts={attempt}')
+            return result
         except OSError as exc:
             if not isinstance(exc, PermissionError) and getattr(exc, 'winerror', None) not in (32, 33):
                 raise
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            remaining = deadline - now
+            log(f'File lock retry elapsed_seconds={now - started:.3f} winerror={getattr(exc, "winerror", None)} errno={exc.errno} attempt={attempt + 1}')
             if remaining <= 0:
+                if executable:
+                    exc._exe_lock_expired = True
                 raise
-            say('Waiting for Windows to release a file...')
+            say(f'Windows is checking the game files - this can take a few minutes ({int(now - started)}s)' if executable
+                else 'Waiting for Windows to release a file...')
             time.sleep(min(delays[min(attempt, len(delays) - 1)], remaining))
             attempt += 1
 
 
-def _replace_with_retry(src: Path, dst: Path, budget: float = 60.0) -> None:
-    _retry_locked(lambda: Path(src).replace(dst), budget)
+def _replace_with_retry(src: Path, dst: Path, budget: float = None) -> None:
+    executable = _is_executable_path(src) or _is_executable_path(dst)
+    if budget is None:
+        budget = 600.0 if executable else 60.0
+    if executable:
+        _retry_locked(lambda: Path(src).replace(dst), budget, executable=True)
+    else:
+        _retry_locked(lambda: Path(src).replace(dst), budget)
 
 
 def _open_with_retry(path: Path, mode: str):
     def open_if_alive():
         check_parent_alive()
         return path.open(mode)
+    if _is_executable_path(path) and any(flag in mode for flag in 'wax+'):
+        return _retry_locked(open_if_alive, 600.0, executable=True)
     return _retry_locked(open_if_alive)
 
 

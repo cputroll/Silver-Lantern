@@ -52,7 +52,7 @@ k.CloseHandle(handle)
                 with patch.object(h, 'say') as say:
                     self.assemble(root)
                 self.assertEqual(target.read_bytes(), b'new game')
-                self.assertTrue(any('Waiting for Windows' in str(c) for c in say.call_args_list))
+                self.assertTrue(any('Windows is checking the game files' in str(c) for c in say.call_args_list))
             finally:
                 timer.cancel(); proc.wait(timeout=5)
 
@@ -62,7 +62,7 @@ k.CloseHandle(handle)
             proc = self.lock(target)
             try:
                 retry = h._retry_locked
-                with patch.object(h, '_retry_locked', side_effect=lambda operation, budget=60: retry(operation, budget=0)), patch.object(h, 'main', side_effect=lambda: self.assemble(root)), patch.object(h, 'log') as log, patch.object(h, 'say') as say, patch.object(h, '_UI_READY', False), patch.object(h.sys, 'argv', ['test', '--no-pause']):
+                with patch.object(h, '_retry_locked', side_effect=lambda operation, budget=60, executable=False: retry(operation, budget=0, executable=executable)), patch.object(h, 'main', side_effect=lambda: self.assemble(root)), patch.object(h, 'log') as log, patch.object(h, 'say') as say, patch.object(h, '_UI_READY', False), patch.object(h.sys, 'argv', ['test', '--no-pause']):
                     with self.assertRaises(SystemExit) as result:
                         h.run()
                 self.assertEqual(result.exception.code, 1)
