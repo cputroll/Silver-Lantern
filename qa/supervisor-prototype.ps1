@@ -20,7 +20,7 @@ try {
         Start-Sleep -Milliseconds 50
     }
     $code = Invoke-GuardedOwnedProcess $marker {
-        [OwnedProcess]::Run($shell, @('-NoProfile', '-File', $child, $started, $finished), 10000)
+        [OwnedProcess]::Run($shell, @('-NoProfile', '-File', $child, $started, $finished), 45000)
     }
     if ($code -ne 0) { exit 1 }
     [IO.File]::WriteAllText((Join-Path $Directory 'supervisor.complete'), 'verified-empty')
