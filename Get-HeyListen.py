@@ -62,7 +62,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -2559,6 +2559,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 try:
                     file_hash = hashlib.sha256()
                     check_parent_alive()
+                    verify_write_boundary(root, target, item['path'])
                     with _create_staging_exclusive(temp) as output:
                         for part in item['segments' if v2 else 'parts']:
                             with (cache / part['asset']).open('rb') as source:
@@ -2580,6 +2581,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                                     raise ValueError(f"segment SHA-256 mismatch: {part['asset']}")
                     if temp.stat().st_size != item['size'] or file_hash.hexdigest() != item['sha256']:
                         raise ValueError(f"assembled SHA-256 mismatch: {item['path']}")
+                    verify_write_boundary(root, target, item['path'])
                     _replace_with_retry(temp, target)
                 finally:
                     temp.unlink(missing_ok=True)

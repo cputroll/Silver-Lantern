@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import threading
@@ -81,24 +82,8 @@ class JunctionSwapDuringAssemblyTests(unittest.TestCase):
             sentinel = outside / 'game.exe'
             sentinel.write_bytes(b'safe')
             result = {}
-
-            def install():
-                def stream(s, url, dest, **kw):
-                    name = url.rsplit('/', 1)[-1]
-                    data = {'bundle-0.tar': b'xxabc!', 'bundle-1.tar': b'?defyy'}[name]
-                    dest.write_bytes(data); kw['progress'](len(data))
-                m = sample()
-                try:
-                    with patch.object(h, 'stream_to', side_effect=stream):
-                        h.install_game(object(), h.parse_game_manifest(json.dumps(m)), root)
-                    result['ok'] = True
-                except Exception as exc:
-                    result['exc'] = exc
-
-            import json
             gate = threading.Event()
-            original = threading.Thread(target=install)
-            gate_holder = {'started': False}
+            dump = Path(d) / 'swap-failure-traceback.txt'
 
             def install():
                 def stream(s, url, dest, **kw):
@@ -107,7 +92,6 @@ class JunctionSwapDuringAssemblyTests(unittest.TestCase):
                     if name == 'bundle-1.tar':
                         # Hold the second bundle so segment 0 finishes, its
                         # staging handle closes, and the swap window is open.
-                        gate_holder['started'] = True
                         gate.wait(timeout=30)
                     dest.write_bytes(data); kw['progress'](len(data))
                 m = sample()
@@ -117,6 +101,8 @@ class JunctionSwapDuringAssemblyTests(unittest.TestCase):
                     result['ok'] = True
                 except Exception as exc:
                     result['exc'] = exc
+                    import traceback
+                    dump.write_text(traceback.format_exc(), encoding='utf-8')
 
             thread = threading.Thread(target=install)
             thread.start()
@@ -142,8 +128,38 @@ class JunctionSwapDuringAssemblyTests(unittest.TestCase):
                 gate.set()
                 thread.join(timeout=60)
             self.assertNotIn('ok', result)
-            self.assertIsInstance(result.get('exc'), h.InvalidGamePath)
+            self.assertIsInstance(result.get('exc'), h.InvalidGamePath,
+                                   f'see {dump}: {result.get("exc")!r}')
             self.assertEqual(sentinel.read_bytes(), b'safe')
+
+
+class V1LegacyBoundaryWiringTests(unittest.TestCase):
+    def setUp(self):
+        disk = patch.object(h.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 100 * 1024 ** 3})())
+        disk.start(); self.addCleanup(disk.stop)
+        running = patch.object(h, 'running_launcher_paths', return_value=set())
+        running.start(); self.addCleanup(running.stop)
+
+    def test_v1_install_rechecks_the_write_boundary(self):
+        from test_game_sync import manifest
+        calls = []
+        original = h.verify_write_boundary
+
+        def recording(root, target, entry):
+            calls.append(entry)
+            return original(root, target, entry)
+
+        def stream(s, url, dest, **kw):
+            dest.write_bytes(b'abc'); kw['progress'](3)
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / 'game'
+            with patch.object(h, 'verify_write_boundary', side_effect=recording), \
+                 patch.object(h, 'stream_to', side_effect=stream):
+                h.install_game(object(), h.parse_game_manifest(json.dumps(manifest())), root)
+            self.assertEqual((root / 'bin' / 'game.exe').read_bytes(), b'abc')
+        self.assertEqual(calls, ['bin/game.exe', 'bin/game.exe'],
+                         'v1 installs must recheck the boundary before staging and before final placement')
 
 
 if __name__ == '__main__':
