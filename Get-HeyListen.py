@@ -714,7 +714,9 @@ def _retry_locked(operation, budget=60.0, executable=False, path=None):
             if not isinstance(exc, PermissionError) and getattr(exc, 'winerror', None) not in (32, 33):
                 log(traceback.format_exc())
                 raise
-            log('\n'.join('recoverable-retry: ' + line for line in traceback.format_exc().splitlines()))
+            cause = exc.__cause__ or (None if exc.__suppress_context__ else exc.__context__)
+            if cause is not None:
+                log(''.join(traceback.format_exception(type(cause), cause, cause.__traceback__)))
             now = time.monotonic()
             waited = _FILE_LOCK_WAITED.get(key, 0.0) if key is not None else 0.0
             remaining = deadline - now
@@ -729,6 +731,8 @@ def _retry_locked(operation, budget=60.0, executable=False, path=None):
                 if executable:
                     exc._exe_lock_expired = True
                 raise
+            retry_trace = ''.join(traceback.format_exception(type(exc), exc, exc.__traceback__, chain=False))
+            log('\n'.join('recoverable-retry: ' + line for line in retry_trace.splitlines()))
             say(f'Windows is checking the game files - this can take a few minutes ({int(now - started)}s)' if executable
                 else 'Waiting for Windows to release a file...')
             pause = min(delays[min(attempt, len(delays) - 1)], remaining)

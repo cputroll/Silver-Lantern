@@ -18,6 +18,28 @@ class RetryDiagnosticsTests(unittest.TestCase):
         self.assertEqual(len(traces), 1)
         self.assertTrue(all(line.startswith('recoverable-retry:') for line in traces[0].splitlines()))
 
+    def test_chained_exception_is_not_hidden_by_retry_label(self):
+        calls = 0
+        def operation():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                try:
+                    raise RuntimeError('unexpected root cause')
+                except RuntimeError:
+                    raise PermissionError('locked')
+        with mock.patch.object(app, 'log') as logger, mock.patch.object(app.time, 'sleep'):
+            app._retry_locked(operation)
+        messages = [str(c.args[0]) for c in logger.call_args_list]
+        self.assertTrue(any('RuntimeError: unexpected root cause' in m and not m.startswith('recoverable-retry:') for m in messages))
+        self.assertTrue(any('recoverable-retry:' in m and 'PermissionError: locked' in m and 'RuntimeError' not in m for m in messages))
+
+    def test_terminal_lock_error_is_not_labeled_recoverable(self):
+        with mock.patch.object(app, 'log') as logger:
+            with self.assertRaises(PermissionError):
+                app._retry_locked(mock.Mock(side_effect=PermissionError('locked')), budget=0)
+        self.assertFalse(any('recoverable-retry:' in str(c.args[0]) for c in logger.call_args_list))
+
     def test_expected_parent_exit_is_not_logged_as_crash(self):
         with mock.patch.object(app, 'log') as logger:
             app._log_assembly_exception(app.ParentExited())
