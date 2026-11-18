@@ -72,7 +72,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.6.9')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.0')
 
 
 def play_tip(folder):
