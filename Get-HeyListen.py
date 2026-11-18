@@ -518,37 +518,52 @@ class ParentExited(BaseException):
     """Cooperative stop after the GUI that started this child exits."""
 
 
-def check_parent_alive():
+_parent_handle = None
+_parent_pid = None
+_parent_initialized = False
+
+
+def init_parent_monitor():
+    global _parent_handle, _parent_pid, _parent_initialized
+    if _parent_initialized:
+        return
+    _parent_initialized = True
     value = os.environ.get('SILVER_LANTERN_PARENT_PID')
     if not value:
         return
-    try:
-        pid = int(value)
-        if pid <= 0:
-            raise ValueError('invalid parent PID')
-        if os.name == 'nt':
-            import ctypes
-            from ctypes import wintypes
-            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-            kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-            kernel.OpenProcess.restype = wintypes.HANDLE
-            kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
-            kernel.WaitForSingleObject.restype = wintypes.DWORD
-            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-            handle = kernel.OpenProcess(0x00100000, False, pid)
-            if not handle:
-                if ctypes.get_last_error() == 87:
-                    raise ParentExited()
-                return  # Access denied is not proof the parent exited.
-            try:
-                if kernel.WaitForSingleObject(handle, 0) == 0:
-                    raise ParentExited()
-            finally:
-                kernel.CloseHandle(handle)
-        else:
-            os.kill(pid, 0)
-    except ProcessLookupError:
-        raise ParentExited() from None
+    _parent_pid = int(value)
+    if _parent_pid <= 0:
+        raise ValueError('invalid parent PID')
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        _parent_handle = kernel.OpenProcess(0x00100000 | 0x1000, False, _parent_pid)
+        if not _parent_handle:
+            _parent_handle = kernel.OpenProcess(0x00100000, False, _parent_pid)
+        if not _parent_handle:
+            raise ParentExited()
+
+
+def check_parent_alive():
+    init_parent_monitor()
+    if _parent_pid is None:
+        return
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel.WaitForSingleObject.restype = wintypes.DWORD
+        if kernel.WaitForSingleObject(_parent_handle, 0) != 0x102:
+            raise ParentExited()
+    else:
+        try:
+            os.kill(_parent_pid, 0)
+        except ProcessLookupError:
+            raise ParentExited() from None
 
 
 def _retry_locked(operation, budget=60.0):
@@ -557,6 +572,7 @@ def _retry_locked(operation, budget=60.0):
     deadline = time.monotonic() + budget
     attempt = 0
     while True:
+        check_parent_alive()
         try:
             return operation()
         except OSError as exc:
@@ -866,6 +882,7 @@ def _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet
             try:
                 with open(part, mode) as f:
                     for chunk in r.iter_content(1024 * 1024):
+                        check_parent_alive()
                         if expect is not None and done + len(chunk) > expect:
                             raise ValueError("download exceeds expected size")
                         f.write(chunk)
@@ -946,6 +963,7 @@ def chunk_state(dest, size, streams, chunk_min=CHUNK_MIN):
                 stream.seek(start)
                 remaining = end - start
                 while remaining:
+                    check_parent_alive()
                     data = stream.read(min(1024 * 1024, remaining))
                     if not data:
                         break
@@ -994,6 +1012,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
                 with part.open('r+b') as f:
                     f.seek(start)
                     for data in r.iter_content(1024 * 1024):
+                        check_parent_alive()
                         if pos + len(data) > end:
                             raise ValueError('chunk exceeds expected size')
                         f.write(data)
@@ -1232,6 +1251,7 @@ def sha256(p: Path, progress=False) -> str:
     try:
         with open(p, "rb") as f:
             for block in iter(lambda: f.read(8 * 1024 * 1024), b""):
+                check_parent_alive()
                 h.update(block)
                 if progress:
                     done_bytes += len(block)
@@ -1334,13 +1354,19 @@ def replace_transactionally(target: Path, replacement: Path) -> None:
     staged = Path(name)
     try:
         with os.fdopen(fd, 'wb') as out, replacement.open('rb') as src:
-            shutil.copyfileobj(src, out)
+            while True:
+                check_parent_alive()
+                block = src.read(1024 * 1024)
+                if not block:
+                    break
+                out.write(block)
             out.flush()
             os.fsync(out.fileno())
         def digest(path):
             h = hashlib.sha256()
             with path.open('rb') as stream:
                 for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    check_parent_alive()
                     h.update(block)
             return h.digest()
         if not staged.stat().st_size or staged.stat().st_size != replacement.stat().st_size or digest(staged) != digest(replacement):
@@ -1418,6 +1444,7 @@ def _fetch_update_checksum(s, url):
             response.raise_for_status()
             data = bytearray()
             for chunk in response.iter_content(8192):
+                check_parent_alive()
                 if len(data) + len(chunk) > 65536:
                     raise ValueError("checksum file too large")
                 data.extend(chunk)
@@ -1650,6 +1677,7 @@ def load_game_manifest(s, source: str) -> dict:
                 total = int(response.headers.get('content-length') or 0)
                 chunks, received = [], 0
                 for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    check_parent_alive()
                     if chunk:
                         chunks.append(chunk)
                         received += len(chunk)
@@ -1731,6 +1759,7 @@ def restore_segment_checkpoint(temp, checkpoint, item):
                 segment_hash = hashlib.sha256()
                 remaining = part['length']
                 while remaining:
+                    check_parent_alive()
                     data = source.read(min(remaining, 1024 * 1024))
                     if not data:
                         raise ValueError('short checkpoint')
@@ -1762,12 +1791,13 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
     log(f"Preparing download: organizing {len(pending)} destination files", echo=True)
     last_report = time.monotonic()
     for count, item in enumerate(pending, 1):
+        check_parent_alive()
         now = time.monotonic()
         if now - last_report >= 5:
             log(f"Preparing download: {count - 1}/{len(pending)} destination files checked", echo=True)
             last_report = now
         target = root.joinpath(*item['path'].split('/'))
-        direct = len(item['segments']) == 1
+        direct = False  # Always stage so cancellation cannot truncate a final target.
         state = {'item': item, 'target': target,
                  'temp': target if direct else target.with_name(target.name + '.heylisten-new'),
                  'direct': direct, 'next': 0, 'started': False, 'complete': False,
@@ -1814,6 +1844,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
         ident = threading.get_ident()
         try:
             while True:
+                check_parent_alive()
                 with cond:
                     if shared['error']:
                         return
@@ -1862,6 +1893,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                     with _open_with_retry(state['temp'], 'wb' if index == 0 else 'ab') as output:
                         state['started'] = True
                         while remaining:
+                            check_parent_alive()
                             data = os.read(fd, min(remaining, 1024 * 1024))
                             if not data:
                                 raise ValueError(f"short segment: {segment['asset']}")
@@ -2110,6 +2142,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                                 remaining = part['length'] if v2 else part['size']
                                 segment_hash = hashlib.sha256()
                                 while remaining:
+                                    check_parent_alive()
                                     chunk = source.read(min(remaining, 1024 * 1024))
                                     if not chunk:
                                         raise ValueError(f"short segment: {part['asset']}")
@@ -2276,7 +2309,12 @@ def relocate_transient() -> bool:
         with tempfile.NamedTemporaryFile(prefix='SilverLantern-', suffix='.tmp', dir=target.parent, delete=False) as stream:
             staging = Path(stream.name)
             with source.open('rb') as original:
-                shutil.copyfileobj(original, stream, 1024 * 1024)
+                while True:
+                    check_parent_alive()
+                    block = original.read(1024 * 1024)
+                    if not block:
+                        break
+                    stream.write(block)
         _replace_with_retry(staging, target)
     except PermissionError:
         if not target.is_file():
@@ -2518,7 +2556,7 @@ def cache_game_manifest(folder: Path, manifest: dict) -> None:
 def install_from_manifest(s, a, folder: Path) -> None:
     import game_channel
     try:
-        with game_channel.install_lock(folder):
+        with game_channel.install_lock(folder, check_cancel=check_parent_alive):
             check_parent_alive()
             _install_from_manifest_locked(s, a, folder)
     except TimeoutError as exc:
@@ -2695,14 +2733,14 @@ def run_builder_flow(s, a) -> int:
 
 def run() -> None:
     """Entry point: friendly errors, full details in the log, keep the window open."""
-    try:
-        import launcher
-        launcher.enable_dpi_awareness()
-    except Exception:
-        pass
     no_pause = '--no-pause' in sys.argv
     try:
         check_parent_alive()
+        try:
+            import launcher
+            launcher.enable_dpi_awareness()
+        except Exception:
+            pass
         code = main()
     except ParentExited:
         log('parent exited; stopping')

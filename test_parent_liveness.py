@@ -8,6 +8,136 @@ from pathlib import Path
 
 
 class ParentLivenessTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows process handle semantics')
+    def test_parent_handle_is_not_reopened_after_pid_changes(self):
+        from unittest.mock import patch
+        from test_game_sync import h
+        with patch.object(h, '_parent_initialized', False), patch.object(h, '_parent_handle', None), \
+             patch.object(h, '_parent_pid', None), patch.dict(os.environ, {'SILVER_LANTERN_PARENT_PID': str(os.getpid())}):
+            h.check_parent_alive()
+            handle = h._parent_handle
+            self.assertTrue(handle)
+            os.environ['SILVER_LANTERN_PARENT_PID'] = '99999999'
+            h.check_parent_alive()
+            self.assertEqual(h._parent_handle, handle)
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32')
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle(handle)
+
+    def test_locked_retry_checks_parent_before_each_attempt(self):
+        from unittest.mock import patch
+        from test_game_sync import h
+        attempts = []
+        def operation():
+            attempts.append(1)
+            raise PermissionError('locked')
+        with patch.object(h, 'check_parent_alive', side_effect=[None, h.ParentExited()]), \
+             patch.object(h.time, 'sleep'):
+            with self.assertRaises(h.ParentExited):
+                h._retry_locked(operation, budget=5)
+        self.assertEqual(len(attempts), 1)
+
+    def test_parent_death_during_delayed_segment_copy_preserves_target(self):
+        root = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as directory:
+            tmp = Path(directory)
+            ready, exit_file = tmp / 'ready', tmp / 'exit'
+            game, cache = tmp / 'game', tmp / 'cache'
+            game.mkdir(); cache.mkdir()
+            target = game / 'file'
+            target.write_bytes(b'old')
+            (cache / 'bundle').write_bytes(b'new')
+            child_code = '''import hashlib,os,sys,time
+from pathlib import Path
+from test_game_sync import h
+h.check_parent_alive()
+real_read=h.os.read
+ready=Path(sys.argv[3])
+def delayed(fd,n):
+ data=real_read(fd,n)
+ ready.write_text('ready')
+ time.sleep(2)
+ return data
+h.os.read=delayed
+item={'path':'file','size':3,'sha256':hashlib.sha256(b'new').hexdigest(),'segments':[{'asset':'bundle','offset':0,'length':3,'sha256':hashlib.sha256(b'new').hexdigest()}]}
+try:
+ h.assemble_segmented([item], {'bundle':{}}, Path(sys.argv[2]), Path(sys.argv[1]), lambda asset: None, True)
+except h.ParentExited:
+ Path(sys.argv[4]).write_text('stopped')
+'''
+            parent_code = '''import os,subprocess,sys,time
+env=dict(os.environ,SILVER_LANTERN_PARENT_PID=str(os.getpid()))
+subprocess.Popen([sys.executable,'-c',sys.argv[1],*sys.argv[2:]],env=env)
+time.sleep(60)
+'''
+            parent = subprocess.Popen([sys.executable, '-c', parent_code, child_code, str(game), str(cache), str(ready), str(exit_file)], cwd=root)
+            try:
+                deadline = time.monotonic() + 15
+                while not ready.exists() and parent.poll() is None and time.monotonic() < deadline:
+                    time.sleep(.05)
+                self.assertTrue(ready.exists(), 'child did not start copying')
+                parent.terminate(); parent.wait(timeout=5)
+                deadline = time.monotonic() + 8
+                while not exit_file.exists() and time.monotonic() < deadline:
+                    time.sleep(.05)
+                self.assertTrue(exit_file.exists(), 'child did not stop after parent exited')
+                self.assertEqual(target.read_bytes(), b'old')
+            finally:
+                if parent.poll() is None:
+                    parent.terminate(); parent.wait(timeout=5)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows locking semantics')
+    def test_parent_death_stops_locked_replacement(self):
+        root = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            ready, exit_file = tmp / 'ready', tmp / 'exit'
+            target, staged = tmp / 'target', tmp / 'staged'
+            target.write_bytes(b'old')
+            staged.write_bytes(b'new')
+            child_code = '''import sys,time
+from pathlib import Path
+from test_game_sync import h
+h.check_parent_alive()
+Path(sys.argv[3]).write_text('ready')
+try:
+ h._replace_with_retry(Path(sys.argv[1]),Path(sys.argv[2]),budget=15)
+except h.ParentExited:
+ Path(sys.argv[4]).write_text('stopped')
+'''
+            parent_code = '''import os,subprocess,sys,time
+env=dict(os.environ,SILVER_LANTERN_PARENT_PID=str(os.getpid()))
+subprocess.Popen([sys.executable,'-c',sys.argv[1],*sys.argv[2:]],env=env)
+time.sleep(60)
+'''
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            kernel.CreateFileW.restype = wintypes.HANDLE
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel.CreateFileW(str(target), 0x80000000, 1, None, 3, 0, None)
+            self.assertNotEqual(handle, ctypes.c_void_p(-1).value)
+            parent = subprocess.Popen([sys.executable, '-c', parent_code, child_code, str(staged), str(target), str(ready), str(exit_file)], cwd=root)
+            try:
+                deadline = time.monotonic() + 15
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(.05)
+                self.assertTrue(ready.exists())
+                time.sleep(.2)
+                parent.terminate(); parent.wait(timeout=5)
+                deadline = time.monotonic() + 5
+                while not exit_file.exists() and time.monotonic() < deadline:
+                    time.sleep(.05)
+                self.assertTrue(exit_file.exists(), 'child did not stop while target locked')
+            finally:
+                kernel.CloseHandle(handle)
+                if parent.poll() is None:
+                    parent.terminate(); parent.wait(timeout=5)
+            self.assertEqual(target.read_bytes(), b'old')
+
     def test_orphan_stops_at_install_boundary_and_releases_lock(self):
         root = Path(__file__).resolve().parent
         with tempfile.TemporaryDirectory() as tmp:

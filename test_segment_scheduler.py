@@ -89,7 +89,7 @@ class SegmentSchedulerTests(unittest.TestCase):
                     h.install_game(object(), man, root)
             self.assertEqual((root / 'old').read_bytes(), b'old content')
 
-    def test_one_segment_is_written_directly(self):
+    def test_one_segment_is_staged_before_replacement(self):
         data = b'direct data'
         man = {'version': 2, 'build': 'game-v1', 'total_bytes': len(data),
                'assets': [{'asset': 'a', 'size': len(data), 'sha256': digest(data)}],
@@ -100,6 +100,6 @@ class SegmentSchedulerTests(unittest.TestCase):
             def stream(s, url, dest, **kw):
                 dest.write_bytes(data)
                 kw['progress'](len(data))
-            with patch.object(h, 'stream_to', side_effect=stream), patch.object(h, 'check_disk_space'), patch.object(Path, 'replace', side_effect=AssertionError('unexpected temp replace')):
+            with patch.object(h, 'stream_to', side_effect=stream), patch.object(h, 'check_disk_space'):
                 h.install_game(object(), man, root)
             self.assertEqual((root / 'file').read_bytes(), data)
