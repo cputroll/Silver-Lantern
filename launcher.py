@@ -763,30 +763,31 @@ def relocate_launcher(folder):
         target = destination / 'Ocarina of Time.exe'
         if source.parent == destination.resolve():
             return False
-    try:
-        with source.open('rb') as original, target.open('xb') as copy:
-            shutil.copyfileobj(original, copy)
-    except FileExistsError:
-        # Never overwrite or run an executable whose ownership is unknown.
-        import tempfile
-        with source.open('rb') as original, tempfile.NamedTemporaryFile(
-                prefix='Ocarina of Time-', suffix='.exe', dir=destination, delete=False) as copy:
-            target = Path(copy.name)
-            try:
+    import game_channel
+    with game_channel.state_lock(destination / '.heylisten-get', name='launcher-relocation.lock'):
+        try:
+            with source.open('rb') as original, target.open('xb') as copy:
                 shutil.copyfileobj(original, copy)
-            except BaseException:
-                copy.close()
-                target.unlink(missing_ok=True)
-                raise
-    _record_launcher_copy(destination, target)
-    log_message(f'Launcher relocation: {target}')
-    try:
-        register_install(destination, exe=target)
-    except Exception as exc:
-        log_message(f'Install registration: {exc}')
-    _cleanup_stale_siblings(destination, target)
-    subprocess.Popen([str(target), *sys.argv[1:]], close_fds=False)
-    return True
+        except FileExistsError:
+            # Never overwrite or run an executable whose ownership is unknown.
+            import tempfile
+            with source.open('rb') as original, tempfile.NamedTemporaryFile(
+                    prefix='Ocarina of Time-', suffix='.exe', dir=destination, delete=False) as copy:
+                target = Path(copy.name)
+                try:
+                    shutil.copyfileobj(original, copy)
+                except BaseException:
+                    copy.close()
+                    target.unlink(missing_ok=True)
+                    raise
+        _record_launcher_copy(destination, target)
+        log_message(f'Launcher relocation: {target}')
+        try:
+            register_install(destination, exe=target)
+        except Exception as exc:
+            log_message(f'Install registration: {exc}')
+        subprocess.Popen([str(target), *sys.argv[1:]], close_fds=False)
+        return True
 
 
 def schedule_owned_cleanup():

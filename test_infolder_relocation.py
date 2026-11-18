@@ -74,7 +74,7 @@ class RelocationTests(unittest.TestCase):
                 self.assertTrue(launcher.relocate_launcher(game))
             self.assertTrue((root / 'Programs' / 'Ocarina of Time' / 'Ocarina of Time.exe').exists())
 
-    def test_stale_sibling_copies_are_cleaned_after_relocation(self):
+    def test_recorded_siblings_are_retained_during_relocation(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); source = root / 'temp' / 'SilverLantern.exe'; source.parent.mkdir(); source.write_bytes(b'new launcher')
             game = root / 'game'; game.mkdir(); (game / 'Ocarina of Time.exe').write_bytes(b'game user data')
@@ -85,7 +85,7 @@ class RelocationTests(unittest.TestCase):
             with patch.dict(launcher.os.environ, {'LOCALAPPDATA': str(root)}), patch.object(launcher.sys, 'frozen', True, create=True), patch.object(launcher.sys, 'executable', str(source)), patch.object(launcher.sys, 'argv', ['exe']), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'LOG', root / 'state' / 'log'), patch.object(launcher.subprocess, 'Popen') as spawn, patch.object(launcher, 'register_install'):
                 self.assertTrue(launcher.relocate_launcher(game))
             target = Path(spawn.call_args.args[0][0])
-            self.assertFalse(stale1.exists()); self.assertTrue(stale2.exists())
+            self.assertTrue(stale1.exists()); self.assertTrue(stale2.exists())
             self.assertTrue(target.exists())
             self.assertEqual(target.read_bytes(), b'new launcher')
             self.assertEqual(occupied.read_bytes(), b'other user data')
