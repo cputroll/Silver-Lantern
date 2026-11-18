@@ -541,6 +541,25 @@ def game_folder_candidates():
     return primary, fallback, legacy
 
 
+def cached_partial_mtime(folder):
+    """Find safe, nonempty installer partials without following cache links."""
+    cache = Path(folder) / '.heylisten-parts'
+    try:
+        if cache.is_symlink() or not cache.is_dir():
+            return 0.0
+        newest = 0.0
+        for entry in cache.iterdir():
+            if (re.fullmatch(r'[A-Za-z0-9_.-]+\.part', entry.name)
+                    and entry.name not in ('.part', '..part')
+                    and not entry.is_symlink() and entry.is_file()):
+                stat = entry.stat()
+                if stat.st_size:
+                    newest = max(newest, stat.st_mtime)
+        return newest
+    except OSError:
+        return 0.0
+
+
 def has_game_data(folder):
     """True when `folder` holds an installed, partial or cached game (not just user files)."""
     folder = Path(folder)
@@ -556,12 +575,12 @@ def has_game_data(folder):
                 return True
     except OSError:
         pass
-    return False
+    return bool(cached_partial_mtime(folder))
 
 
 def game_data_mtime(folder):
     folder = Path(folder)
-    newest = 0.0
+    newest = cached_partial_mtime(folder)
     for marker in (folder / '.heylisten-get' / 'game-manifest.json', folder / 'bin' / 'HeyListen.exe',
                    folder / 'hookshot_version.txt'):
         try:
