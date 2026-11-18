@@ -770,6 +770,25 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
     if not confirm_uninstall(message, gui):
         log_message('Uninstall cancelled.')
         return False
+    if folder:
+        import game_channel
+        lock = game_channel.install_lock(folder, timeout=0)
+        try:
+            lock.__enter__()
+        except TimeoutError:
+            message = 'An installation or update is in progress. Please wait for it to finish, then retry uninstall.'
+            if gui and os.name == 'nt':
+                ctypes.windll.user32.MessageBoxW(None, message, 'Uninstall Silver Lantern', 0x30)
+            log_message(message)
+            return False
+        try:
+            return _uninstall_locked(folder, purge_saves)
+        finally:
+            lock.__exit__(None, None, None)
+    return _uninstall_locked(folder, purge_saves)
+
+
+def _uninstall_locked(folder, purge_saves):
     had_folder = bool(folder and folder.exists())
     if had_folder:
         game = folder.resolve()
@@ -796,7 +815,8 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
                 shutil.rmtree(saves)
         unknown = sum(1 for base, dirs, files in os.walk(folder, followlinks=False)
                       if not Path(base).relative_to(folder).parts or Path(base).relative_to(folder).parts[0].casefold() != 'user'
-                      for name in files if (Path(base) / name).resolve() != running)
+                      for name in files if (Path(base) / name).resolve() != running
+                      and (Path(base) / name) != folder / '.heylisten-get' / 'install-operation.lock')
         log_message(f'Unknown user files preserved: {unknown}')
         for base, dirs, files in os.walk(folder, topdown=False, followlinks=False):
             try:

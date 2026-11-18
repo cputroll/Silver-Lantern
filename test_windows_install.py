@@ -61,7 +61,8 @@ class WindowsInstallTests(unittest.TestCase):
             with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'ownership_manifest', return_value=None), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'), redirect_stdout(output):
                 self.assertTrue(launcher.uninstall())
             self.assertEqual((game / 'user' / 'save').read_text(), 'save')
-            self.assertEqual({p.name for p in game.iterdir()}, {'user', 'game.bin'})
+            self.assertEqual({p.name for p in game.iterdir()}, {'user', 'game.bin', '.heylisten-get'})
+            self.assertTrue((game / '.heylisten-get' / 'install-operation.lock').exists())
             self.assertIn('Unknown user files preserved: 1', output.getvalue())
             self.assertIn(f'Your saves stay at {game / "user"} — use --purge-saves to remove them too', output.getvalue())
 
@@ -71,7 +72,8 @@ class WindowsInstallTests(unittest.TestCase):
             (game / 'user' / 'save').write_text('save')
             with patch.object(launcher, 'load_game_folder', return_value=game), patch.object(launcher, 'ownership_manifest', return_value=None), patch.object(launcher, 'remove_defender_exclusion', return_value=True), patch.object(launcher, 'remove_registration'), patch.object(launcher, 'schedule_owned_cleanup'), patch.object(launcher, 'STATE_DIR', root / 'state'), patch.object(launcher, 'shortcut_path', return_value=root / 'a.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'b.lnk'), patch('builtins.input', return_value='y'):
                 self.assertTrue(launcher.uninstall(purge_saves=True))
-            self.assertFalse(game.exists())
+            self.assertFalse((game / 'user').exists())
+            self.assertTrue((game / '.heylisten-get' / 'install-operation.lock').exists())
 
     def test_cli_save_flags(self):
         import sys
