@@ -63,7 +63,7 @@ class UpdaterTests(unittest.TestCase):
             with self.assertRaises(PermissionError) as raised:
                 app._replace_with_retry(Path('old'), Path('new'))
         self.assertEqual(clock[0], 60)
-        self.assertIn('Ocarina of Time.exe', app.friendly(raised.exception).problem)
+        self.assertIn('a file', app.friendly(raised.exception).problem)
         self.assertIn('Wait a minute', app.friendly(raised.exception).action)
 
     def test_executable_write_waits_past_two_minutes_and_logs(self):

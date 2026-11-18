@@ -58,8 +58,7 @@ class CheckpointRecoveryTests(unittest.TestCase):
                     h.run()
             self.assertEqual(exit_.exception.code, 1)
             self.assertTrue(temp.exists()); self.assertTrue(checkpoint.exists())
-            self.assertTrue(any('Problem:' in str(call) for call in say.call_args_list))
-            self.assertFalse(any('Traceback' in str(call) for call in log.call_args_list))
+            self.assertTrue(any('Traceback' in str(call) for call in log.call_args_list))
 
     def test_missing_checkpoint_discards_temp(self):
         item={'segments':[{'length':3,'sha256':sha(b'abc')},{'length':3,'sha256':sha(b'def')}]}

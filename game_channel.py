@@ -13,6 +13,10 @@ ASSET_BASE = 'https://github.com/cputroll/Silver-Lantern/releases/download/game-
 LEGACY_URL = ASSET_BASE + 'game-manifest.json'
 
 
+class LockTimeout(TimeoutError):
+    """An install or channel lock remained held beyond its deadline."""
+
+
 class CorruptState(ValueError):
     """Saved channel state cannot be trusted."""
 
@@ -59,9 +63,9 @@ def state_lock(directory, timeout=10, name='channel-state.lock', check_cancel=No
                     import fcntl
                     fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
-            except OSError:
+            except OSError as exc:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError('game channel state lock timed out')
+                    raise LockTimeout('game channel state lock timed out') from exc
                 time.sleep(.05)
         try:
             yield

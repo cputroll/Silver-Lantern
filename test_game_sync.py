@@ -45,8 +45,8 @@ class SyncTests(unittest.TestCase):
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as d, game_channel.install_lock(Path(d)):
             args = SimpleNamespace(game_manifest='https://example.test/manifest', dry_run=False, prune=False, keep_assets=False)
-            with patch.object(game_channel, 'install_lock', side_effect=TimeoutError('Another installation is in progress')):
-                with self.assertRaisesRegex(h.UserError, 'Another game installation'):
+            with patch.object(game_channel, 'install_lock', side_effect=game_channel.LockTimeout('Another installation is in progress')):
+                with self.assertRaises(game_channel.LockTimeout):
                     h.install_from_manifest(None, args, Path(d))
 
     def test_default_manifest_uses_channel_resolver(self):

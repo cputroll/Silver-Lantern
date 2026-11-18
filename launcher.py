@@ -14,6 +14,7 @@ import subprocess
 import parent_identity
 import sys
 import time
+import traceback
 import urllib.request
 import hashlib
 import base64
@@ -1126,8 +1127,8 @@ def worker_command(events, args):
                 terminate_worker(events)
             except Exception:
                 pass
-        log_message(f'Game installation or update failed: {exc}')
-        events.publish('error', str(exc))
+        log_message('Game installation or update failed:\n' + traceback.format_exc())
+        events.publish('error', 'Problem: The installation could not finish. What to do: Try again and check the log if it repeats.')
 
 
 def tool_update_worker(events, args):
@@ -1152,10 +1153,11 @@ def tool_update_worker(events, args):
         else:
             events.publish('tool_current', 0)
     except subprocess.TimeoutExpired:
-        log_message('Tool update timed out after 300 seconds.')
+        log_message('Tool update timed out:\n' + traceback.format_exc())
         events.publish('error', 'Tool update timed out. Please retry and check the log.')
-    except Exception as exc:
-        events.publish('error', str(exc))
+    except Exception:
+        log_message('Tool update failed:\n' + traceback.format_exc())
+        events.publish('error', 'Problem: The launcher update could not finish. What to do: Please try again later.')
 
 
 def terminate_worker(events):
@@ -1633,13 +1635,14 @@ class LauncherUI:
                             events.publish('status', 'Planning…')
                         break
                     except Exception as exc:
+                        log_message('Game channel attempt failed:\n' + traceback.format_exc())
                         if attempt or isinstance(exc, (ValueError, TimeoutError)):
                             raise
                         events.publish('status', 'Connection stalled — retrying…')
                 digest = manifest_digest(manifest)
                 events.publish('check', (manifest.get('revision'), digest))
             except Exception as exc:
-                log_message(f'Game channel check failed: {exc}')
+                log_message('Game channel check failed:\n' + traceback.format_exc())
                 events.publish('offline', channel_error_message(exc))
             try:
                 events.publish('status', 'Checking for updates…')
@@ -1654,6 +1657,7 @@ class LauncherUI:
                             response.close()
                         break
                     except Exception:
+                        log_message('Update check attempt failed:\n' + traceback.format_exc())
                         if attempt:
                             raise
                         events.publish('status', 'Connection stalled — retrying…')
@@ -1662,6 +1666,7 @@ class LauncherUI:
                     result = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-File', str(next((p for p in (BASE / 'Update-Game.ps1', BASE / 'support' / 'Update-Game.ps1') if p.is_file()), BASE / 'Update-Game.ps1')), '-DryRun', '-GameFolder', str(self.folder)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=90, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                     events.publish('upstream_check', result.returncode)
             except Exception:
+                log_message('Update check failed:\n' + traceback.format_exc())
                 events.publish('offline', 'Could not reach the update server')
         threading.Thread(target=check, daemon=True).start()
 

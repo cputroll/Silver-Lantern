@@ -151,7 +151,7 @@ class GameChannelTests(unittest.TestCase):
             with game_channel.install_lock(Path(tmp)):
                 child = subprocess.run([sys.executable, '-c', code, tmp], capture_output=True, timeout=5)
                 self.assertNotEqual(child.returncode, 0)
-                self.assertIn(b'TimeoutError', child.stderr)
+                self.assertIn(b'LockTimeout', child.stderr)
 
     def test_fetch_for_folder_validates_before_recording_revision(self):
         import tempfile

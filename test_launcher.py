@@ -216,7 +216,8 @@ class StateTests(unittest.TestCase):
             self.assertIn('4242', ' '.join(str(part) for part in run.call_args.args[0]))
         kind, error = events.queue.get_nowait()
         self.assertEqual(kind, 'error')
-        self.assertIn('progress parser broke', error)
+        self.assertNotIn('progress parser broke', error)
+        self.assertIn('could not finish', error)
 
     def test_friendly_gui_text_redacts_paths_and_console_leaders(self):
         text = launcher.friendly_gui_text(r'Problem: C:\Users\friend\file.bin failed ... retry /home/friend/file.bin')

@@ -465,11 +465,18 @@ def _is_local_disk_error(exc: BaseException) -> bool:
 
 def friendly(exc: BaseException, resumable_bytes: int = 0) -> UserError:
     """Map a raw exception to a UserError (problem / what to do / short form)."""
+    import game_channel
     if isinstance(exc, UserError):
         return exc
     if isinstance(exc, InvalidGamePath):
         return UserError(f'The game package contains an invalid entry: {exc.entry}',
                          'Tell the person who provided the game package.', 'invalid game package')
+    if isinstance(exc, game_channel.LockTimeout):
+        return UserError('Another installation or update is using this folder.',
+                         'Wait for it to finish, then press Retry.', 'installation busy', resumable_bytes)
+    if isinstance(exc, FileNotFoundError):
+        return UserError('A game file or update file is missing.',
+                         'Press Retry to check the files and download any missing data again.', 'missing file', resumable_bytes)
     resumes = " It resumes where it left off." if resumable_bytes else ""
     if resumable_bytes:
         resumes = f" It picks up where it left off ({human(resumable_bytes)} is already saved)."
@@ -480,7 +487,7 @@ def friendly(exc: BaseException, resumable_bytes: int = 0) -> UserError:
         return UserError("The disk ran out of space.", "Free up space and run this again." + resumes,
                          "disk full", resumable_bytes)
     if isinstance(exc, PermissionError) or (isinstance(exc, OSError) and winerror in (32, 33, 5)):
-        name = Path(getattr(exc, "filename", None) or "a file").name
+        name = 'a file'
         if getattr(exc, '_exe_lock_expired', False):
             return UserError('Windows is still protecting a game file.',
                              'Leave this window open - it usually finishes by itself - or allow this app in your antivirus and press Retry.',
@@ -505,9 +512,10 @@ def friendly(exc: BaseException, resumable_bytes: int = 0) -> UserError:
     if "builder checksum" in text or "has no " in text:
         return UserError("The HeyListen Builder download didn't check out.",
                          "Run this again. If it repeats, tell the person who sent you this tool.", "bad download")
-    if "checksum mismatch" in text or "sha-256 mismatch" in text or "size mismatch" in text:
-        return UserError("The download was damaged and has been deleted.",
-                         "Run this again to download a fresh copy.", "damaged download")
+    if any(marker in text for marker in ('checksum mismatch', 'sha-256 mismatch', 'size mismatch',
+                                          'short segment', 'staged update failed verification')):
+        return UserError("A downloaded or partially installed file did not pass its safety check.",
+                         "Press Retry to check the files and download a fresh copy if needed.", "damaged download")
     return UserError("Something unexpected went wrong.",
                      "Run this again. If it repeats, send the log file to the person who gave you this tool.",
                      "unexpected error", resumable_bytes)
@@ -697,6 +705,7 @@ def _retry_locked(operation, budget=60.0, executable=False, path=None):
                 log(f'File lock released path={path} elapsed_seconds={time.monotonic() - started:.3f} attempts={attempt}')
             return result
         except OSError as exc:
+            log(traceback.format_exc())
             if not isinstance(exc, PermissionError) and getattr(exc, 'winerror', None) not in (32, 33):
                 raise
             now = time.monotonic()
@@ -818,6 +827,7 @@ def metadata_get(client, url, **kwargs):
         try:
             return client.get(url, **kwargs)
         except Exception:
+            log(traceback.format_exc())
             if attempt:
                 raise
             say('Connection stalled — retrying…')
@@ -843,6 +853,7 @@ def load_manifest(manifest_arg: str | None) -> dict:
                 candidates.insert(0 if not manifest_arg else 1, (url, "url"))
         except (OSError, ValueError, AttributeError, TypeError) as e:
             log(f"  local manifest metadata unusable: {e}")
+            log(traceback.format_exc())
         candidates.append((str(MANIFEST_LOCAL), "file"))
     if MANIFEST_CACHE.exists():
         candidates.append((str(MANIFEST_CACHE), "cache"))
@@ -864,6 +875,7 @@ def load_manifest(manifest_arg: str | None) -> dict:
                 MANIFEST_CACHE.write_text(json.dumps(data, indent=2), encoding="utf-8")
             except OSError as e:
                 log(f"  manifest cache not updated: {e}")
+                log(traceback.format_exc())
             if kind == "url":
                 log(f"Manifest: {label} (v{data.get('tool', {}).get('version', '?')})")
             global _MANIFEST_ORIGIN
@@ -872,6 +884,7 @@ def load_manifest(manifest_arg: str | None) -> dict:
         except Exception as e:  # noqa: BLE001
             last_err = e
             log(f"  manifest {label} unusable: {e}")
+            log(traceback.format_exc())
     raise RuntimeError(f"no usable manifest ({last_err})")
 
 
@@ -1049,6 +1062,7 @@ def _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet
                 continue
             break
         except Exception as e:  # noqa: BLE001
+            log(traceback.format_exc())
             if _is_local_disk_error(e) or attempt == max_retries:
                 raise   # a full disk or locked file never fixes itself by retrying
             log(f"  network hiccup ({type(e).__name__}: {e}), retry {attempt}/{max_retries} in 3 s")
@@ -1173,6 +1187,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
                     save()
                 return
             except Exception as exc:
+                log(traceback.format_exc())
                 if pos > start:
                     progress.add(start - pos)
                 if attempt or _is_local_disk_error(exc):
@@ -1197,6 +1212,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
             probe = probe_session.get(url, headers={'range': f'bytes={a}-{b-1}', 'accept': '*/*'}, stream=True, timeout=(10, 30))
             break
         except Exception:
+            log(traceback.format_exc())
             if attempt:
                 raise
             say('Connection stalled — retrying…')
@@ -1304,6 +1320,7 @@ def download_game(s: "requests.Session", man: dict, out: Path, skip_hash: bool =
                 last_err = None
                 break
             except Exception as e:  # noqa: BLE001
+                log(traceback.format_exc())
                 last_err = e
                 dest.unlink(missing_ok=True)
                 log(f"  source failed: {e}")
@@ -1616,6 +1633,7 @@ def _fetch_update_checksum(s, url):
         except ValueError:
             raise
         except Exception:
+            log(traceback.format_exc())
             if attempt:
                 raise
             say('Connection stalled — retrying…')
@@ -1859,6 +1877,7 @@ def load_game_manifest(s, source: str) -> dict:
                 text = b''.join(chunks).decode('utf-8-sig')
                 break
             except Exception:
+                log(traceback.format_exc())
                 if attempt:
                     raise
                 say('Connection stalled — retrying…')
@@ -2104,6 +2123,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                 finally:
                     state['lock'].release()
         except BaseException as exc:
+            log(traceback.format_exc())
             fail(exc)
         finally:
             with cond:
@@ -2131,6 +2151,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                 shared['slots'] += 1
                 cond.notify_all()
     except BaseException as exc:
+        log(traceback.format_exc())
         fail(exc)
     finally:
         with cond:
@@ -2338,6 +2359,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 try:
                     assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=True)
                 except SegmentMismatch as error:
+                    log(traceback.format_exc())
                     verified_assets.discard(error.asset)
                     remaining = [item for item in pending if not (game_path(root, item['path']).is_file() and sha256(game_path(root, item['path'])) == item['sha256'])]
                     assemble_segmented(remaining, assets, cache, root, fetch, keep_assets, soft_retry='resume')
@@ -2787,8 +2809,9 @@ def install_from_manifest(s, a, folder: Path) -> None:
         with game_channel.install_lock(folder, check_cancel=check_parent_alive):
             check_parent_alive()
             _install_from_manifest_locked(s, a, folder)
-    except TimeoutError as exc:
-        raise UserError('Another game installation or update is in progress.', 'Wait for it to finish and try again.', 'busy') from exc
+    except game_channel.LockTimeout:
+        log(traceback.format_exc())
+        raise
 
 
 def _install_from_manifest_locked(s, a, folder: Path) -> None:
@@ -2802,6 +2825,7 @@ def _install_from_manifest_locked(s, a, folder: Path) -> None:
             else:
                 game_manifest = load_game_manifest(manifest_session, a.game_manifest)
     except Exception:
+        log(traceback.format_exc())
         done("failed", "yellow")
         raise
     check_parent_alive()
@@ -2979,14 +3003,8 @@ def run() -> None:
         say("Stopped. Run this again any time. It picks up where it left off.", "dim")
         code = 130
     except Exception as exc:  # noqa: BLE001
-        if isinstance(exc, PermissionError) or (isinstance(exc, OSError) and getattr(exc, 'winerror', None) in (32, 33)):
-            log(f'File in use: {exc}')
-        else:
-            log(traceback.format_exc())
-        if _UI_READY:
-            show_error(friendly(exc))
-        else:
-            say("Problem: " + friendly(exc).problem)
+        log(traceback.format_exc())
+        show_error(friendly(exc))
         code = 1
     if _UI_READY:
         pause(no_pause)
