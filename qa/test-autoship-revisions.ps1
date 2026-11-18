@@ -17,7 +17,8 @@ Assert-Revision 3 2 @('r3x-file.zip', 'game-manifest-3.json.bak')
 $source = Get-Content -LiteralPath $scriptPath -Raw
 if ($source -notmatch 'if \(\$existing\.ContainsKey\(\$asset\.asset\)\) \{ throw') { throw 'Existing bundle must be rejected, not reused by size' }
 if ($source -notmatch 'foreach \(\$asset in @\(\$manifest\.assets\) \+') { throw 'All bundles must be verified before channel publication' }
-if ($source.IndexOf('asset verification failed') -gt $source.IndexOf("'HEAD:refs/heads/game-channel'")) { throw 'Channel publication precedes asset verification' }
+$publisherCall = $source.IndexOf("'channel_publisher.py'")
+if ($publisherCall -lt 0 -or $source.IndexOf('asset verification failed') -gt $publisherCall) { throw 'Channel publication precedes asset verification' }
 if ($source -notmatch 'force-with-lease=refs/heads/game-channel') { throw 'Channel push must use an expected-tip lease' }
 if ($source -match 'Repair-LegacyManifest|release'', ''upload'', ''game-v1'', \$legacy') { throw 'Legacy asset must remain untouched' }
 Write-Output 'Revision allocation and publication safety tests passed'

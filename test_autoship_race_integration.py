@@ -33,17 +33,26 @@ class PublisherRaceIntegration(unittest.TestCase):
         self.assertEqual(files['game-manifest.json'], b'stale')
 
     def test_stale_channel_lease_preserves_competing_pointer(self):
-        old = "elseif ($Arguments[0] -eq '-C' -and $Arguments[2] -eq 'push') { Copy-Item -LiteralPath (Join-Path $Arguments[1] 'channel.json') -Destination (Join-Path $env:TEST_REMOTE 'channel.json') }"
-        new = """elseif ($Arguments[0] -eq '-C' -and $Arguments[2] -eq 'push') {
-            if ($Arguments[3] -ne '--force-with-lease=refs/heads/game-channel:oldtip') { throw 'missing exact lease' }
-            [IO.File]::WriteAllText((Join-Path $env:TEST_REMOTE 'channel.json'), '{"revision":99}')
-            throw 'stale channel lease'
-        }"""
+        old = "Copy-Item -LiteralPath (Join-Path $Arguments[1] 'channel.json') -Destination (Join-Path $env:TEST_REMOTE 'channel.json')"
+        new = """[IO.File]::WriteAllText((Join-Path $env:TEST_REMOTE 'channel.json'), '{"revision":99}')
+        throw 'stale channel lease'"""
         self.assertEqual(fixture.MOCKS.count(old), 1)
-        result, calls, files, _ = self.run_with_mocks(fixture.MOCKS.replace(old, new))
+        actual_run = subprocess.run
+        def inspect_evidence(*args, **kwargs):
+            result = actual_run(*args, **kwargs)
+            state = Path(kwargs['env']['LOCALAPPDATA']) / 'SilverLantern'
+            evidence = list(state.glob('silvership-*/channel-push-evidence.json'))
+            self.assertEqual(len(evidence), 1)
+            record = json.loads(evidence[0].read_text(encoding='utf-8'))
+            self.assertEqual(record['candidate'], 'a' * 40)
+            self.assertEqual(record['expected'], 'oldtip')
+            self.assertTrue((Path(record['worktree']) / 'channel.json').exists())
+            return result
+        with patch.object(fixture.subprocess, 'run', side_effect=inspect_evidence):
+            result, calls, files, _ = self.run_with_mocks(fixture.MOCKS.replace(old, new))
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(json.loads(files['channel.json'])['revision'], 99)
-        self.assertTrue(any(' push ' in c and 'game-channel' in c for c in calls))
+        self.assertTrue(any('channel_publisher.py' in c and 'oldtip' in c for c in calls))
         self.assertEqual(files['game-manifest.json'], b'stale')
 
     def test_interrupted_upload_leaves_pointer_unchanged_and_partial_assets(self):

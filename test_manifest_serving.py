@@ -17,7 +17,7 @@ class ManifestServingTests(unittest.TestCase):
         self.assertIn(manifest_upload, script)
         # Publish immutable assets before advancing the leased channel; the fixed
         # legacy manifest must not be replaced because it can roll back across hosts.
-        channel_push = "'HEAD:refs/heads/game-channel'"
+        channel_push = "'channel_publisher.py'"
         self.assertIn(channel_push, script)
         self.assertLess(script.index(bundle_upload), script.index(channel_push))
         self.assertLess(script.index(manifest_upload), script.index(channel_push))

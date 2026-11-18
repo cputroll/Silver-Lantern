@@ -27,7 +27,14 @@ function gh {
 }
 function Run([string]$Program, [string[]]$Arguments) {
     if ($Program -eq 'git') {
-        if ($env:TEST_MODE -eq 'lease' -and $Arguments[0] -eq 'push' -and $Arguments[-1] -eq 'HEAD:main') {
+        if ($env:TEST_MODE -eq 'lease' -and $env:TEST_ID -eq 'two' -and $Arguments[0] -eq 'pull' -and $Arguments[1] -eq '--rebase') {
+            $global:testPullCount++
+            if ($global:testPullCount -eq 1) {
+                & $env:TEST_GIT @Arguments
+                if ($LASTEXITCODE -ne 0) { throw 'initial local pull failed' }
+            }
+            # The later test-only reset aligns bookkeeping without a manifest rebase conflict.
+        } elseif ($env:TEST_MODE -eq 'lease' -and $Arguments[0] -eq 'push' -and $Arguments[-1] -eq 'HEAD:main') {
             if ($env:TEST_ID -eq 'two') {
                 $deadline = [DateTime]::UtcNow.AddSeconds(20)
                 while (-not (Test-Path (Join-Path $env:TEST_BARRIER 'main-one'))) {
@@ -88,7 +95,25 @@ function Run([string]$Program, [string[]]$Arguments) {
         $dest = Join-Path $env:TEST_REMOTE (Split-Path $source -Leaf)
         $stream = [IO.File]::Open($dest, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try { $bytes = [IO.File]::ReadAllBytes($source); $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
-    } elseif ($Program -eq 'python') {
+    } elseif ($Program -eq 'python' -and (Split-Path $Arguments[0] -Leaf) -eq 'channel_publisher.py') {
+        if ($env:TEST_MODE -eq 'lease') {
+            [IO.File]::WriteAllText((Join-Path $env:TEST_BARRIER ('channel-' + $env:TEST_ID)), ($Arguments -join ' '))
+            $deadline = [DateTime]::UtcNow.AddSeconds(20)
+            while (@(Get-ChildItem -LiteralPath $env:TEST_BARRIER -Filter 'channel-*').Count -lt 2) {
+                if ([DateTime]::UtcNow -gt $deadline) { throw 'channel push barrier timeout' }
+                Start-Sleep -Milliseconds 50
+            }
+            if ($env:TEST_ID -eq 'two') {
+                while (-not (Test-Path (Join-Path $env:TEST_BARRIER 'channel-winner'))) {
+                    if ([DateTime]::UtcNow -gt $deadline) { throw 'channel winner timeout' }
+                    Start-Sleep -Milliseconds 50
+                }
+            }
+        }
+        & python @Arguments
+        if ($LASTEXITCODE -ne 0) { throw 'channel helper rejected push' }
+        if ($env:TEST_MODE -eq 'lease') { [IO.File]::WriteAllText((Join-Path $env:TEST_BARRIER 'channel-winner'), $env:TEST_ID) }
+    } elseif ($Program -eq 'python' -and (Split-Path $Arguments[0] -Leaf) -eq 'pack-game.py') {
         $dir = $Arguments[[array]::IndexOf($Arguments, '--out') + 1]
         $prefix = $Arguments[[array]::IndexOf($Arguments, '--prefix') + 1]
         $assets = @()
@@ -160,6 +185,11 @@ class SharedPublisherRace(unittest.TestCase):
                 git('config', 'user.email', 'offline@example.invalid', cwd=clone)
                 (clone / 'AutoShip-Game.ps1').write_text(source, encoding='utf-8')
                 shutil.copyfile(fixture.ROOT / 'OwnedProcessGuard.ps1', clone / 'OwnedProcessGuard.ps1')
+                helper = (fixture.ROOT / 'channel_publisher.py').read_text(encoding='utf-8')
+                needle = "        raise RuntimeError('channel push unresolved or superseded; reconciliation required') from error"
+                self.assertEqual(helper.count(needle), 1)
+                helper = helper.replace(needle, "        import os\n        if isinstance(error, subprocess.CalledProcessError):\n            Path(os.environ['TEST_BARRIER'], 'push-error-' + os.environ['TEST_ID']).write_bytes(error.stderr or b'')\n" + needle)
+                (clone / 'channel_publisher.py').write_text(helper, encoding='utf-8')
                 game, public, local = (root / (name + '-' + x) for x in ('game', 'public', 'local'))
                 for directory in (game, public, local): directory.mkdir()
                 (game / 'hookshot_version.txt').write_text('2.0.0', encoding='utf-8')
@@ -182,11 +212,14 @@ class SharedPublisherRace(unittest.TestCase):
             else:
                 one, two = ((barrier / ('channel-' + name)).read_text() for name in ('one', 'two'))
                 tip = git('--git-dir', remote, 'rev-parse', 'game-channel^')
-                self.assertIn('--force-with-lease=refs/heads/game-channel:' + tip, one)
-                self.assertIn('--force-with-lease=refs/heads/game-channel:' + tip, two)
+                self.assertIn('origin ' + tip + ' ', one)
+                self.assertIn('origin ' + tip + ' ', two)
                 self.assertEqual((barrier / 'channel-winner').read_text(), 'one')
-                self.assertIn('channel_lease_rejected', results[1][1])
-                self.assertIn('stale info', (barrier / 'result-two').read_text().lower())
+                self.assertIn('channel_helper_rejected_push', results[1][1])
+                rejection = (barrier / 'push-error-two').read_text(encoding='utf-8').lower()
+                self.assertIn('[rejected]', rejection)
+                self.assertIn('(stale info)', rejection)
+                self.assertIn('game-channel', rejection)
                 for revision, owner in ((4, 'one'), (5, 'two')):
                     candidate = json.loads((assets / f'game-manifest-{revision}.json').read_bytes())
                     for item in candidate['assets']:

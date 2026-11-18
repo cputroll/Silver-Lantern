@@ -23,6 +23,7 @@ function git {
     $global:LASTEXITCODE = 0
     if ($args[0] -eq 'show') { return $env:TEST_POINTER }
     if ($args[0] -eq 'rev-parse') { return 'oldtip' }
+    if ($args[0] -eq '-C' -and $args[2] -eq 'rev-parse') { return ('a' * 40) }
     throw "Unexpected direct git: $args"
 }
 function gh {
@@ -50,7 +51,10 @@ function Run([string]$Program, [string[]]$Arguments) {
     } elseif ($Program -eq 'gh' -and $Arguments[1] -eq 'upload') {
         $source = $Arguments[3]
         Copy-Item -LiteralPath $source -Destination (Join-Path $env:TEST_REMOTE (Split-Path $source -Leaf)) -Force
-    } elseif ($Program -eq 'python') {
+    } elseif ($Program -eq 'python' -and (Split-Path $Arguments[0] -Leaf) -eq 'channel_publisher.py') {
+        if ($Arguments[3] -ne 'oldtip' -or $Arguments[4] -ne ('a' * 40)) { throw 'wrong channel lease or candidate' }
+        Copy-Item -LiteralPath (Join-Path $Arguments[1] 'channel.json') -Destination (Join-Path $env:TEST_REMOTE 'channel.json')
+    } elseif ($Program -eq 'python' -and (Split-Path $Arguments[0] -Leaf) -eq 'pack-game.py') {
         $dir = $Arguments[[array]::IndexOf($Arguments, '--out') + 1]
         $prefix = $Arguments[[array]::IndexOf($Arguments, '--prefix') + 1]
         $assets = @()
@@ -65,7 +69,6 @@ function Run([string]$Program, [string[]]$Arguments) {
         [IO.File]::WriteAllText((Join-Path $dir 'game-manifest.json'), ($manifest | ConvertTo-Json -Depth 8 -Compress))
     } elseif ($Program -eq 'git') {
         if ($Arguments[0] -eq 'worktree' -and $Arguments[1] -eq 'add') { New-Item -ItemType Directory -Path $Arguments[3] | Out-Null }
-        elseif ($Arguments[0] -eq '-C' -and $Arguments[2] -eq 'push') { Copy-Item -LiteralPath (Join-Path $Arguments[1] 'channel.json') -Destination (Join-Path $env:TEST_REMOTE 'channel.json') }
     } else { throw "Unexpected command: $Program $Arguments" }
 }
 '''
@@ -156,7 +159,7 @@ class PublisherOfflineIntegration(unittest.TestCase):
         self.assertEqual(pointer['sha256'], hashlib.sha256(files[pointer['manifest']]).hexdigest())
         self.assertEqual(json.loads(files[pointer['manifest']])['game_version'], '2.0.0')
         self.assertFalse(any(' upload ' in c and '--clobber' in c for c in calls))
-        self.assertTrue(any('force-with-lease=refs/heads/game-channel:oldtip' in c for c in calls))
+        self.assertTrue(any('channel_publisher.py' in c and 'origin oldtip ' in c for c in calls))
 
     def test_incomplete_updater_never_publishes(self):
         # 0 is a no-op, 1 is a failure, and 130 represents an interrupted updater.

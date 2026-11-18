@@ -12,6 +12,7 @@ $repo = $PSScriptRoot
 . (Join-Path $repo 'OwnedProcessGuard.ps1')
 $ownedProcessMarker = Join-Path $env:PUBLIC 'SilverLantern-AutoShip-updater-recovery.lock'
 $work = $null
+$preservePublicationEvidence = $false
 $shipLock = $null
 function Enter-ShipLock([string]$Path) {
     try { return [IO.File]::Open($Path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
@@ -110,7 +111,7 @@ try {
                 $tokenFile = Join-Path $env:USERPROFILE '.heylisten-get\github-token.txt'
                 if (-not $env:GH_TOKEN -and (Test-Path -LiteralPath $tokenFile)) { $env:GH_TOKEN = (Get-Content -LiteralPath $tokenFile -Raw).Trim() }
                 if (-not $env:GH_TOKEN) { throw 'No GitHub token for reconciliation' }
-                $work = Join-Path ([IO.Path]::GetTempPath()) ('silvership-' + [guid]::NewGuid().ToString('N'))
+                $work = Join-Path $stateDir ('silvership-' + [guid]::NewGuid().ToString('N'))
                 New-Item -ItemType Directory -Path $work | Out-Null
                 Run 'git' @('fetch', 'origin', '+refs/heads/game-channel:refs/remotes/origin/game-channel')
                 $previousText = (git show 'refs/remotes/origin/game-channel:channel.json') -join "`n"
@@ -146,7 +147,7 @@ try {
         $tokenFile = Join-Path $env:USERPROFILE '.heylisten-get\github-token.txt'
         if (-not $env:GH_TOKEN -and (Test-Path -LiteralPath $tokenFile)) { $env:GH_TOKEN = (Get-Content -LiteralPath $tokenFile -Raw).Trim() }
         if (-not $env:GH_TOKEN) { throw 'No GitHub token for publishing' }
-        $work = Join-Path ([IO.Path]::GetTempPath()) ('silvership-' + [guid]::NewGuid().ToString('N'))
+        $work = Join-Path $stateDir ('silvership-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $work | Out-Null
 
         Run 'git' @('fetch', 'origin', '+refs/heads/*:refs/remotes/origin/*', '--prune')
@@ -250,9 +251,20 @@ try {
             # ancestry check stops a rewritten remote from producing a non-fast-forward update.
             if ($hasChannel) { Run 'git' @('-C', $channelWork, 'merge-base', '--is-ancestor', $channelTip, 'HEAD') }
             $expectedTip = if ($hasChannel) { $channelTip } else { '' }
-            Run 'git' @('-C', $channelWork, 'push', "--force-with-lease=refs/heads/game-channel:$expectedTip", 'origin', 'HEAD:refs/heads/game-channel')
+            $candidateTip = (git -C $channelWork rev-parse --verify HEAD)
+            if ($LASTEXITCODE -ne 0 -or -not $candidateTip) { throw 'Could not resolve candidate channel commit' }
+            # channel_publisher uses --force-with-lease=refs/heads/game-channel:<expected>
+            # and reconciles ambiguous results only against the exact remote commit.
+            $leaseArgument = if ($expectedTip) { $expectedTip } else { '-' }
+            # Persist before the push: a process crash must not erase the candidate identity.
+            $evidence = [ordered]@{ candidate = $candidateTip; expected = $expectedTip; worktree = $channelWork; createdUtc = [DateTime]::UtcNow.ToString('o') }
+            [IO.File]::WriteAllText((Join-Path $work 'channel-push-evidence.json'), (($evidence | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
+            $preservePublicationEvidence = $true
+            Run 'python' @((Join-Path $repo 'channel_publisher.py'), $channelWork, 'origin', $leaseArgument, $candidateTip)
+            $preservePublicationEvidence = $false
         } finally {
-            Run 'git' @('worktree', 'remove', '--force', $channelWork)
+            if (-not $preservePublicationEvidence) { Run 'git' @('worktree', 'remove', '--force', $channelWork) }
+            else { Log "Unresolved channel push; evidence retained at $work" }
         }
 
         # Legacy clients stay on their existing manifest; only the leased channel is updated.
@@ -266,6 +278,6 @@ try {
     Write-Output "GAMESHIP status=error reason=$reason"
     exit 1
 } finally {
-    if ($work -and (Test-Path -LiteralPath $work)) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
+    if (-not $preservePublicationEvidence -and $work -and (Test-Path -LiteralPath $work)) { Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue }
     if ($shipLock) { $shipLock.Dispose() }
 }
