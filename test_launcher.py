@@ -142,8 +142,9 @@ class StateTests(unittest.TestCase):
             messages = []
             while not events.queue.empty(): messages.append(events.queue.get_nowait())
             error = [value for kind, value in messages if kind == 'error'][0]
-            self.assertIn('exit 1', str(error))
-            self.assertIn('Disk unavailable', error)
+            self.assertNotIn('exit 1', str(error))
+            self.assertIn('try again', error.lower())
+            self.assertNotIn('Disk unavailable', error)
             self.assertIn('Disk unavailable', (Path(d) / 'log').read_text())
 
     def test_worker_failure_without_output_identifies_exit_code(self):
@@ -155,8 +156,8 @@ class StateTests(unittest.TestCase):
             launcher.worker_command(events, [])
         kind, error = events.queue.get_nowait()
         self.assertEqual(kind, 'error')
-        self.assertIn('exit 7', error)
-        self.assertIn('No diagnostic output', error)
+        self.assertNotIn('exit 7', error)
+        self.assertIn('try again', error.lower())
 
     def test_worker_failure_surfaces_child_problem_and_action(self):
         import io
@@ -177,11 +178,12 @@ class StateTests(unittest.TestCase):
             messages = []
             while not events.queue.empty(): messages.append(events.queue.get_nowait())
         error = str([value for kind, value in messages if kind == 'error'][0])
-        self.assertIn('exit 1', error)
+        self.assertNotIn('exit 1', error)
         self.assertIn('Not enough free space on C:', error)
         self.assertIn('needs 33.2 GB', error)          # wrapped continuation is joined
         self.assertIn('Free up about 19.8 GB', error)
-        self.assertIn('Details were saved to:', error)
+        self.assertNotIn('Details were saved to:', error)
+        self.assertNotIn('C:\\temp\\HeyListen-Get.log', error)
 
     def test_friendly_blocks_prefers_the_last_problem(self):
         lines = ['  Problem: first problem', '  What to do: first action',

@@ -955,19 +955,14 @@ def worker_command(events, args):
         elif code == 0:
             events.publish('complete', code)
         else:
-            problem, action, details = friendly_blocks(screen_lines)
-            parts = []
+            problem, action, _ = friendly_blocks(screen_lines)
             if problem:
-                parts.append('Problem: ' + problem)
-            if action:
-                parts.append('What to do: ' + action)
-            if details:
-                parts.append('Details were saved to: ' + details)
-            elif last_line:
-                parts.append('Last output: ' + last_line)
-            if not parts:
-                parts.append('No diagnostic output was provided.')
-            events.publish('error', f'The operation failed (exit {code}). ' + ' '.join(parts) + ' See the log for full details.')
+                message = 'Problem: ' + problem
+                if action:
+                    message += ' What to do: ' + action
+            else:
+                message = 'Problem: The installation could not finish. What to do: Please try again.'
+            events.publish('error', message)
     except Exception as exc:
         log_message(f'Game installation or update failed: {exc}')
         events.publish('error', str(exc))
