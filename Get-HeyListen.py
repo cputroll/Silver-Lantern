@@ -542,9 +542,17 @@ def init_parent_monitor():
         kernel.OpenProcess.restype = wintypes.HANDLE
         _parent_handle = kernel.OpenProcess(0x00100000 | 0x1000, False, _parent_pid)
         if not _parent_handle:
-            _parent_handle = kernel.OpenProcess(0x00100000, False, _parent_pid)
-        if not _parent_handle:
             raise ParentExited()
+        try:
+            import parent_identity
+            expected = int(os.environ['SILVER_LANTERN_PARENT_CREATION_TIME'])
+            if expected <= 0 or parent_identity.creation_time(_parent_handle) != expected:
+                raise ParentExited()
+        except (KeyError, ValueError, OSError, ParentExited):
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle(_parent_handle)
+            _parent_handle = None
+            raise ParentExited() from None
 
 
 def check_parent_alive():

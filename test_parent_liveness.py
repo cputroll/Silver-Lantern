@@ -8,12 +8,35 @@ from pathlib import Path
 
 
 class ParentLivenessTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows process identity semantics')
+    def test_reused_pid_before_first_check_stops_worker(self):
+        from unittest.mock import patch
+        from test_game_sync import h
+        with patch.object(h, '_parent_initialized', False), patch.object(h, '_parent_handle', None), \
+             patch.object(h, '_parent_pid', None), patch.dict(os.environ, {
+                 'SILVER_LANTERN_PARENT_PID': str(os.getpid()),
+                 'SILVER_LANTERN_PARENT_CREATION_TIME': '1',
+             }):
+            with self.assertRaises(h.ParentExited):
+                h.check_parent_alive()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows process identity semantics')
+    def test_missing_creation_time_stops_worker(self):
+        from unittest.mock import patch
+        from test_game_sync import h
+        env = dict(os.environ, SILVER_LANTERN_PARENT_PID=str(os.getpid()))
+        env.pop('SILVER_LANTERN_PARENT_CREATION_TIME', None)
+        with patch.object(h, '_parent_initialized', False), patch.object(h, '_parent_handle', None), \
+             patch.object(h, '_parent_pid', None), patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(h.ParentExited):
+                h.check_parent_alive()
+
     @unittest.skipUnless(os.name == 'nt', 'Windows process handle semantics')
     def test_parent_handle_is_not_reopened_after_pid_changes(self):
         from unittest.mock import patch
         from test_game_sync import h
         with patch.object(h, '_parent_initialized', False), patch.object(h, '_parent_handle', None), \
-             patch.object(h, '_parent_pid', None), patch.dict(os.environ, {'SILVER_LANTERN_PARENT_PID': str(os.getpid())}):
+             patch.object(h, '_parent_pid', None), patch.dict(os.environ, __import__('parent_identity').parent_environment()):
             h.check_parent_alive()
             handle = h._parent_handle
             self.assertTrue(handle)
@@ -68,7 +91,8 @@ except h.ParentExited:
  Path(sys.argv[4]).write_text('stopped')
 '''
             parent_code = '''import os,subprocess,sys,time
-env=dict(os.environ,SILVER_LANTERN_PARENT_PID=str(os.getpid()))
+from parent_identity import parent_environment
+env=parent_environment()
 subprocess.Popen([sys.executable,'-c',sys.argv[1],*sys.argv[2:]],env=env)
 time.sleep(60)
 '''
@@ -108,7 +132,8 @@ except h.ParentExited:
  Path(sys.argv[4]).write_text('stopped')
 '''
             parent_code = '''import os,subprocess,sys,time
-env=dict(os.environ,SILVER_LANTERN_PARENT_PID=str(os.getpid()))
+from parent_identity import parent_environment
+env=parent_environment()
 subprocess.Popen([sys.executable,'-c',sys.argv[1],*sys.argv[2:]],env=env)
 time.sleep(60)
 '''
@@ -170,7 +195,8 @@ with out.open('w') as f:
   sys.exit(e.code)
 '''
             parent_code = '''import os,subprocess,sys,time
-env=dict(os.environ,SILVER_LANTERN_PARENT_PID=str(os.getpid()))
+from parent_identity import parent_environment
+env=parent_environment()
 p=subprocess.Popen([sys.executable,'-c',sys.argv[1],*sys.argv[2:]],env=env)
 time.sleep(60)
 '''

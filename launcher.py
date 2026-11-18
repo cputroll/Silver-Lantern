@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import parent_identity
 import sys
 import time
 import urllib.request
@@ -1031,7 +1032,7 @@ def child_output(process, phase, idle_timeout=CHILD_IDLE_TIMEOUT):
 def worker_command(events, args):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ, SILVER_LANTERN_GUI_PROGRESS='1', SILVER_LANTERN_PARENT_PID=str(os.getpid()))
+        env = dict(parent_identity.parent_environment(), SILVER_LANTERN_GUI_PROGRESS='1')
         process = subprocess.Popen(cli_command(*args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, env=env, creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
         events.process = process
         if events.cancelled.is_set():
@@ -1075,7 +1076,7 @@ def worker_command(events, args):
 def tool_update_worker(events, args):
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
-        env = dict(os.environ, SILVER_LANTERN_PARENT_PID=str(os.getpid()))
+        env = parent_identity.parent_environment()
         result = subprocess.run([sys.executable, '--self-update', *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', timeout=300, env=env, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
         output = result.stdout or ''
         with LOG.open('a', encoding='utf-8') as log:
