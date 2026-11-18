@@ -1078,16 +1078,19 @@ def child_output(process, phase, idle_timeout=CHILD_IDLE_TIMEOUT):
 
 
 def worker_command(events, args):
+    process = None
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         env = dict(parent_identity.parent_environment(), SILVER_LANTERN_GUI_PROGRESS='1')
-        process = subprocess.Popen(cli_command(*args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, env=env, creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
-        events.process = process
-        if events.cancelled.is_set():
-            terminate_worker(events)
         last_line = ''
         screen_lines = []
+        # Open the log before starting the worker: if the log cannot be opened the
+        # worker is never spawned, so no orphaned installer survives the failure.
         with LOG.open('a', encoding='utf-8') as log:
+            process = subprocess.Popen(cli_command(*args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding='utf-8', errors='replace', bufsize=1, env=env, creationflags=getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0))
+            events.process = process
+            if events.cancelled.is_set():
+                terminate_worker(events)
             for line in child_output(process, 'Game installation or update'):
                 log.write(line)
                 log.flush()
@@ -1117,6 +1120,12 @@ def worker_command(events, args):
                 message = 'Problem: The installation could not finish. What to do: Please try again.'
             events.publish('error', friendly_gui_text(message))
     except Exception as exc:
+        # A worker that was already started must not outlive a failed run.
+        if process is not None:
+            try:
+                terminate_worker(events)
+            except Exception:
+                pass
         log_message(f'Game installation or update failed: {exc}')
         events.publish('error', str(exc))
 

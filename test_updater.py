@@ -91,6 +91,73 @@ class UpdaterTests(unittest.TestCase):
         self.assertEqual(app.friendly(raised.exception).problem, 'Windows is still protecting a game file.')
         self.assertEqual(app.friendly(raised.exception).action, 'Leave this window open - it usually finishes by itself - or allow this app in your antivirus and press Retry.')
 
+    def test_file_retry_cap_is_cumulative_across_calls(self):
+        clock = [0.0]
+        error = PermissionError(13, 'locked', 'Ocarina of Time.exe')
+        app._FILE_LOCK_WAITED.clear()
+        with mock.patch.object(app, 'FILE_LOCK_CAP', 6.0), \
+             mock.patch.object(Path, 'replace', side_effect=error), \
+             mock.patch.object(app.time, 'monotonic', side_effect=lambda: clock[0]), \
+             mock.patch.object(app.time, 'sleep', side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+             mock.patch.object(app, 'say'), mock.patch.object(app, 'log') as log:
+            with self.assertRaises(PermissionError):
+                app._replace_with_retry(Path('old'), Path('cap-cumulative.bin'))
+            self.assertEqual(clock[0], 6.0)
+            clock[0] = 500.0  # a later call still has per-call budget, but the file already spent its cap
+            with self.assertRaises(PermissionError):
+                app._replace_with_retry(Path('old'), Path('cap-cumulative.bin'))
+            self.assertEqual(clock[0], 500.0)
+        self.assertTrue(any('cap exceeded' in str(c) for c in log.call_args_list))
+
+    def test_file_retry_cap_escalates_executable_to_classified_error(self):
+        clock = [0.0]
+        error = PermissionError(13, 'locked', 'game.exe')
+        error.winerror = 32
+        app._FILE_LOCK_WAITED.clear()
+        with mock.patch.object(app, 'FILE_LOCK_CAP', 5.0), \
+             mock.patch.object(Path, 'replace', side_effect=error), \
+             mock.patch.object(app.time, 'monotonic', side_effect=lambda: clock[0]), \
+             mock.patch.object(app.time, 'sleep', side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+             mock.patch.object(app, 'say'), mock.patch.object(app, 'log'):
+            with self.assertRaises(PermissionError) as raised:
+                app._replace_with_retry(Path('old'), Path('cap-game.exe'))
+        classified = app.friendly(raised.exception)
+        self.assertEqual(classified.short, 'file in use')
+        self.assertEqual(classified.problem, 'Windows is still protecting a game file.')
+
+    def test_lock_retry_line_logs_path_only_when_holder_unknown(self):
+        clock = [0.0]
+        error = PermissionError(13, 'locked', 'Ocarina of Time.exe')
+        app._FILE_LOCK_WAITED.clear()
+        with mock.patch.object(app, '_restart_manager_holders', return_value=None), \
+             mock.patch.object(app, 'FILE_LOCK_CAP', 2.0), \
+             mock.patch.object(Path, 'replace', side_effect=error), \
+             mock.patch.object(app.time, 'monotonic', side_effect=lambda: clock[0]), \
+             mock.patch.object(app.time, 'sleep', side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+             mock.patch.object(app, 'say'), mock.patch.object(app, 'log') as log:
+            with self.assertRaises(PermissionError):
+                app._replace_with_retry(Path('old'), Path('rm-unavailable.bin'))
+        lines = [str(c.args[0]) for c in log.call_args_list if c.args and 'File lock retry path=' in str(c.args[0])]
+        self.assertTrue(lines)
+        self.assertIn('path=rm-unavailable.bin', lines[0])
+        self.assertNotIn('holder=', lines[0])
+
+    def test_lock_retry_line_reports_when_no_holder_is_listed(self):
+        clock = [0.0]
+        error = PermissionError(13, 'locked', 'Ocarina of Time.exe')
+        app._FILE_LOCK_WAITED.clear()
+        with mock.patch.object(app, '_restart_manager_holders', return_value=[]), \
+             mock.patch.object(app, 'FILE_LOCK_CAP', 2.0), \
+             mock.patch.object(Path, 'replace', side_effect=error), \
+             mock.patch.object(app.time, 'monotonic', side_effect=lambda: clock[0]), \
+             mock.patch.object(app.time, 'sleep', side_effect=lambda delay: clock.__setitem__(0, clock[0] + delay)), \
+             mock.patch.object(app, 'say'), mock.patch.object(app, 'log') as log:
+            with self.assertRaises(PermissionError):
+                app._replace_with_retry(Path('old'), Path('rm-empty.bin'))
+        lines = [str(c.args[0]) for c in log.call_args_list if c.args and 'File lock retry path=' in str(c.args[0])]
+        self.assertTrue(lines)
+        self.assertIn('holder=none', lines[0])
+
     def _run_update(self, args):
         release = {'tag_name': 'v999.0.0', 'assets': [
             {'name': app.UPDATE_ASSET, 'browser_download_url': 'zip', 'size': 3},

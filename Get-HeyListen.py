@@ -584,32 +584,140 @@ def _is_executable_path(path):
     return name.endswith('.exe') or '.exe.' in name
 
 
-def _retry_locked(operation, budget=60.0, executable=False):
-    """Retry a file operation while Windows or antivirus holds the file."""
+FILE_LOCK_CAP = 900.0  # Total seconds one file may spend waiting on Windows locks per run.
+_FILE_LOCK_WAITED = {}
+_RM_LOCK = threading.Lock()
+
+
+def _restart_manager_holders(path):
+    """Ask the Windows Restart Manager which processes hold ``path`` open.
+
+    Returns a list of ``name[pid]`` entries ('self' for this process), an empty
+    list when no holder is reported, or None when the answer is unavailable
+    (non-Windows, missing file, or Restart Manager API failure)."""
+    if os.name != 'nt' or path is None:
+        return None
+    try:
+        target = Path(path)
+        if not target.exists():
+            return None
+        import ctypes
+        from ctypes import wintypes
+
+        class RM_UNIQUE_PROCESS(ctypes.Structure):
+            _fields_ = [('dwProcessId', wintypes.DWORD), ('ProcessStartTime', wintypes.FILETIME)]
+
+        class RM_PROCESS_INFO(ctypes.Structure):
+            _fields_ = [('Process', RM_UNIQUE_PROCESS),
+                        ('strAppName', ctypes.c_wchar * 256),
+                        ('strServiceShortName', ctypes.c_wchar * 64),
+                        ('ApplicationType', wintypes.ULONG),
+                        ('AppStatus', wintypes.ULONG),
+                        ('TSSessionId', wintypes.ULONG),
+                        ('bRestartable', wintypes.BOOL)]
+
+        dll = ctypes.WinDLL('RstrtMgr', use_last_error=True)
+        dll.RmStartSession.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD, wintypes.LPWSTR]
+        dll.RmStartSession.restype = wintypes.DWORD
+        dll.RmRegisterResources.argtypes = [wintypes.DWORD, wintypes.UINT, ctypes.POINTER(ctypes.c_wchar_p),
+                                            wintypes.UINT, ctypes.c_void_p, wintypes.UINT, ctypes.c_void_p]
+        dll.RmRegisterResources.restype = wintypes.DWORD
+        dll.RmGetList.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.UINT), ctypes.POINTER(wintypes.UINT),
+                                  ctypes.POINTER(RM_PROCESS_INFO), ctypes.POINTER(wintypes.DWORD)]
+        dll.RmGetList.restype = wintypes.DWORD
+        dll.RmEndSession.argtypes = [wintypes.DWORD]
+        dll.RmEndSession.restype = wintypes.DWORD
+
+        session = wintypes.DWORD()
+        key = ctypes.create_unicode_buffer(32 + 1)
+        with _RM_LOCK:
+            if dll.RmStartSession(ctypes.byref(session), 0, key) != 0:
+                return None
+            try:
+                files = (ctypes.c_wchar_p * 1)(str(target))
+                if dll.RmRegisterResources(session.value, 1, files, 0, None, 0, None) != 0:
+                    return None
+                needed = wintypes.UINT()
+                count = wintypes.UINT()
+                reasons = wintypes.DWORD()
+                result = dll.RmGetList(session.value, ctypes.byref(needed), ctypes.byref(count), None, ctypes.byref(reasons))
+                infos = None
+                if result == 234:  # ERROR_MORE_DATA
+                    infos = (RM_PROCESS_INFO * needed.value)()
+                    count = wintypes.UINT(needed.value)
+                    result = dll.RmGetList(session.value, ctypes.byref(needed), ctypes.byref(count), infos, ctypes.byref(reasons))
+                if result != 0:
+                    return None
+                if infos is None:
+                    return []
+                holders = []
+                for index in range(count.value):
+                    pid = int(infos[index].Process.dwProcessId)
+                    name = infos[index].strAppName or 'process'
+                    holders.append('self' if pid == os.getpid() else f'{name}[{pid}]')
+                return holders
+            finally:
+                dll.RmEndSession(session.value)
+    except (OSError, ValueError, MemoryError):
+        return None
+
+
+def _lock_holder_summary(path):
+    """One ' holder=...' field for lock-retry log lines; '' when unknown."""
+    if path is None:
+        return ''
+    holders = _restart_manager_holders(path)
+    if holders is None:
+        return ''
+    if not holders:
+        return ' holder=none'
+    return ' holder=' + ' '.join(holders)
+
+
+def _retry_locked(operation, budget=60.0, executable=False, path=None):
+    """Retry a file operation while Windows or antivirus holds the file.
+
+    Each call stops waiting after ``budget`` seconds. Across the whole run one
+    file never waits more than FILE_LOCK_CAP seconds in total, so a file that
+    stays locked escalates to the classified 'file in use' error instead of
+    retrying forever."""
     delays = (1, 2, 5, 10)
     started = time.monotonic()
     deadline = started + budget
+    key = str(path) if path is not None else None
     attempt = 0
     while True:
         check_parent_alive()
         try:
             result = operation()
             if attempt:
-                log(f'File lock released elapsed_seconds={time.monotonic() - started:.3f} attempts={attempt}')
+                log(f'File lock released path={path} elapsed_seconds={time.monotonic() - started:.3f} attempts={attempt}')
             return result
         except OSError as exc:
             if not isinstance(exc, PermissionError) and getattr(exc, 'winerror', None) not in (32, 33):
                 raise
             now = time.monotonic()
+            waited = _FILE_LOCK_WAITED.get(key, 0.0) if key is not None else 0.0
             remaining = deadline - now
-            log(f'File lock retry elapsed_seconds={now - started:.3f} winerror={getattr(exc, "winerror", None)} errno={exc.errno} attempt={attempt + 1}')
+            allowance = FILE_LOCK_CAP - waited if key is not None else None
+            log(f'File lock retry path={path}{_lock_holder_summary(path)} elapsed_seconds={now - started:.3f} cumulative_seconds={waited:.3f} winerror={getattr(exc, "winerror", None)} errno={exc.errno} attempt={attempt + 1}')
+            if allowance is not None and allowance <= 0:
+                log(f'File lock retry cap exceeded path={path} cumulative_seconds={waited:.3f} cap={FILE_LOCK_CAP:.3f}')
+                if executable:
+                    exc._exe_lock_expired = True
+                raise
             if remaining <= 0:
                 if executable:
                     exc._exe_lock_expired = True
                 raise
             say(f'Windows is checking the game files - this can take a few minutes ({int(now - started)}s)' if executable
                 else 'Waiting for Windows to release a file...')
-            time.sleep(min(delays[min(attempt, len(delays) - 1)], remaining))
+            pause = min(delays[min(attempt, len(delays) - 1)], remaining)
+            if allowance is not None:
+                pause = min(pause, allowance)
+            time.sleep(pause)
+            if key is not None:
+                _FILE_LOCK_WAITED[key] = waited + pause
             attempt += 1
 
 
@@ -618,9 +726,9 @@ def _replace_with_retry(src: Path, dst: Path, budget: float = None) -> None:
     if budget is None:
         budget = 600.0 if executable else 60.0
     if executable:
-        _retry_locked(lambda: Path(src).replace(dst), budget, executable=True)
+        _retry_locked(lambda: Path(src).replace(dst), budget, executable=True, path=dst)
     else:
-        _retry_locked(lambda: Path(src).replace(dst), budget)
+        _retry_locked(lambda: Path(src).replace(dst), budget, path=dst)
 
 
 def _open_with_retry(path: Path, mode: str):
@@ -628,8 +736,8 @@ def _open_with_retry(path: Path, mode: str):
         check_parent_alive()
         return path.open(mode)
     if _is_executable_path(path) and any(flag in mode for flag in 'wax+'):
-        return _retry_locked(open_if_alive, 600.0, executable=True)
-    return _retry_locked(open_if_alive)
+        return _retry_locked(open_if_alive, 600.0, executable=True, path=path)
+    return _retry_locked(open_if_alive, path=path)
 
 
 @contextlib.contextmanager
@@ -1831,8 +1939,8 @@ def restore_segment_checkpoint(temp, checkpoint, item):
                     raise ValueError('checkpoint hash mismatch')
         return index, hasher
     except (OSError, ValueError, KeyError, TypeError):
-        _retry_locked(lambda: temp.unlink(missing_ok=True))
-        _retry_locked(lambda: checkpoint.unlink(missing_ok=True))
+        _retry_locked(lambda: temp.unlink(missing_ok=True), path=temp)
+        _retry_locked(lambda: checkpoint.unlink(missing_ok=True), path=checkpoint)
         return 0, hashlib.sha256()
 
 

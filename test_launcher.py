@@ -185,6 +185,39 @@ class StateTests(unittest.TestCase):
         self.assertNotIn('Details were saved to:', error)
         self.assertNotIn('C:\\temp\\HeyListen-Get.log', error)
 
+    def test_worker_log_open_failure_starts_no_worker(self):
+        import io
+        from unittest.mock import MagicMock
+        events = launcher.ProgressEvents()
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)):
+            blocked = Path(d) / 'log'
+            blocked.mkdir()  # opening a directory for append always fails
+            with patch.object(launcher, 'LOG', blocked), patch.object(launcher.subprocess, 'Popen') as popen:
+                launcher.worker_command(events, [])
+        self.assertFalse(popen.called)
+        self.assertIsNone(getattr(events, 'process', None))
+        kind, error = events.queue.get_nowait()
+        self.assertEqual(kind, 'error')
+        self.assertTrue(events.queue.empty())
+
+    def test_worker_failure_after_start_stops_the_worker(self):
+        import io
+        from unittest.mock import MagicMock
+        events = launcher.ProgressEvents()
+        proc = MagicMock()
+        proc.stdout = io.StringIO('Downloading...\n')
+        proc.pid = 4242
+        proc.poll.return_value = None
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'LOG', Path(d) / 'log'), patch.object(launcher.subprocess, 'Popen', return_value=proc), patch.object(launcher.subprocess, 'run') as run, patch.object(launcher, 'parse_progress', side_effect=ValueError('progress parser broke')):
+            launcher.worker_command(events, [])
+        self.assertTrue(events.cancelled.is_set())
+        if os.name == 'nt':
+            self.assertTrue(run.called)
+            self.assertIn('4242', ' '.join(str(part) for part in run.call_args.args[0]))
+        kind, error = events.queue.get_nowait()
+        self.assertEqual(kind, 'error')
+        self.assertIn('progress parser broke', error)
+
     def test_friendly_gui_text_redacts_paths_and_console_leaders(self):
         text = launcher.friendly_gui_text(r'Problem: C:\Users\friend\file.bin failed ... retry /home/friend/file.bin')
         self.assertNotIn(r'C:\Users', text)
