@@ -13,7 +13,7 @@ import launcher
 
 @unittest.skipUnless(os.name == 'nt', 'Windows file-handle semantics')
 class OwnershipRaceTests(unittest.TestCase):
-    def test_concurrent_relocations_preserve_both_targets_and_records(self):
+    def test_concurrent_relocations_launch_recorded_targets_serially(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             game = root / 'game'
@@ -30,7 +30,12 @@ sys.frozen = True
 sys.executable = sys.argv[1]
 launcher.register_install = lambda *a, **k: None
 launcher.log_message = lambda *a: None
-launcher.subprocess.Popen = lambda *a, **k: time.sleep(.4)
+def launch(args, **kwargs):
+    target = Path(args[0])
+    assert target.read_bytes() == b'launcher'
+    time.sleep(.4)
+    assert target.read_bytes() == b'launcher'
+launcher.subprocess.Popen = launch
 launcher.relocate_launcher(Path(sys.argv[2]))
 '''
             env = dict(os.environ, LOCALAPPDATA=str(root))
@@ -39,7 +44,7 @@ launcher.relocate_launcher(Path(sys.argv[2]))
                 self.assertEqual(child.wait(timeout=20), 0)
             records = launcher._launcher_records(fallback)
             siblings = list(fallback.glob('Ocarina of Time-*.exe'))
-            self.assertEqual(len(siblings), 2)
+            self.assertEqual(len(siblings), 1)
             self.assertEqual({p.name for p in siblings}, set(records))
 
     def test_replacement_during_verification_is_not_deleted(self):
