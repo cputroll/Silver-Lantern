@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import parent_identity
+import qa_pause
 import sys
 import time
 import traceback
@@ -31,6 +32,11 @@ except ModuleNotFoundError as exc:
     from types import SimpleNamespace
     build_flags = SimpleNamespace(QA_SEAMS=True)
 
+
+def _qa_pause(name):
+    qa_pause.pause(name, build_flags.QA_SEAMS)
+
+
 ROOT = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
 BASE = Path(sys.executable).resolve().parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
 STATE_DIR = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'SilverLantern'
@@ -38,6 +44,8 @@ CONFIG = STATE_DIR / 'launcher.json'
 LOG = STATE_DIR / 'launcher.log'
 # Test-only isolation overrides, read once: registry parent under HKCU, shortcut directories,
 # a local game manifest, and guarded dummy-video GUI installation automation.
+# QA builds also support SILVER_LANTERN_PAUSE_AT, SILVER_LANTERN_PAUSE_READY,
+# and SILVER_LANTERN_PAUSE_RELEASE for deterministic checkpoint tests.
 # Empty/unset values preserve normal registration, known folders, and game channel behavior.
 _TEST_REG_ROOT = os.environ.get('SILVER_LANTERN_REG_ROOT') or r'Software\Microsoft\Windows\CurrentVersion\Uninstall'
 _TEST_DESKTOP_DIR = os.environ.get('SILVER_LANTERN_DESKTOP_DIR') or None
@@ -762,6 +770,7 @@ def _delete_verified_launcher(path, expected):
             digest.update(block)
         if digest.hexdigest() != expected:
             return False
+        _qa_pause('sibling_race')
         disposition = wintypes.BOOL(True)
         if not kernel.SetFileInformationByHandle(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
             raise ctypes.WinError(ctypes.get_last_error())

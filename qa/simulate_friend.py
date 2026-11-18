@@ -347,7 +347,36 @@ def main():
             holder.wait(timeout=10)
 
     def swap_boundary(boundary):
-        raise RuntimeError(f'No deterministic packaged interruption hook for swap boundary: {boundary}')
+        folder = artifacts / ('swap-' + boundary)
+        folder.mkdir()
+        target = folder / 'HeyListen-Get.exe'
+        shutil.copy2(exe, target)
+        ready, release_file = folder / 'ready', folder / 'release'
+        pause_env = dict(env, SILVER_LANTERN_PAUSE_AT=boundary, SILVER_LANTERN_PAUSE_READY=str(ready), SILVER_LANTERN_PAUSE_RELEASE=str(release_file))
+        result = subprocess.run([str(target), '--cli', '--self-update-from', str(args.zip.resolve()), '--no-pause'], env=pause_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=90)
+        if result.returncode:
+            raise RuntimeError(f'update launch failed: {result.returncode}')
+        deadline = time.monotonic() + 30
+        while not ready.exists() and time.monotonic() < deadline:
+            if not target.exists(): raise RuntimeError('entry point disappeared before checkpoint')
+            time.sleep(.1)
+        if not ready.exists(): raise RuntimeError('swap checkpoint not reached')
+        if not target.exists(): raise RuntimeError('entry point absent at checkpoint')
+        pid = int(ready.read_text())
+        subprocess.run(['taskkill', '/F', '/PID', str(pid)], capture_output=True, timeout=10, check=True)
+        if not target.exists(): raise RuntimeError('entry point absent after interruption')
+        old_stages = set(folder.glob('.heylisten-update-*'))
+        command(target, '--self-update-from', args.zip.resolve(), '--no-pause')
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            if not target.exists(): raise RuntimeError('entry point absent during recovery')
+            try:
+                new_stages = set(folder.glob('.heylisten-update-*')) - old_stages
+                if new_stages and all(not (stage / 'replacement.exe').exists() for stage in new_stages) and command(target, '--version').strip() == command(exe, '--version').strip():
+                    return 'entry point retained; recovery executable runs'
+            except (OSError, RuntimeError): pass
+            time.sleep(.25)
+        raise TimeoutError('recovery did not complete')
 
     def sibling_ownership_race():
         gui_profile = artifacts / 'sibling-profile'
@@ -364,20 +393,33 @@ def main():
         state.mkdir(parents=True)
         (state / 'launcher.json').write_text(json.dumps({'game_dir': str(folder)}), encoding='utf-8')
         gui_env = dict(env, USERPROFILE=str(gui_profile), LOCALAPPDATA=str(gui_profile / 'local'), APPDATA=str(gui_profile / 'roaming'), SDL_VIDEODRIVER='dummy', SDL_RENDER_DRIVER='software', SILVER_LANTERN_TEST_GUI_INSTALL='1')
+        ready, release_file = artifacts / 'sibling-ready', artifacts / 'sibling-release'
+        gui_env.update(SILVER_LANTERN_PAUSE_AT='sibling_race', SILVER_LANTERN_PAUSE_READY=str(ready), SILVER_LANTERN_PAUSE_RELEASE=str(release_file))
+        replacement = folder / 'replacement.tmp'
+        replacement.write_bytes(b'unknown replacement')
         child = subprocess.Popen([str(root / 'Run Silver Lantern.exe'), '--gui', '--no-self-update'], env=gui_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
+            deadline = time.monotonic() + 30
+            while not ready.exists() and time.monotonic() < deadline: time.sleep(.1)
+            if not ready.exists(): raise RuntimeError('sibling checkpoint not reached')
+            try:
+                os.replace(replacement, stale)
+            except OSError as exc:
+                if exc.winerror != 5: raise
+            else: raise RuntimeError('concurrent replacement unexpectedly succeeded')
+            if replacement.read_bytes() != b'unknown replacement': raise RuntimeError('replacement damaged')
+            release_file.touch()
             if child.wait(timeout=30): raise RuntimeError('GUI relocation failed')
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline and not (folder / 'bin' / 'HeyListen.exe').exists(): time.sleep(.25)
             if stale.exists() or unknown.read_bytes() != b'unknown replacement':
                 raise RuntimeError('stale copy not removed or unknown sibling damaged')
-            raise RuntimeError('ownership preservation observed, but concurrent pathname race is not yet exercised')
+            return 'replacement rejected with Windows error 5; unknown and stale files handled safely'
         finally:
+            release_file.touch(exist_ok=True)
             if child.poll() is None: child.kill(); child.wait(timeout=10)
 
     def parent_only_kill(mode):
-        if mode == 'assembly':
-            raise RuntimeError('No deterministic assembly-phase synchronization is available yet')
         target = artifacts / ('orphan-' + mode)
         target.mkdir()
         sentinel = target / 'unknown.txt'; sentinel.write_bytes(b'unknown')
@@ -391,12 +433,14 @@ def main():
             def log_message(self, *args): pass
             def do_GET(self):
                 started.set()
-                if mode == 'assembly': release.wait(60)
                 try: super().do_GET()
                 except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError): pass
         local = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Blocking, directory=str(manifest.parent)))
         threading.Thread(target=local.serve_forever, daemon=True).start()
         run_env = dict(env, SILVER_LANTERN_TEST_ASSET_URL=f'http://127.0.0.1:{local.server_port}/')
+        pause_ready, pause_release = artifacts / 'assembly-ready', artifacts / 'assembly-release'
+        if mode == 'assembly':
+            run_env.update(SILVER_LANTERN_PAUSE_AT='assembly', SILVER_LANTERN_PAUSE_READY=str(pause_ready), SILVER_LANTERN_PAUSE_RELEASE=str(pause_release), SILVER_LANTERN_ASSEMBLY_WORKERS='1')
         argv = [str(exe), '--cli', '--install-game', str(target), '--game-manifest', str(manifest), '--no-self-update', '--no-preset', '--no-pause', '--plain']
         lock = None
         if mode == 'retry':
@@ -424,10 +468,17 @@ def main():
                 temporary = original.with_name(original.name + '.heylisten-new')
                 deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
-                    if temporary.exists() and child_output.exists() and 'Waiting for Windows to release a file' in child_output.read_text(encoding='utf-8', errors='replace'): break
+                    if temporary.exists() and child_output.exists() and any(message in child_output.read_text(encoding='utf-8', errors='replace') for message in ('Waiting for Windows to release a file', 'Windows is checking the game files')): break
                     time.sleep(.1)
                 else: raise RuntimeError('child did not enter locked replacement retry')
+            if mode == 'assembly':
+                deadline = time.monotonic() + 30
+                while not pause_ready.exists() and time.monotonic() < deadline: time.sleep(.1)
+                if not pause_ready.exists(): raise RuntimeError('assembly checkpoint not reached')
+            paused_files = {path: path.read_bytes() for path in target.rglob('*.heylisten-new') if path.is_file()} if mode == 'assembly' else {}
+            if mode == 'assembly' and not paused_files: raise RuntimeError('paused assembly has no destination temporary file')
             parent.terminate(); parent.wait(timeout=10)
+            pause_release.touch()
             release.set()
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline and process_creation_time(child_pid) == identity: time.sleep(.1)
@@ -437,6 +488,11 @@ def main():
             time.sleep(2)
             if original.read_bytes() != b'original entry point' or sentinel.read_bytes() != b'unknown':
                 raise RuntimeError('orphan replaced entry point or removed unknown file')
+            if mode == 'assembly':
+                for path, content in paused_files.items():
+                    if path.exists() and path.read_bytes() != content: raise RuntimeError('orphan wrote further assembly data')
+                command(exe, '--install-game', target, '--game-manifest', manifest, '--no-self-update', '--no-preset', '--no-pause', '--plain')
+                if original.read_bytes() != b'silver-lantern-fixture\n': raise RuntimeError('rerun did not complete')
             return f'parent killed during {mode}; child stopped and files preserved'
         finally:
             release.set()
@@ -564,9 +620,8 @@ def main():
         ('file-lock', file_lock),
         ('first-temp-write-lock', first_temp_write_lock),
         ('previous-release-update', prior_update),
-        ('swap-before-staging', lambda: swap_boundary('before staging')),
-        ('swap-after-staging', lambda: swap_boundary('after staging, before swap')),
-        ('swap-after-swap', lambda: swap_boundary('after swap, before relaunch')),
+        ('swap-pre-swap', lambda: swap_boundary('pre_swap')),
+        ('swap-post-swap', lambda: swap_boundary('post_swap')),
         ('sibling-ownership-race', sibling_ownership_race),
         ('parent-kill-assembly', lambda: parent_only_kill('assembly')),
         ('parent-kill-lock-retry', lambda: parent_only_kill('retry')),

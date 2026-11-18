@@ -18,8 +18,16 @@ with tempfile.TemporaryDirectory(prefix='silver-trust-') as directory:
     env = dict(os.environ, SILVER_LANTERN_GAME_MANIFEST=str(root / 'evil.json'),
                SILVER_LANTERN_TEST_ASSET_URL='http://127.0.0.1:1234/',
                SILVER_LANTERN_ALLOW_LOCAL_UPDATE='1')
-    result = subprocess.run([str(root / member), '--cli', '--internal-trust-check'],
-                            env=env, capture_output=True, text=True, timeout=90, check=True)
+    for name in ('SILVER_LANTERN_PAUSE_AT', 'SILVER_LANTERN_PAUSE_READY', 'SILVER_LANTERN_PAUSE_RELEASE'):
+        env.pop(name, None)
+    command = [str(root / member), '--cli', '--internal-trust-check']
+    baseline = subprocess.run(command, env=env, capture_output=True, text=True, timeout=90, check=True)
+    for checkpoint in ('assembly', 'sibling_race', 'pre_swap', 'post_swap'):
+        env.update(SILVER_LANTERN_PAUSE_AT=checkpoint, SILVER_LANTERN_PAUSE_READY=str(root / 'ready'),
+                   SILVER_LANTERN_PAUSE_RELEASE=str(root / 'release'))
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=90, check=True)
+        if (result.returncode, result.stdout, result.stderr) != (baseline.returncode, baseline.stdout, baseline.stderr) or (root / 'ready').exists():
+            raise SystemExit('Production behavior changed with QA pause environment')
     actual = json.loads(result.stdout.strip())
     expected = {'manifest_override': None,
                 'asset_url': 'https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/',

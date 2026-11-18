@@ -40,6 +40,7 @@ from concurrent.futures import ThreadPoolExecutor
 from collections import deque
 from pathlib import Path
 from urllib.parse import quote, urlparse
+import qa_pause
 
 try:
     import build_flags
@@ -48,6 +49,11 @@ except ModuleNotFoundError as exc:
         raise
     from types import SimpleNamespace
     build_flags = SimpleNamespace(QA_SEAMS=True)
+
+
+def _qa_pause(name):
+    qa_pause.pause(name, build_flags.QA_SEAMS)
+
 
 try:
     from curl_cffi import requests
@@ -1541,7 +1547,9 @@ def replace_transactionally(target: Path, replacement: Path) -> None:
             raise ValueError('staged update failed verification')
         log_update_phase('verification done', verify_started)
         swap_started = time.monotonic()
+        _qa_pause('pre_swap')
         _replace_with_retry(staged, target)
+        _qa_pause('post_swap')
         log_update_phase('swap done', swap_started)
     finally:
         try:
@@ -2096,6 +2104,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                             data = os.read(fd, min(remaining, 1024 * 1024))
                             if not data:
                                 raise ValueError(f"short segment: {segment['asset']}")
+                            _qa_pause('assembly')
+                            check_parent_alive()
                             output.write(data)
                             segment_hash.update(data)
                             state['hasher'].update(data)
@@ -2394,6 +2404,8 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                                     chunk = source.read(min(remaining, 1024 * 1024))
                                     if not chunk:
                                         raise ValueError(f"short segment: {part['asset']}")
+                                    _qa_pause('assembly')
+                                    check_parent_alive()
                                     output.write(chunk)
                                     segment_hash.update(chunk)
                                     file_hash.update(chunk)
