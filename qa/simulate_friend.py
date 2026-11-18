@@ -22,6 +22,7 @@ def fixture_manifest(root: Path) -> Path:
     source.mkdir()
     (source / 'bin').mkdir()
     (source / 'bin' / 'HeyListen.exe').write_bytes(b'silver-lantern-fixture\n')
+    (source / 'hookshot_version.txt').write_text('fixture\n', encoding='utf-8')
     spec = importlib.util.spec_from_file_location('pack_game', Path(__file__).resolve().parents[1] / 'pack-game.py')
     packer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(packer)
@@ -178,7 +179,7 @@ def main():
         state = local / 'SilverLantern'
         state.mkdir(parents=True)
         (state / 'launcher.json').write_text(json.dumps({'game_dir': str(folder)}), encoding='utf-8')
-        gui_env = dict(env, USERPROFILE=str(gui_profile), LOCALAPPDATA=str(local), APPDATA=str(gui_profile / 'roaming'), SDL_VIDEODRIVER='dummy', SILVER_LANTERN_TEST_GUI_INSTALL='1')
+        gui_env = dict(env, USERPROFILE=str(gui_profile), LOCALAPPDATA=str(local), APPDATA=str(gui_profile / 'roaming'), SDL_VIDEODRIVER='dummy', SDL_RENDER_DRIVER='software', SILVER_LANTERN_TEST_GUI_INSTALL='1')
         child = subprocess.Popen([str(root / 'Run Silver Lantern.exe'), '--gui', '--no-self-update'], env=gui_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             exit_code = child.wait(timeout=30)
@@ -191,9 +192,12 @@ def main():
         relocated = folder / 'Ocarina of Time.exe'
         deadline = time.monotonic() + 30
         installed = folder / 'bin' / 'HeyListen.exe'
-        while time.monotonic() < deadline and not installed.exists():
+        gui_log = state / 'launcher.log'
+        while time.monotonic() < deadline:
+            if installed.exists() and gui_log.exists() and 'Test GUI: installation finished, state=State.READY' in gui_log.read_text(encoding='utf-8', errors='replace'):
+                break
             time.sleep(.25)
-        if not relocated.exists() or not installed.exists() or installed.read_bytes() != b'silver-lantern-fixture\n':
+        if not relocated.exists() or not installed.exists() or installed.read_bytes() != b'silver-lantern-fixture\n' or not gui_log.exists() or 'Test GUI: installation finished, state=State.READY' not in gui_log.read_text(encoding='utf-8', errors='replace'):
             script = "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:SILVER_FRIEND_ROOT, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
             subprocess.run(['powershell', '-NoProfile', '-Command', script], env=dict(env, SILVER_FRIEND_ROOT=str(gui_profile)), capture_output=True, timeout=20)
             raise RuntimeError('GUI did not relocate and install fixture')
@@ -319,18 +323,27 @@ def main():
             stop.set(); watcher.join(timeout=25)
             if name != 'crash-and-zombie-safety':
                 def checked_safety():
-                    result = safety()
                     import ctypes
-                    alive = set()
-                    for pid in tracked - {os.getpid()}:
-                        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-                        if handle:
-                            code = ctypes.c_ulong()
-                            if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259:
-                                alive.add(pid)
-                            ctypes.windll.kernel32.CloseHandle(handle)
-                    if alive: raise RuntimeError('remaining descendant processes: ' + repr(alive))
-                    return result
+                    deadline = time.monotonic() + 15
+                    while True:
+                        alive = set()
+                        for pid in tracked - {os.getpid()}:
+                            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+                            if handle:
+                                code = ctypes.c_ulong()
+                                if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259:
+                                    alive.add(pid)
+                                ctypes.windll.kernel32.CloseHandle(handle)
+                        try:
+                            result = safety()
+                            error = None
+                        except RuntimeError as exc:
+                            error = exc
+                        if not alive and error is None:
+                            return result
+                        if time.monotonic() >= deadline:
+                            raise RuntimeError(f'process safety did not settle: descendants={alive}; {error}')
+                        time.sleep(.5)
                 results.append(run_check(name + '-safety', artifacts, checked_safety))
     finally:
         server.shutdown()

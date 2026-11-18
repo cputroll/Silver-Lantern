@@ -8,8 +8,10 @@ class SimulatorTests(unittest.TestCase):
     def test_fixture_manifest_contains_small_valid_asset(self):
         with tempfile.TemporaryDirectory() as d:
             manifest = fixture_manifest(Path(d))
+            import json
             self.assertLess(manifest.stat().st_size, 10000)
             self.assertTrue(list((Path(d) / 'assets').glob('*.tar')))
+            self.assertEqual({item['path'] for item in json.loads(manifest.read_text())['files']}, {'bin/HeyListen.exe', 'hookshot_version.txt'})
 
     def test_invalid_zip_makes_runner_exit_nonzero(self):
         import subprocess

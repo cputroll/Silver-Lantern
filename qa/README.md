@@ -2,7 +2,7 @@
 
 Before **any** release tag, build the exact zip using `release.ps1 -Tag v<version> -NoPublish`, run `qa/simulate-friend.ps1 -Zip <zip>` successfully, and obtain an independent review of the diff since the last tag from a different agent/session. Record reviewer sign-off in the PR, commit message, or `qa/reviews/`.
 
-**Gate incomplete: do not tag a release.** The zip-root dummy-driver GUI relocates and logs `Test GUI: entering SDL initialization`, but does not reach `Test GUI: SDL renderer initialized` or the fixture worker before timeout (run 10). No real GUI screenshot was produced. The gate fails closed for that flow. Resume, file-lock, stale-backup, prior-version update and uninstall passed against a local package in run 9. Safety checks sample descendants while each flow runs, but short-lived reparented processes can escape sampling.
+The GUI simulation sets `SDL_VIDEODRIVER=dummy` and `SDL_RENDER_DRIVER=software`, and requires the fixture install to reach the GUI's READY state. Safety checks sample descendants while each flow runs, but short-lived reparented processes can escape sampling; strengthen this process-tree audit before relying on it as exhaustive crash safety. Do not tag a release unless the entire gate passes.
 
 For the prior-release check, pass `-OldZip` with a separately built test-enabled `0.0.1` zip: set `APP_VERSION`, the standalone launcher fallback version, and `sources.json` in an isolated copy, then build with `-Tag v0.0.1 -NoPublish`. The published v1.6.7 client predates the test seam.
 
