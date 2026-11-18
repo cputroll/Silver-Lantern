@@ -161,6 +161,65 @@ class V1LegacyBoundaryWiringTests(unittest.TestCase):
         self.assertEqual(calls, ['bin/game.exe', 'bin/game.exe'],
                          'v1 installs must recheck the boundary before staging and before final placement')
 
+    def test_v1_junction_swap_refused_and_referent_untouched(self):
+        if os.name != 'nt':
+            self.skipTest('junctions require Windows')
+        import copy
+        from test_game_sync import manifest
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / 'game'
+            root.mkdir()
+            outside = Path(d) / 'outside'
+            outside.mkdir()
+            sentinel = outside / 'sentinel.bin'
+            sentinel.write_bytes(b'safe')
+            m = manifest()
+            second = copy.deepcopy(m['files'][0])
+            second['path'] = 'bin/second.exe'
+            second['parts'] = [dict(second['parts'][0], asset='g002.p1')]
+            m['files'].append(second)
+            m['total_bytes'] *= 2
+            result = {}
+            gate = threading.Event()
+
+            def install():
+                def stream(s, url, dest, **kw):
+                    if url.endswith('g002.p1'):
+                        gate.wait(timeout=30)
+                    dest.write_bytes(b'abc'); kw['progress'](3)
+                try:
+                    with patch.object(h, 'stream_to', side_effect=stream):
+                        h.install_game(object(), h.parse_game_manifest(json.dumps(m)), root)
+                    result['ok'] = True
+                except Exception as exc:
+                    result['exc'] = exc
+
+            thread = threading.Thread(target=install)
+            thread.start()
+            try:
+                bin_dir = root / 'bin'
+                deadline = time.monotonic() + 20
+                swapped = False
+                while time.monotonic() < deadline and not swapped:
+                    if (bin_dir / 'game.exe').exists():
+                        try:
+                            bin_dir.rename(root / 'bin.moved')
+                            make_junction(outside, bin_dir)
+                            swapped = True
+                            break
+                        except OSError:
+                            time.sleep(0.01)
+                    else:
+                        time.sleep(0.01)
+                self.assertTrue(swapped, 'could not stage the junction swap')
+            finally:
+                gate.set()
+                thread.join(timeout=60)
+            self.assertNotIn('ok', result)
+            self.assertIsInstance(result.get('exc'), h.InvalidGamePath, repr(result.get('exc')))
+            self.assertEqual(sentinel.read_bytes(), b'safe')
+            self.assertEqual([p.name for p in outside.iterdir()], ['sentinel.bin'])
+
 
 if __name__ == '__main__':
     unittest.main()
