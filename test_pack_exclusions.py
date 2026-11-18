@@ -14,9 +14,11 @@ class PackExclusionTests(unittest.TestCase):
             root = Path(tmp); source = root / 'game'; source.mkdir()
             excluded = ['.heylisten-get/state', '.heylisten-parts/bundle', '.heylisten-new123',
                         'nested/file.heylisten-new', 'nested/file.update-backup', 'HeyListen-Get.log',
-                        'launcher.log', 'Ocarina of Time Test.exe', 'Run Silver Lantern x.exe',
-                        'SilverLantern-v2.exe', 'hookshot_options.ini']
-            included = ['game.dat', 'nested/SilverLantern.exe']
+                        'launcher.log', 'SilverLantern.exe', 'HeyListen-Get.exe',
+                        'Run Silver Lantern.exe', 'support/SilverLantern.exe',
+                        'support/HeyListen-Get.exe', 'hookshot_options.ini']
+            included = ['game.dat', 'nested/SilverLantern.exe', 'Ocarina of Time Test.exe',
+                        'Run Silver Lantern x.exe', 'SilverLantern-v2.exe', 'Ship of Harkinian.exe']
             for name in excluded + included:
                 path = source / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(name.encode())
             result = packer.pack(source, root / 'out')
