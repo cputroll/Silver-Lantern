@@ -1,4 +1,7 @@
 import json
+import ntpath
+import os
+import threading
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -31,6 +34,56 @@ class InvalidGamePathTest(unittest.TestCase):
             for entry in ['../escape', '/absolute', 'romfs/../../escape']:
                 with self.subTest(entry=entry), self.assertRaises(h.InvalidGamePath):
                     h.game_path(root, entry)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows realpath race')
+    def test_parallel_parent_creation_during_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entry = 'romfs/Bake/Probe/Scene/BarinadeStage/X0_Y0_Z0_2.bkprb.zs'
+            target = root.joinpath(*entry.split('/'))
+            original = ntpath._getfinalpathname
+            calls = 0
+            def racing(path):
+                nonlocal calls
+                if str(path).lower() == str(target).lower():
+                    calls += 1
+                    if calls == 3:
+                        worker = threading.Thread(target=lambda: target.parent.mkdir(parents=True, exist_ok=True))
+                        worker.start()
+                        worker.join(timeout=5)
+                        self.assertFalse(worker.is_alive())
+                return original(path)
+            with patch.object(ntpath, '_getfinalpathname', side_effect=racing):
+                self.assertEqual(h.game_path(root, entry), target)
+            self.assertGreaterEqual(calls, 3)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows extended path handling')
+    def test_extended_prefix_does_not_hide_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'root'
+            root.mkdir()
+            outside = Path(tmp) / 'outside'
+            original = Path.resolve
+            def resolved(path, *args, **kwargs):
+                if path == root / 'romfs' / 'file.bin':
+                    return Path('\\\\\\\\?\\\\' + str(outside))
+                return original(path, *args, **kwargs)
+            with patch.object(Path, 'resolve', resolved):
+                with self.assertRaises(h.InvalidGamePath) as caught:
+                    h.game_path(root, 'romfs/file.bin')
+            self.assertIn('resolved target=', str(caught.exception))
+            self.assertIn('resolved root=', str(caught.exception))
+
+    def test_resolution_exception_is_logged_and_propagated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            error = OSError('resolution failed')
+            with patch.object(Path, 'resolve', side_effect=error), patch.object(h, 'log') as logger:
+                with self.assertRaises(OSError) as caught:
+                    h.game_path(root, 'romfs/file.bin')
+            self.assertIs(caught.exception, error)
+            self.assertIn('resolution failed', logger.call_args.args[0])
+            self.assertIn('romfs', logger.call_args.args[0])
 
     def test_reparse_ancestor_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:

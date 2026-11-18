@@ -1973,9 +1973,20 @@ class GameProgress(Progress):
 
 
 class InvalidGamePath(ValueError):
-    def __init__(self, root, entry):
+    def __init__(self, root, entry, reason='invalid or escaping path'):
         self.entry = entry
-        super().__init__(f'manifest path escapes install directory: {entry!r}; install directory: {root}')
+        super().__init__(f'manifest path rejected: {entry!r}; install directory: {root}; reason: {reason}')
+
+
+def _comparable_resolved_path(path):
+    """Normalize Windows extended-length DOS/UNC prefixes, not device paths."""
+    text = str(path)
+    if os.name == 'nt':
+        if text[:8].lower() == '\\\\?\\unc\\':
+            text = '\\\\' + text[8:]
+        elif text.startswith('\\\\?\\') and len(text) >= 7 and text[5:7] == ':\\':
+            text = text[4:]
+    return Path(text)
 
 
 def game_path(root: Path, relative: str) -> Path:
@@ -1986,9 +1997,15 @@ def game_path(root: Path, relative: str) -> Path:
     for part in parts:
         target = target / part
         if _leftover_kind(target) == 'reparse':
-            raise InvalidGamePath(root.resolve(), relative)
-    if not target.resolve().is_relative_to(root.resolve()):
-        raise InvalidGamePath(root.resolve(), relative)
+            raise InvalidGamePath(root.resolve(), relative, f'reparse point at {str(target)!r}')
+    try:
+        resolved_target = target.resolve()
+        resolved_root = root.resolve()
+    except OSError as exc:
+        log(f'Game path resolution failed: root={str(root)!r}; target={str(target)!r}; exception={exc!r}; winerror={getattr(exc, "winerror", None)}')
+        raise
+    if not _comparable_resolved_path(resolved_target).is_relative_to(_comparable_resolved_path(resolved_root)):
+        raise InvalidGamePath(resolved_root, relative, f'resolved target={str(resolved_target)!r}; resolved root={str(resolved_root)!r}')
     return target
 
 
