@@ -9,6 +9,8 @@ $env:GIT_TERMINAL_PROMPT = '0'
 $stateDir = Join-Path $env:LOCALAPPDATA 'SilverLantern'
 $logPath = Join-Path $stateDir 'autoship.log'
 $repo = $PSScriptRoot
+. (Join-Path $repo 'OwnedProcessGuard.ps1')
+$ownedProcessMarker = Join-Path $env:PUBLIC 'SilverLantern-AutoShip-updater-recovery.lock'
 $work = $null
 $shipLock = $null
 function Enter-ShipLock([string]$Path) {
@@ -43,22 +45,95 @@ function Get-AvailableRevision([int]$PreviousRevision, [string[]]$AssetNames) {
         $revision++
     }
 }
+function Assert-PublishingHost([string]$Designated, [string]$Actual) {
+    if ([string]::IsNullOrWhiteSpace($Designated) -or [string]::IsNullOrWhiteSpace($Actual) -or $Designated.Trim() -ine $Actual.Trim()) {
+        throw 'Publishing disabled: SILVERLANTERN_PUBLISH_HOST must match this computer name'
+    }
+}
+function Assert-ChannelPointer($Pointer) {
+    if ([int]$Pointer.revision -lt 1 -or [string]$Pointer.manifest -cne "game-manifest-$($Pointer.revision).json" -or [string]$Pointer.sha256 -notmatch '^[a-fA-F0-9]{64}$') { throw 'Invalid channel pointer' }
+}
 function Version([string]$Tag) {
-    if ($Tag -notmatch '^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$') { throw 'invalid version' }
+    if ($Tag -notmatch '^v?(\d+)\.(\d+)\.(\d+)$') { throw 'invalid or ambiguous version' }
     return [version]::new([int]$Matches[1], [int]$Matches[2], [int]$Matches[3])
+}
+function Read-GameVersion([string]$Path) {
+    $value = (Get-Content -LiteralPath $Path -Raw).Trim()
+    if ($value -match '(?m)^version\s*=\s*([^\r\n]+)') { $value = $Matches[1].Trim() }
+    $null = Version $value
+    return $value
+}
+function Get-VerifiedChannelVersion($Pointer, [string]$Path, [string]$LocalVersionFile) {
+    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash
+    if ($actual -ine [string]$Pointer.sha256) { throw 'Channel manifest digest mismatch' }
+    $manifest = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ([int]$manifest.revision -ne [int]$Pointer.revision) { throw 'Channel manifest revision mismatch' }
+    if ($manifest.game_version) {
+        $value = [string]$manifest.game_version
+    } else {
+        $entries = @($manifest.files | Where-Object { $_.path -ceq 'hookshot_version.txt' })
+        if ($entries.Count -ne 1 -or -not (Test-Path -LiteralPath $LocalVersionFile)) { throw 'Channel game version unknown' }
+        $localHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $LocalVersionFile).Hash
+        if ($localHash -ieq [string]$entries[0].sha256) {
+            $value = Read-GameVersion $LocalVersionFile
+        } else {
+            $value = & python (Join-Path $repo 'channel_version_recovery.py') $Path
+            if ($LASTEXITCODE -ne 0 -or @($value).Count -ne 1) { throw 'Channel game version unknown' }
+            $value = [string]$value
+        }
+    }
+    $null = Version $value
+    return $value
+}
+function Assert-NoChannelRegression([string]$Candidate, [string]$Channel) {
+    if ((Version $Candidate) -lt (Version $Channel)) { throw 'Candidate game version would regress authoritative channel' }
+}
+function Test-ChannelCurrent([string]$Installed, [string]$Latest, [string]$Channel) {
+    return ((Version $Channel) -ge (Version $Installed)) -and ((Version $Channel) -ge (Version $Latest))
 }
 try {
     New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+    if (-not $DryRun) {
+        Assert-PublishingHost $env:SILVERLANTERN_PUBLISH_HOST $env:COMPUTERNAME
+        throw 'Publication hold: cross-host single-publisher enforcement and crash recovery require operational approval'
+    }
     $shipLock = Enter-ShipLock (Join-Path $env:PUBLIC 'SilverLantern-AutoShip.lock')
-    $installed = (Get-Content -LiteralPath (Join-Path $GameFolder 'hookshot_version.txt') -Raw).Trim()
-    if ($installed -match '(?m)^version\s*=\s*([^\r\n]+)') { $installed = $Matches[1].Trim() }
+    Assert-OwnedProcessClear $ownedProcessMarker
+    $installed = Read-GameVersion (Join-Path $GameFolder 'hookshot_version.txt')
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Sacrappy/HeyListen/releases/latest' -Headers @{ 'User-Agent' = 'Silver-Lantern-AutoShip'; 'Accept' = 'application/vnd.github+json' }
     $latest = [string]$release.tag_name
     $due = $Force -or ((Version $latest) -gt (Version $installed))
     if (-not $due) {
-        Log "Current installed=$installed latest=$latest"
-        Write-Output "GAMESHIP status=current installed=$installed latest=$latest"
-        exit 0
+        if (-not $DryRun) {
+            Push-Location $repo
+            try {
+                $tokenFile = Join-Path $env:USERPROFILE '.heylisten-get\github-token.txt'
+                if (-not $env:GH_TOKEN -and (Test-Path -LiteralPath $tokenFile)) { $env:GH_TOKEN = (Get-Content -LiteralPath $tokenFile -Raw).Trim() }
+                if (-not $env:GH_TOKEN) { throw 'No GitHub token for reconciliation' }
+                $work = Join-Path ([IO.Path]::GetTempPath()) ('silvership-' + [guid]::NewGuid().ToString('N'))
+                New-Item -ItemType Directory -Path $work | Out-Null
+                Run 'git' @('fetch', 'origin', '+refs/heads/game-channel:refs/remotes/origin/game-channel')
+                $previousText = (git show 'refs/remotes/origin/game-channel:channel.json') -join "`n"
+                if ($LASTEXITCODE -ne 0 -or -not $previousText) { throw 'Could not read authoritative channel pointer' }
+                $previous = $previousText | ConvertFrom-Json
+                Assert-ChannelPointer $previous
+                $channelDir = Join-Path $work 'channel-check'
+                New-Item -ItemType Directory -Path $channelDir | Out-Null
+                Run 'gh' @('release', 'download', 'game-v1', '--repo', 'cputroll/Silver-Lantern', '--pattern', [string]$previous.manifest, '--dir', $channelDir)
+                $channelVersion = Get-VerifiedChannelVersion $previous (Join-Path $channelDir ([string]$previous.manifest)) (Join-Path $GameFolder 'hookshot_version.txt')
+                if (-not (Test-ChannelCurrent $installed $latest $channelVersion)) {
+                    $due = $true
+                    Log "Channel behind installed=$installed latest=$latest channel=$channelVersion"
+                }
+            } finally { Pop-Location }
+        } else {
+            throw 'Dry run cannot establish channel version; no current status is asserted'
+        }
+        if (-not $due) {
+            Log "Current installed=$installed latest=$latest"
+            Write-Output "GAMESHIP status=current installed=$installed latest=$latest"
+            exit 0
+        }
     }
     if ($DryRun) {
         Log 'Plan: rebuild, pack, upload immutable assets, commit manifest, then advance channel.'
@@ -83,7 +158,11 @@ try {
             $previousText = (git show "${channelTip}:channel.json") -join "`n"
             if ($LASTEXITCODE -ne 0 -or -not $previousText) { throw 'Could not read fetched channel pointer' }
             $previous = $previousText | ConvertFrom-Json
-            if (-not $previous.revision -or [int]$previous.revision -lt 1) { throw 'Invalid channel revision' }
+            Assert-ChannelPointer $previous
+            $channelDir = Join-Path $work 'publication-channel-check'
+            New-Item -ItemType Directory -Path $channelDir | Out-Null
+            Run 'gh' @('release', 'download', 'game-v1', '--repo', 'cputroll/Silver-Lantern', '--pattern', [string]$previous.manifest, '--dir', $channelDir)
+            $channelVersion = Get-VerifiedChannelVersion $previous (Join-Path $channelDir ([string]$previous.manifest)) (Join-Path $GameFolder 'hookshot_version.txt')
         }
         Run 'git' @('pull', '--rebase', 'origin', 'main')
         $repoManifest = Join-Path $repo 'game-manifest.json'
@@ -101,15 +180,25 @@ try {
         $revision = Get-AvailableRevision -PreviousRevision $previousRevision -AssetNames @($existing.Keys)
         $prefix = "r$revision-"
         Log "Rebuilding game for revision $revision"
-        $updatePreference = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'Update-Game.ps1') -GameFolder $GameFolder 2>&1 | ForEach-Object { Log ([string]$_) } }
-        finally { $ErrorActionPreference = $updatePreference }
-        if ($LASTEXITCODE -ne 10 -and $LASTEXITCODE -ne 0) { throw "update failed exit $LASTEXITCODE" }
+        # Fail closed until job emptiness and teardown are independently verified.
+        throw 'Updater process-tree ownership unavailable; publication blocked'
+        Add-Type -Path (Join-Path $repo 'OwnedProcess.cs')
+        $shell = (Get-Command powershell.exe -CommandType Application).Source | Select-Object -First 1
+        $updateExit = Invoke-GuardedOwnedProcess $ownedProcessMarker {
+            [OwnedProcess]::Run($shell, @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $repo 'Update-Game.ps1'), '-GameFolder', $GameFolder, '-RequireBuild'), 3590000)
+        }
+        if ($updateExit -ne 10) { throw "update did not complete a build (exit $updateExit)" }
         Run 'python' @((Join-Path $repo 'pack-game.py'), '--source', $GameFolder, '--out', $work, '--prefix', $prefix)
         $manifestPath = Join-Path $work 'game-manifest.json'
         $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if (@($manifest.assets).Count -lt 2) { throw 'fewer than two assets' }
+        $versionFile = Join-Path $GameFolder 'hookshot_version.txt'
+        $packedVersion = Read-GameVersion $versionFile
+        $versionEntries = @($manifest.files | Where-Object { $_.path -ceq 'hookshot_version.txt' })
+        if ($versionEntries.Count -ne 1 -or (Get-FileHash -Algorithm SHA256 -LiteralPath $versionFile).Hash -ine [string]$versionEntries[0].sha256) { throw 'Packed version file changed or is missing' }
+        if ((Version $packedVersion) -lt (Version $latest)) { throw 'Updated local game version is older than latest release' }
+        if ($hasChannel) { Assert-NoChannelRegression $packedVersion $channelVersion }
+        $manifest | Add-Member -NotePropertyName game_version -NotePropertyValue $packedVersion
         $manifest | Add-Member -NotePropertyName revision -NotePropertyValue $revision
         $manifestJson = $manifest | ConvertTo-Json -Depth 20 -Compress
         $manifestAsset = "game-manifest-$revision.json"
@@ -166,21 +255,7 @@ try {
             Run 'git' @('worktree', 'remove', '--force', $channelWork)
         }
 
-        # Legacy clients read the mutable fixed asset. A concurrent publisher on another host
-        # could overwrite it with an older revision, so re-upload and confirm the remote digest
-        # a few times; finitely many publishers must converge.
-        $legacy = Join-Path $work 'game-manifest.json'
-        Copy-Item -LiteralPath $manifestFile -Destination $legacy -Force
-        $legacySha = (Get-FileHash -Algorithm SHA256 -LiteralPath $legacy).Hash.ToLowerInvariant()
-        $legacyOk = $false
-        for ($attempt = 1; $attempt -le 3; $attempt++) {
-            Run 'gh' @('release', 'upload', 'game-v1', $legacy, '--clobber', '--repo', 'cputroll/Silver-Lantern')
-            $remote = (gh release view game-v1 --repo cputroll/Silver-Lantern --json assets) | ConvertFrom-Json
-            $digest = [string](@($remote.assets) | Where-Object { $_.name -eq 'game-manifest.json' } | Select-Object -First 1).digest
-            if (($digest -replace '^sha256:', '').ToLowerInvariant() -eq $legacySha) { $legacyOk = $true; break }
-            Log "Legacy manifest mismatch (attempt $attempt); retrying"
-        }
-        if (-not $legacyOk) { throw 'legacy game-manifest.json could not be confirmed' }
+        # Legacy clients stay on their existing manifest; only the leased channel is updated.
         Log "Shipped revision=$revision assets=$(@($manifest.assets).Count)"
         Write-Output "GAMESHIP status=shipped revision=$revision assets=$(@($manifest.assets).Count)"
         exit 10

@@ -28,6 +28,7 @@ param(
     [string]$GameFolder = (Join-Path $env:USERPROFILE 'Games\HeyListen'),
     [switch]$DryRun,
     [switch]$Force,
+    [switch]$RequireBuild,
     [ValidateRange(0, 1024)][int]$Jobs = 32,
     [string]$UpstreamRepo = 'Sacrappy/HeyListen',
     [switch]$NoBuilderUpdate,
@@ -236,7 +237,8 @@ try {
     $freeRam = Get-FreeRamGb
     Out-Record freeram_gb ($freeRam.ToString('0.0', $Inv))
 
-    if ($latestV -le $installedV -and -not $Force) {
+    if ($RequireBuild -and $latestV -lt $installedV) { Fail 'newer-installed' "refusing to rebuild newer installed $installed with older release $latest" }
+    if ($latestV -le $installedV -and -not $Force -and -not $RequireBuild) {
         if ($latestV -lt $installedV) { Say "installed $installed is newer than latest $latest; nothing to do" }
         Out-Record status current installed $installed latest $latest
         $exitCode = 0

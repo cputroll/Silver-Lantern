@@ -9,19 +9,19 @@ import launcher
 class ManifestServingTests(unittest.TestCase):
     def test_autoship_publishes_through_atomic_channel(self):
         script = (Path(__file__).parent / 'AutoShip-Game.ps1').read_text(encoding='utf-8')
-        self.assertNotIn('Publishing disabled', script, 'publisher must not be disabled')
+        self.assertIn('SILVERLANTERN_PUBLISH_HOST', script, 'publisher requires an explicitly designated host')
         # Bundles and the revisioned manifest are immutable: uploaded without --clobber.
         bundle_upload = "Run 'gh' @('release', 'upload', 'game-v1', (Join-Path $work $asset.asset), '--repo', 'cputroll/Silver-Lantern')"
         self.assertIn(bundle_upload, script)
         manifest_upload = "Run 'gh' @('release', 'upload', 'game-v1', $manifestFile, '--repo', 'cputroll/Silver-Lantern')"
         self.assertIn(manifest_upload, script)
-        # The channel pointer advances by fast-forward push before the legacy fixed
-        # manifest is replaced, so clients never see a partial or inverted switch.
-        channel_push = "Run 'git' @('-C', $channelWork, 'push', 'origin', 'HEAD:refs/heads/game-channel')"
-        legacy_upload = "Run 'gh' @('release', 'upload', 'game-v1', $legacy, '--clobber', '--repo', 'cputroll/Silver-Lantern')"
+        # Publish immutable assets before advancing the leased channel; the fixed
+        # legacy manifest must not be replaced because it can roll back across hosts.
+        channel_push = "'HEAD:refs/heads/game-channel'"
         self.assertIn(channel_push, script)
-        self.assertIn(legacy_upload, script)
-        self.assertLess(script.index(channel_push), script.index(legacy_upload))
+        self.assertLess(script.index(bundle_upload), script.index(channel_push))
+        self.assertLess(script.index(manifest_upload), script.index(channel_push))
+        self.assertNotRegex(script, r"(?im)^\s*Run\s+'gh'\s+@\('release',\s*'upload'[^\r\n]*(?:\$legacy|game-manifest\.json)")
         # The pointer retains the previous revision for rollback.
         self.assertIn('previous', script)
 

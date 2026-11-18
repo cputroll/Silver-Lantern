@@ -19,6 +19,5 @@ if ($source -notmatch 'if \(\$existing\.ContainsKey\(\$asset\.asset\)\) \{ throw
 if ($source -notmatch 'foreach \(\$asset in @\(\$manifest\.assets\) \+') { throw 'All bundles must be verified before channel publication' }
 if ($source.IndexOf('asset verification failed') -gt $source.IndexOf("'HEAD:refs/heads/game-channel'")) { throw 'Channel publication precedes asset verification' }
 if ($source -notmatch 'force-with-lease=refs/heads/game-channel') { throw 'Channel push must use an expected-tip lease' }
-if ($source -notmatch 'could not be confirmed') { throw 'Legacy manifest must be confirmed after upload' }
-if ($source.IndexOf('could not be confirmed') -lt $source.IndexOf("'HEAD:refs/heads/game-channel'")) { throw 'Legacy update must follow the channel advance' }
+if ($source -match 'Repair-LegacyManifest|release'', ''upload'', ''game-v1'', \$legacy') { throw 'Legacy asset must remain untouched' }
 Write-Output 'Revision allocation and publication safety tests passed'

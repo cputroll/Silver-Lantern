@@ -17,6 +17,6 @@ try {
 } finally { $lock.Dispose(); Remove-Item $path -Force -ErrorAction SilentlyContinue }
 $source = Get-Content $scriptPath -Raw
 if ($source -notmatch "force-with-lease=refs/heads/game-channel") { throw 'Channel push must use an expected-tip lease' }
-if ($source.IndexOf('could not be confirmed') -lt $source.IndexOf("'HEAD:refs/heads/game-channel'")) { throw 'Legacy manifest must be confirmed after the channel advance' }
+if ($source -match "'game-v1', \`$legacy, '--clobber'") { throw 'Mutable legacy manifest must not be uploaded' }
 if (-not $source.Contains("Run 'git' @('fetch', 'origin', '+refs/heads/*:refs/remotes/origin/*', '--prune')")) { throw 'Checked channel fetch missing' }
 Write-Output 'Concurrency and stale-channel tests passed'

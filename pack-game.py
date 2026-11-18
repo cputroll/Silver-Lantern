@@ -54,6 +54,15 @@ def pack(source, out, limit=LIMIT, prefix='', include_settings=False):
     if not source.is_dir() or source == out or source in out.parents:
         raise ValueError('source must be a directory and output must be outside it')
     out.mkdir(parents=True, exist_ok=True)
+    records_path = source / '.heylisten-get' / 'launcher-copies.json'
+    try:
+        records = json.loads(records_path.read_text(encoding='utf-8'))
+        if not isinstance(records, dict):
+            raise ValueError('invalid launcher records')
+    except FileNotFoundError:
+        records = {}
+    except (OSError, ValueError) as exc:
+        raise ValueError('cannot safely inspect launcher records') from exc
     paths = []
     for root, dirs, files in os.walk(source, followlinks=False):
         dirs[:] = sorted(d for d in dirs if d.lower() not in ('user', 'dist-release', '.heylisten-get', '.heylisten-parts') and not d.lower().startswith('.heylisten-new'))
@@ -69,6 +78,11 @@ def pack(source, out, limit=LIMIT, prefix='', include_settings=False):
             rel = (Path(root) / name).relative_to(source).as_posix().lower()
             if rel in {'ocarina of time.exe', 'silverlantern.exe', 'heylisten-get.exe', 'run silver lantern.exe',
                        'support/silverlantern.exe', 'support/heylisten-get.exe'}:
+                continue
+            if Path(root) == source and lower.endswith('.exe') and any(
+                    isinstance(recorded_name, str) and recorded_name.lower() == lower
+                    and isinstance(expected, str) and digest(Path(root) / name).lower() == expected.lower()
+                    for recorded_name, expected in records.items()):
                 continue
             paths.append(Path(root) / name)
     paths.sort(key=lambda p: p.relative_to(source).as_posix())
