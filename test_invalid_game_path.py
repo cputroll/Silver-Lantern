@@ -11,7 +11,7 @@ class InvalidGamePathTest(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 h.game_path(root, '../outside.exe')
             self.assertIn('../outside.exe', str(caught.exception))
-            self.assertIn(str(root), str(caught.exception))
+            self.assertIn(str(root.resolve()), str(caught.exception))
             error = h.friendly(caught.exception)
             self.assertIn('game package contains an invalid entry', error.problem.lower())
             self.assertIn('../outside.exe', error.problem)
