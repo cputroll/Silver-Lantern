@@ -2028,7 +2028,7 @@ def verify_write_boundary(root: Path, target: Path, entry: str) -> None:
         chain.append(current)
         parent = current.parent
         if parent == current:
-            raise InvalidGamePath(root.resolve(), entry, 'boundary left the install directory')
+            raise InvalidGamePath(root, entry, 'boundary left the install directory')
         current = parent
     for path in reversed(chain):
         final = path == target
@@ -2039,12 +2039,12 @@ def verify_write_boundary(root: Path, target: Path, entry: str) -> None:
         except OSError as exc:
             # Ancestor inspection failed (permissions, shadowed path): the
             # confinement of this write is unknown, so refuse it.
-            raise InvalidGamePath(root.resolve(), entry,
+            raise InvalidGamePath(root, entry,
                                   f'boundary check failed at {str(path)!r}: {exc.strerror}')
         if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT:
-            raise InvalidGamePath(root.resolve(), entry, f'reparse point at {str(path)!r}')
+            raise InvalidGamePath(root, entry, f'reparse point at {str(path)!r}')
         if final and not stat.S_ISREG(info.st_mode):
-            raise InvalidGamePath(root.resolve(), entry, f'not a regular file at {str(path)!r}')
+            raise InvalidGamePath(root, entry, f'not a regular file at {str(path)!r}')
     try:
         resolved_target = _comparable_resolved_path(target.resolve())
         resolved_root = _comparable_resolved_path(root.resolve())
