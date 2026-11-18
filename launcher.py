@@ -976,7 +976,14 @@ def tool_update_worker(events, args):
         with LOG.open('a', encoding='utf-8') as log:
             log.write(output)
         if result.returncode:
-            events.publish('error', f'Tool update failed (exit {result.returncode}).')
+            problem, action, _ = friendly_blocks(output.splitlines())
+            if problem:
+                message = 'Problem: ' + gui_child_text(problem)
+                if action:
+                    message += ' What to do: ' + gui_child_text(action)
+            else:
+                message = 'Problem: The launcher update could not finish. What to do: Please try again later.'
+            events.publish('error', message)
         elif 'SILVERLANTERN_UPDATE_HANDOFF' in output.splitlines():
             events.publish('tool_complete', 0)
         else:

@@ -273,7 +273,23 @@ class StateTests(unittest.TestCase):
             run.return_value.returncode = 7
             run.return_value.stdout = ''
             tool_update_worker(events, [])
-        self.assertEqual(events.queue.get_nowait(), ('error', 'Tool update failed (exit 7).'))
+        kind, message = events.queue.get_nowait()
+        self.assertEqual(kind, 'error')
+        self.assertIn('try again later', message.lower())
+        self.assertNotIn('exit 7', message)
+
+    def test_tool_worker_failure_shows_friendly_blocks(self):
+        events = ProgressEvents()
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'LOG', Path(d) / 'log'), patch('launcher.subprocess.run') as run:
+            run.return_value.returncode = 1
+            run.return_value.stdout = 'Problem: Update was damaged.\nWhat to do: Try again later.\nDetails were saved to: C:\\private\\log.txt\n'
+            tool_update_worker(events, [])
+            kind, message = events.queue.get_nowait()
+            self.assertEqual(kind, 'error')
+            self.assertIn('Update was damaged', message)
+            self.assertIn('Try again later', message)
+            self.assertNotIn('C:\\private', message)
+            self.assertIn('C:\\private', (Path(d) / 'log').read_text())
 
     def test_tool_check_auto_and_manual(self):
         for auto in (True, False):
