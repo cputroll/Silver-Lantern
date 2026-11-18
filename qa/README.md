@@ -4,7 +4,7 @@ Before **any** release tag, build both artifacts from the same revision using `r
 
 Run `qa/simulate-friend.ps1 -Zip dist-release/HeyListen-Get-qa.zip` for fixture flows and `python qa/check_production_trust.py --zip dist-release/HeyListen-Get.zip` to assert the actual release executable ignores all three trust-sensitive seam variables. Both checks must pass. Obtain an independent review of the diff since the last tag from a different agent/session and record sign-off in the PR, commit message, or `qa/reviews/`. Do not tag until the entire gate passes.
 
-The GUI simulation sets `SDL_VIDEODRIVER=dummy` and `SDL_RENDER_DRIVER=software`, and requires the fixture install to reach the GUI's READY state. Safety checks sample descendants while each flow runs, but short-lived reparented processes can escape sampling; strengthen this process-tree audit before relying on it as exhaustive crash safety.
+The GUI simulation sets `SDL_VIDEODRIVER=dummy` and `SDL_RENDER_DRIVER=software`, and requires the fixture install to reach the GUI's READY state. Safety checks sample descendant PID/creation-time identities while each flow runs and reject recycled PIDs; short-lived reparented processes can still escape sampling, so this is not exhaustive crash safety. The 2026-11-17 merged-gate prior-update run timed out after staging; a subsequent run swapped in about one second. The original intermittent helper failure remains unexplained and must not be treated as a proven deadline issue.
 
 For the prior-release check, pass `-OldZip` with a separately built QA-enabled `0.0.1` zip: set `APP_VERSION`, the standalone launcher fallback version, and `sources.json` in an isolated copy, then build with `-Tag v0.0.1 -NoPublish -Qa`.
 

@@ -32,6 +32,52 @@ def fixture_manifest(root: Path) -> Path:
     return path
 
 
+def process_creation_time(pid):
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.OpenProcess(0x1000, False, pid)
+    if not handle:
+        return None
+    try:
+        exit_code = wintypes.DWORD()
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if exit_code.value != 259:
+            return None
+        created, exited, kernel_time, user_time = (wintypes.FILETIME() for _ in range(4))
+        if not kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel_time), ctypes.byref(user_time)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return (created.dwHighDateTime << 32) | created.dwLowDateTime
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def descendant_identities(rows, root_pid):
+    by_pid = {row['ProcessId']: row for row in rows}
+    if root_pid not in by_pid:
+        raise RuntimeError('monitor root process disappeared')
+    children = {root_pid: by_pid[root_pid]['Created']}
+    changed = True
+    while changed:
+        old = len(children)
+        for row in rows:
+            parent = row['ParentProcessId']
+            if parent in children and children[parent] <= row['Created']:
+                children[row['ProcessId']] = row['Created']
+        changed = len(children) != old
+    return set(children.items())
+
+
+def live_identities(tracked, current):
+    return {(pid, created) for pid, created in tracked if current.get(pid) == created}
+
+
 def run_check(name, artifacts, check):
     path = artifacts / (name + '.log')
     try:
@@ -264,13 +310,13 @@ def main():
             raise RuntimeError('process tree query failed: ' + result.stderr)
         rows = json.loads(result.stdout or '[]')
         if isinstance(rows, dict): rows = [rows]
-        children = {root_pid}
-        changed = True
-        while changed:
-            old = len(children)
-            children.update(row['ProcessId'] for row in rows if row['ParentProcessId'] in children)
-            changed = len(children) != old
-        return children
+        by_pid = {}
+        for row in rows:
+            created = process_creation_time(row['ProcessId'])
+            if created is not None:
+                row['Created'] = created
+                by_pid[row['ProcessId']] = row
+        return descendant_identities(list(by_pid.values()), root_pid)
 
     def safety():
         import ctypes
@@ -323,17 +369,10 @@ def main():
             stop.set(); watcher.join(timeout=25)
             if name != 'crash-and-zombie-safety':
                 def checked_safety():
-                    import ctypes
                     deadline = time.monotonic() + 15
                     while True:
-                        alive = set()
-                        for pid in tracked - {os.getpid()}:
-                            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
-                            if handle:
-                                code = ctypes.c_ulong()
-                                if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259:
-                                    alive.add(pid)
-                                ctypes.windll.kernel32.CloseHandle(handle)
+                        identities = {identity for identity in tracked if identity[0] != os.getpid()}
+                        alive = live_identities(identities, {pid: process_creation_time(pid) for pid, _ in identities})
                         try:
                             result = safety()
                             error = None

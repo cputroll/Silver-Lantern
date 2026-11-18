@@ -5,6 +5,33 @@ from qa.simulate_friend import fixture_manifest, run_check
 
 
 class SimulatorTests(unittest.TestCase):
+    def test_recycled_pid_is_not_a_live_tracked_process(self):
+        from qa.simulate_friend import live_identities
+        self.assertEqual(live_identities({(12, 100)}, {12: 200}), set())
+
+    def test_reused_parent_cannot_adopt_older_unrelated_process(self):
+        from qa.simulate_friend import descendant_identities
+        rows = [{'ProcessId': 1, 'ParentProcessId': 0, 'Created': 200}, {'ProcessId': 2, 'ParentProcessId': 1, 'Created': 100}, {'ProcessId': 3, 'ParentProcessId': 1, 'Created': 300}]
+        self.assertEqual(descendant_identities(rows, 1), {(1, 200), (3, 300)})
+
+    def test_real_live_child_is_reported(self):
+        from qa.simulate_friend import live_identities
+        self.assertEqual(live_identities({(12, 100)}, {12: 100}), {(12, 100)})
+
+    @unittest.skipUnless(__import__('os').name == 'nt', 'Windows process identity test')
+    def test_real_child_identity_is_live_until_exit(self):
+        import subprocess
+        import sys
+        from qa.simulate_friend import process_creation_time, live_identities
+        child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        try:
+            created = process_creation_time(child.pid)
+            self.assertIsNotNone(created)
+            self.assertEqual(live_identities({(child.pid, created)}, {child.pid: process_creation_time(child.pid)}), {(child.pid, created)})
+        finally:
+            child.terminate(); child.wait(timeout=10)
+        self.assertIsNone(process_creation_time(child.pid))
+
     def test_fixture_manifest_contains_small_valid_asset(self):
         with tempfile.TemporaryDirectory() as d:
             manifest = fixture_manifest(Path(d))
