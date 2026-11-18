@@ -6,6 +6,11 @@ from test_registration_seams import load_launcher
 
 
 class GuiManifestSeamTests(unittest.TestCase):
+    def test_headless_action_requires_dummy_driver_and_fixture(self):
+        for dummy, manifest, expected in [('dummy', 'fixture.json', True), ('windows', 'fixture.json', False), ('dummy', '', False)]:
+            app = load_launcher({'SDL_VIDEODRIVER': dummy, 'SILVER_LANTERN_GAME_MANIFEST': manifest, 'SILVER_LANTERN_TEST_GUI_INSTALL': '1'})
+            self.assertEqual(app._test_gui_install_enabled(), expected)
+
     def test_channel_check_uses_fixture_when_configured(self):
         import tempfile
         from pathlib import Path

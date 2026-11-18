@@ -28,12 +28,19 @@ STATE_DIR = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'SilverLant
 CONFIG = STATE_DIR / 'launcher.json'
 LOG = STATE_DIR / 'launcher.log'
 # Test-only isolation overrides, read once: registry parent under HKCU, shortcut directories,
-# and a local game manifest for the GUI install worker.
+# a local game manifest, and guarded dummy-video GUI installation automation.
 # Empty/unset values preserve normal registration, known folders, and game channel behavior.
 _TEST_REG_ROOT = os.environ.get('SILVER_LANTERN_REG_ROOT') or r'Software\Microsoft\Windows\CurrentVersion\Uninstall'
 _TEST_DESKTOP_DIR = os.environ.get('SILVER_LANTERN_DESKTOP_DIR') or None
 _TEST_STARTMENU_DIR = os.environ.get('SILVER_LANTERN_STARTMENU_DIR') or None
 _TEST_GAME_MANIFEST = os.environ.get('SILVER_LANTERN_GAME_MANIFEST') or None
+_TEST_GUI_INSTALL = os.environ.get('SILVER_LANTERN_TEST_GUI_INSTALL') == '1'
+_TEST_VIDEO_DRIVER = os.environ.get('SDL_VIDEODRIVER')
+
+
+def _test_gui_install_enabled():
+    return _TEST_GUI_INSTALL and _TEST_VIDEO_DRIVER == 'dummy' and bool(_TEST_GAME_MANIFEST)
+
 GAME_NAME = 'Legend of Zelda Ocarina of Time'
 MANIFEST_URL = 'https://github.com/cputroll/Silver-Lantern/releases/download/game-v1/game-manifest.json'
 
@@ -2384,10 +2391,15 @@ class LauncherUI:
             setup()
         self.hits = []
         last = time.monotonic()
+        test_install = _test_gui_install_enabled() and not screenshot
+        if test_install:
+            self.start_operation()
         try:
             while self.running:
                 was_playing = self.state == State.PLAYING
                 self.drain()
+                if test_install and self.operation is None:
+                    self.running = False
                 if was_playing and self.state != State.PLAYING:
                     open_pads()
                 now = time.monotonic()

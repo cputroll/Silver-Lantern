@@ -1,6 +1,7 @@
 """Fail-closed packaged friend-machine checks."""
 import argparse
 import functools
+import hashlib
 import http.server
 import importlib.util
 import json
@@ -94,6 +95,82 @@ def main():
                 return output + command(target, '--version')
             time.sleep(.25)
         raise TimeoutError('update helper did not finish')
+    def interrupt_resume():
+        fixture = artifacts / 'resume-fixture'
+        source = fixture / 'source'
+        source.mkdir(parents=True)
+        (source / 'first.dat').write_bytes(b'A' * 20000)
+        (source / 'second.dat').write_bytes(b'B' * 200000)
+        spec = importlib.util.spec_from_file_location('resume_packer', Path(__file__).resolve().parents[1] / 'pack-game.py')
+        packer = importlib.util.module_from_spec(spec); spec.loader.exec_module(packer)
+        assets = fixture / 'assets'
+        data = packer.pack(source, assets, limit=65536)
+        mf = assets / 'game-manifest.json'; mf.write_text(json.dumps(data), encoding='utf-8')
+        requests = []
+        second_started = threading.Event()
+        class Throttled(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                requests.append(self.path)
+                if len(requests) > 1:
+                    second_started.set()
+                    time.sleep(10)
+                super().do_GET()
+        local = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Throttled, directory=str(assets)))
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        run_env = dict(env, SILVER_LANTERN_TEST_ASSET_URL=f'http://127.0.0.1:{local.server_port}/', SILVER_LANTERN_ASSEMBLY_WORKERS='1')
+        target = artifacts / 'resume-game'
+        argv = [str(exe), '--cli', '--install-game', str(target), '--game-manifest', str(mf), '--no-self-update', '--no-preset', '--no-pause', '--plain']
+        try:
+            child = subprocess.Popen(argv, env=run_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and child.poll() is None:
+                if second_started.is_set() and (target / 'first.dat').exists(): break
+                time.sleep(.1)
+            else: raise RuntimeError('first part did not complete before interruption')
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(child.pid)], capture_output=True, timeout=10)
+            child.wait(timeout=10)
+            before = list(requests)
+            complete = '/' + data['files'][0]['segments'][0]['asset']
+            if complete not in before: raise RuntimeError('completed bundle was not observed')
+            resumed = subprocess.run(argv, env=run_env, capture_output=True, text=True, timeout=90)
+            if resumed.returncode or (target / 'second.dat').read_bytes() != b'B' * 200000:
+                raise RuntimeError(f'resume failed: {resumed.returncode} {resumed.stdout} {resumed.stderr}')
+            if requests[len(before):].count(complete): raise RuntimeError('completed bundle was downloaded again')
+            return f'requests before kill={before}; after={requests[len(before):]}'
+        finally:
+            if 'child' in locals() and child.poll() is None: child.kill(); child.wait(timeout=10)
+            local.shutdown(); local.server_close()
+
+    def gui_first_run():
+        gui_profile = artifacts / 'gui-profile'
+        folder = gui_profile / 'Games' / 'HeyListen'
+        folder.mkdir(parents=True)
+        local = gui_profile / 'local'
+        state = local / 'SilverLantern'
+        state.mkdir(parents=True)
+        (state / 'launcher.json').write_text(json.dumps({'game_dir': str(folder)}), encoding='utf-8')
+        gui_env = dict(env, USERPROFILE=str(gui_profile), LOCALAPPDATA=str(local), APPDATA=str(gui_profile / 'roaming'), SDL_VIDEODRIVER='dummy', SILVER_LANTERN_TEST_GUI_INSTALL='1')
+        child = subprocess.Popen([str(root / 'Run Silver Lantern.exe'), '--gui', '--no-self-update'], env=gui_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            exit_code = child.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(child.pid)], capture_output=True, timeout=10)
+            child.wait(timeout=10)
+            raise RuntimeError('zip-root GUI did not exit within 30 seconds')
+        if exit_code:
+            raise RuntimeError(f'zip-root GUI exit={exit_code}')
+        relocated = folder / 'Ocarina of Time.exe'
+        deadline = time.monotonic() + 30
+        installed = folder / 'bin' / 'HeyListen.exe'
+        while time.monotonic() < deadline and not installed.exists():
+            time.sleep(.25)
+        if not relocated.exists() or not installed.exists() or installed.read_bytes() != b'silver-lantern-fixture\n':
+            script = "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:SILVER_FRIEND_ROOT, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+            subprocess.run(['powershell', '-NoProfile', '-Command', script], env=dict(env, SILVER_FRIEND_ROOT=str(gui_profile)), capture_output=True, timeout=20)
+            raise RuntimeError('GUI did not relocate and install fixture')
+        return f'Relocated to {relocated}; fixture installed at {installed}'
+
     def file_lock():
         target = artifacts / 'locked-game'
         locked = target / 'bin' / 'HeyListen.exe'
@@ -148,6 +225,21 @@ def main():
         def fail():
             raise RuntimeError(reason)
         return fail
+    def process_tree(root_pid):
+        script = "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId | ConvertTo-Json -Compress"
+        result = subprocess.run(['powershell', '-NoProfile', '-Command', script], capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            raise RuntimeError('process tree query failed: ' + result.stderr)
+        rows = json.loads(result.stdout or '[]')
+        if isinstance(rows, dict): rows = [rows]
+        children = {root_pid}
+        changed = True
+        while changed:
+            old = len(children)
+            children.update(row['ProcessId'] for row in rows if row['ParentProcessId'] in children)
+            changed = len(children) != old
+        return children
+
     def safety():
         import ctypes
         import subprocess as sp
@@ -177,8 +269,8 @@ def main():
     checks = [
         ('fixture-cli-install', install),
         ('stale-update-backup', update),
-        ('zip-first-run-install', unsupported('GUI input automation and isolated first-run process supervision are not implemented.')),
-        ('interrupt-resume', unsupported('A throttled multi-part server and proof of no redownload are not implemented.')),
+        ('zip-first-run-install', gui_first_run),
+        ('interrupt-resume', interrupt_resume),
         ('file-lock', file_lock),
         ('previous-release-update', unsupported('A distinct prior-version packaged binary and version-change assertion are not implemented.')),
         ('uninstall-keeps-saves', uninstall),
@@ -187,9 +279,31 @@ def main():
     try:
         results = []
         for name, check in checks:
+            tracked = set()
+            stop = threading.Event()
+            def monitor():
+                while not stop.is_set():
+                    try: tracked.update(process_tree(os.getpid()))
+                    except Exception: pass
+                    stop.wait(.5)
+            watcher = threading.Thread(target=monitor, daemon=True); watcher.start()
             results.append(run_check(name, artifacts, check))
+            stop.set(); watcher.join(timeout=25)
             if name != 'crash-and-zombie-safety':
-                results.append(run_check(name + '-safety', artifacts, safety))
+                def checked_safety():
+                    result = safety()
+                    import ctypes
+                    alive = set()
+                    for pid in tracked - {os.getpid()}:
+                        handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
+                        if handle:
+                            code = ctypes.c_ulong()
+                            if ctypes.windll.kernel32.GetExitCodeProcess(handle, ctypes.byref(code)) and code.value == 259:
+                                alive.add(pid)
+                            ctypes.windll.kernel32.CloseHandle(handle)
+                    if alive: raise RuntimeError('remaining descendant processes: ' + repr(alive))
+                    return result
+                results.append(run_check(name + '-safety', artifacts, checked_safety))
     finally:
         server.shutdown()
         server.server_close()

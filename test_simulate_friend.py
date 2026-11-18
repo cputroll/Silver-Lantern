@@ -11,6 +11,13 @@ class SimulatorTests(unittest.TestCase):
             self.assertLess(manifest.stat().st_size, 10000)
             self.assertTrue(list((Path(d) / 'assets').glob('*.tar')))
 
+    def test_invalid_zip_makes_runner_exit_nonzero(self):
+        import subprocess
+        import sys
+        with tempfile.TemporaryDirectory() as d:
+            result = subprocess.run([sys.executable, str(Path(__file__).parent / 'qa' / 'simulate_friend.py'), '--zip', str(Path(d) / 'missing.zip'), '--artifacts', str(Path(d) / 'artifacts')], capture_output=True, timeout=20)
+            self.assertNotEqual(result.returncode, 0)
+
     def test_seeded_failure_is_reported(self):
         with tempfile.TemporaryDirectory() as d:
             ok = run_check('seeded crash', Path(d), lambda: (_ for _ in ()).throw(RuntimeError('seeded crash')))
