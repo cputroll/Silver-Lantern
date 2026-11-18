@@ -2009,6 +2009,56 @@ def game_path(root: Path, relative: str) -> Path:
     return target
 
 
+def verify_write_boundary(root: Path, target: Path, entry: str) -> None:
+    """Re-assert path confinement at the moment of writing.
+
+    `game_path` validated the entry when the work was scheduled, but assembly
+    can run for minutes before the final placement. This re-walks every
+    existing ancestor from the install root down and fails closed if any
+    component became a reparse point or resolved containment broke, so a
+    directory swapped for a junction after validation can never receive a
+    game file. Staging files are created exclusively, so their names cannot
+    be pre-planted. Residual window: microseconds between this check and the
+    open/replace, against a same-user local actor; remote package entries are
+    refused by validation and by this check alike."""
+    chain = []
+    current = target
+    while current != root:
+        chain.append(current)
+        parent = current.parent
+        if parent == current:
+            raise InvalidGamePath(root.resolve(), entry, 'boundary left the install directory')
+        current = parent
+    for path in reversed(chain):
+        kind = _leftover_kind(path)
+        final = path == target
+        if kind == 'reparse':
+            raise InvalidGamePath(root.resolve(), entry, f'reparse point at {str(path)!r}')
+        if final and kind == 'other':
+            raise InvalidGamePath(root.resolve(), entry, f'not a regular file at {str(path)!r}')
+    try:
+        resolved_target = _comparable_resolved_path(target.resolve())
+        resolved_root = _comparable_resolved_path(root.resolve())
+    except OSError:
+        raise InvalidGamePath(root.resolve(), entry, 'boundary resolution failed')
+    if not resolved_target.is_relative_to(resolved_root):
+        raise InvalidGamePath(resolved_root, entry, 'boundary containment failed')
+
+
+def _open_staging_checked(root: Path, state: dict, index: int):
+    """Open the staging stream, classifying a lost microsecond race.
+
+    If a directory swap lands between the boundary check and this open,
+    re-verify so the friend sees the classified package error instead of a
+    raw OSError."""
+    try:
+        return (_create_staging_exclusive(state['temp']) if index == 0
+                else _open_staging_append(state['temp']))
+    except OSError:
+        verify_write_boundary(root, state['target'], state['item']['path'])
+        raise
+
+
 def walk_destination(root: Path) -> dict:
     """Collect live sizes without following symlinks; later SHA-256 checks verify content.
 
@@ -2198,8 +2248,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                         if state['temp'].parent not in created_parents:
                             state['temp'].parent.mkdir(parents=True, exist_ok=True)
                             created_parents.add(state['temp'].parent)
-                    with (_create_staging_exclusive(state['temp']) if index == 0
-                          else _open_staging_append(state['temp'])) as output:
+                    verify_write_boundary(root, state['target'], state['item']['path'])
+                    with _open_staging_checked(root, state, index) as output:
                         state['started'] = True
                         while remaining:
                             check_parent_alive()
@@ -2218,6 +2268,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                     if not state['direct'] and state['next'] < len(state['item']['segments']):
                         checkpoint = Path(str(state['temp']) + '.json')
                         staging = Path(str(checkpoint) + '.tmp')
+                        verify_write_boundary(root, state['target'], state['item']['path'])
                         _write_staging_exclusive(staging, json.dumps(
                             {'next_index': state['next'], 'bytes_written': state['temp'].stat().st_size}).encode('utf-8'))
                         _replace_with_retry(staging, checkpoint)
@@ -2225,6 +2276,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                         if state['temp'].stat().st_size != state['item']['size'] or state['hasher'].hexdigest() != state['item']['sha256']:
                             raise SegmentMismatch(f"assembled SHA-256 mismatch: {state['item']['path']}", segment['asset'], state['item']['path'])
                         if not state['direct']:
+                            verify_write_boundary(root, state['target'], state['item']['path'])
                             _replace_with_retry(state['temp'], state['target'])
                             Path(str(state['temp']) + '.json').unlink(missing_ok=True)
                         state['complete'] = True
