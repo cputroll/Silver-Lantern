@@ -80,7 +80,7 @@ def log(msg: str, echo: bool = False) -> None:
         except OSError:
             pass
     if echo:
-        say(line)
+        say(str(msg))
 
 
 def human(n: float) -> str:
@@ -1581,6 +1581,37 @@ def game_path(root: Path, relative: str) -> Path:
     return target
 
 
+def walk_destination(root: Path) -> dict:
+    """Collect live sizes without following symlinks; later SHA-256 checks verify content.
+
+    This inventory is transient; matching files are checked again by hash.
+    As with installation itself, concurrent directory replacement is not atomic.
+    """
+    result = {}
+    stack = [(root, '')]
+    while stack:
+        directory, prefix = stack.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                if not prefix and entry.name.casefold() in ('.heylisten-get', '.heylisten-parts'):
+                    continue
+                relative = prefix + entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append((entry.path, relative + '/'))
+                elif entry.is_file(follow_symlinks=False):
+                    result[relative] = entry.stat(follow_symlinks=False).st_size
+    return result
+
+
+def destination_inventory(root: Path) -> dict:
+    if not root.exists():
+        return {}
+    with os.scandir(root) as entries:
+        if not any(entry.name.casefold() not in ('.heylisten-get', '.heylisten-parts') for entry in entries):
+            return {}
+    return walk_destination(root)
+
+
 def restore_segment_checkpoint(temp, checkpoint, item):
     """Trust a retained prefix only after checking every segment hash."""
     hasher = hashlib.sha256()
@@ -1622,25 +1653,24 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
     cond = threading.Condition()
     bundles = deque()
     states = []
-    by_asset = {name: [] for name in assets}
     created_parents = set()
-    log(f"Preparing download: checking {len(pending)} destination files", echo=True)
+    parent_lock = threading.Lock()
+    by_asset = {name: [] for name in assets}
+    log(f"Preparing download: organizing {len(pending)} destination files", echo=True)
     last_report = time.monotonic()
     for count, item in enumerate(pending, 1):
         now = time.monotonic()
         if now - last_report >= 5:
             log(f"Preparing download: {count - 1}/{len(pending)} destination files checked", echo=True)
             last_report = now
-        target = game_path(root, item['path'])
-        if target.parent not in created_parents:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            created_parents.add(target.parent)
+        target = root.joinpath(*item['path'].split('/'))
         direct = len(item['segments']) == 1
         state = {'item': item, 'target': target,
                  'temp': target if direct else target.with_name(target.name + '.heylisten-new'),
                  'direct': direct, 'next': 0, 'started': False, 'complete': False,
                  'hasher': hashlib.sha256(), 'lock': threading.Lock()}
         if soft_retry and not direct:
+            game_path(root, item['path'])
             state['next'], state['hasher'] = restore_segment_checkpoint(state['temp'], Path(str(state['temp']) + '.json'), item)
         states.append(state)
         for index, segment in enumerate(item['segments']):
@@ -1720,6 +1750,11 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                     os.lseek(fd, segment['offset'], os.SEEK_SET)
                     remaining = segment['length']
                     segment_hash = hashlib.sha256()
+                    game_path(root, state['item']['path'])
+                    with parent_lock:
+                        if state['temp'].parent not in created_parents:
+                            state['temp'].parent.mkdir(parents=True, exist_ok=True)
+                            created_parents.add(state['temp'].parent)
                     with state['temp'].open('wb' if index == 0 else 'ab') as output:
                         state['started'] = True
                         while remaining:
@@ -1815,7 +1850,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     root = root.expanduser()
     pending = []
     kept = 0
-    missing_parents = set()
+    inventory = destination_inventory(root)
     last_report = time.monotonic()
     for count, item in enumerate(man['files'], 1):
         now = time.monotonic()
@@ -1823,16 +1858,8 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             log(f"Checking installation plan: {count - 1}/{len(man['files'])} files checked", echo=True)
             last_report = now
         relative = item['path']
-        parent_name = relative.rpartition('/')[0]
-        if parent_name in missing_parents:
-            pending.append(item)
-            continue
-        target = game_path(root, relative)
-        if not target.parent.exists():
-            missing_parents.add(parent_name)
-            pending.append(item)
-            continue
-        if target.is_file() and target.stat().st_size == item['size']:
+        if inventory.get(relative) == item['size']:
+            target = game_path(root, relative)
             if item['size'] >= 256 * 1024 * 1024:
                 log(f"Checking SHA-256: {item['path']} ({human(item['size'])})")
             if sha256(target, progress=item['size'] >= 256 * 1024 * 1024) == item['sha256']:
