@@ -145,6 +145,22 @@ class UpdaterTests(unittest.TestCase):
                 app.stage_executable(p, Path(td), 'app.exe')
             self.assertFalse((Path(td).parent / 'evil.exe').exists())
 
+    def test_interrupted_swap_never_removes_entrypoint(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td); target = root / 'app.exe'; new = root / 'new.exe'
+            target.write_bytes(b'old'); new.write_bytes(b'new')
+            original = app.os.replace
+            def interrupted(src, dst):
+                original(src, dst)
+                self.assertTrue(target.exists(), 'entry point disappeared after swap step')
+                raise KeyboardInterrupt()
+            with mock.patch.object(app.os, 'replace', side_effect=interrupted):
+                with self.assertRaises(KeyboardInterrupt):
+                    app.replace_transactionally(target, new)
+            self.assertIn(target.read_bytes(), (b'old', b'new'))
+            app.replace_transactionally(target, new)
+            self.assertEqual(target.read_bytes(), b'new')
+
     def test_transaction_rolls_back(self):
         with tempfile.TemporaryDirectory() as td:
             target = Path(td) / 'app.exe'
@@ -153,7 +169,7 @@ class UpdaterTests(unittest.TestCase):
             new.write_bytes(b'new')
             original = app.os.replace
             def fail_second(src, dst):
-                if Path(dst) == target and Path(src) == new:
+                if Path(dst) == target:
                     raise OSError('simulated failure')
                 original(src, dst)
             with mock.patch.object(app.os, 'replace', side_effect=fail_second):
@@ -182,7 +198,7 @@ class UpdaterTests(unittest.TestCase):
             new.write_bytes(b'new')
             original = app.os.replace
             def fail_second(src, dst):
-                if Path(dst) == target and Path(src) == new:
+                if Path(dst) == target:
                     raise OSError('simulated failure')
                 original(src, dst)
             with mock.patch.object(app.os, 'replace', side_effect=fail_second):
@@ -212,7 +228,7 @@ class UpdaterTests(unittest.TestCase):
                 app._apply_update(target, new, 123, [])
             launch.assert_called_once()
             self.assertEqual(target.read_bytes(), b'new')
-            self.assertEqual(target.with_name('app.exe.update-backup').read_bytes(), b'old')
+            self.assertFalse(target.with_name('app.exe.update-backup').exists())
 
     def test_checksum_stream_is_bounded_and_closed(self):
         response = mock.Mock()

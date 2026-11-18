@@ -1269,16 +1269,29 @@ def replace_transactionally(target: Path, replacement: Path) -> None:
             backup.unlink()
         else:
             _replace_with_retry(backup, target)
-    _replace_with_retry(target, backup)
+    # Copy onto the target filesystem first: os.replace is atomic only within
+    # one filesystem, and the old entry point must remain until the swap.
+    fd, name = tempfile.mkstemp(prefix=target.name + '.update-', suffix='.tmp', dir=target.parent)
+    staged = Path(name)
     try:
-        _replace_with_retry(replacement, target)
-    except BaseException:
-        _replace_with_retry(backup, target)
-        raise
-    try:
-        backup.unlink()
-    except OSError as e:
-        log(f"Update installed; backup retained for manual cleanup: {e}")
+        with os.fdopen(fd, 'wb') as out, replacement.open('rb') as src:
+            shutil.copyfileobj(src, out)
+            out.flush()
+            os.fsync(out.fileno())
+        def digest(path):
+            h = hashlib.sha256()
+            with path.open('rb') as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    h.update(block)
+            return h.digest()
+        if not staged.stat().st_size or staged.stat().st_size != replacement.stat().st_size or digest(staged) != digest(replacement):
+            raise ValueError('staged update failed verification')
+        _replace_with_retry(staged, target)
+    finally:
+        try:
+            staged.unlink(missing_ok=True)
+        except OSError as e:
+            log(f'Update temporary file retained for cleanup: {e}')
 
 
 def wait_for_parent(pid: int) -> None:
