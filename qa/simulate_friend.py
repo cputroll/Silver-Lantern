@@ -48,6 +48,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--zip', required=True, type=Path)
     parser.add_argument('--artifacts', required=True, type=Path)
+    parser.add_argument('--old-zip', type=Path, help='test-enabled 0.0.1 release zip')
     args = parser.parse_args()
     artifacts = args.artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -95,6 +96,30 @@ def main():
                 return output + command(target, '--version')
             time.sleep(.25)
         raise TimeoutError('update helper did not finish')
+    def prior_update():
+        if not args.old_zip:
+            raise RuntimeError('Provide --old-zip containing the test-enabled 0.0.1 client')
+        folder = artifacts / 'prior-update'
+        folder.mkdir()
+        with zipfile.ZipFile(args.old_zip) as archive:
+            payload = archive.read('support/HeyListen-Get.exe')
+        target = folder / 'HeyListen-Get.exe'
+        target.write_bytes(payload)
+        before = command(target, '--version').strip()
+        expected = command(exe, '--version').strip()
+        if before != '0.0.1' or expected == before:
+            raise RuntimeError(f'expected distinct old/new versions, got {before!r} and {expected!r}')
+        command(target, '--self-update-from', args.zip.resolve(), '--no-pause')
+        deadline = time.monotonic() + 90
+        while time.monotonic() < deadline:
+            try:
+                if command(target, '--version').strip() == expected:
+                    return f'version {before} -> {expected}'
+            except (OSError, RuntimeError):
+                pass
+            time.sleep(.5)
+        raise TimeoutError('updated executable did not report new version')
+
     def interrupt_resume():
         fixture = artifacts / 'resume-fixture'
         source = fixture / 'source'
@@ -115,7 +140,10 @@ def main():
                 if len(requests) > 1:
                     second_started.set()
                     time.sleep(10)
-                super().do_GET()
+                try:
+                    super().do_GET()
+                except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
+                    pass
         local = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Throttled, directory=str(assets)))
         threading.Thread(target=local.serve_forever, daemon=True).start()
         run_env = dict(env, SILVER_LANTERN_TEST_ASSET_URL=f'http://127.0.0.1:{local.server_port}/', SILVER_LANTERN_ASSEMBLY_WORKERS='1')
@@ -272,7 +300,7 @@ def main():
         ('zip-first-run-install', gui_first_run),
         ('interrupt-resume', interrupt_resume),
         ('file-lock', file_lock),
-        ('previous-release-update', unsupported('A distinct prior-version packaged binary and version-change assertion are not implemented.')),
+        ('previous-release-update', prior_update),
         ('uninstall-keeps-saves', uninstall),
         ('crash-and-zombie-safety', safety),
     ]

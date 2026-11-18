@@ -2335,6 +2335,8 @@ class LauncherUI:
         ]
 
     def run(self, screenshot=None):
+        if _test_gui_install_enabled() and not screenshot:
+            log_message('Test GUI: entering SDL initialization')
         if screenshot:
             os.environ['SDL_VIDEODRIVER'] = 'dummy'
         if getattr(sys, 'frozen', False): os.environ['PYSDL2_DLL_PATH'] = str(ROOT)
@@ -2349,7 +2351,11 @@ class LauncherUI:
         except Exception:
             pass
         if s.SDL_Init(s.SDL_INIT_VIDEO | s.SDL_INIT_GAMECONTROLLER) != 0: raise RuntimeError(s.SDL_GetError().decode())
+        if _test_gui_install_enabled() and not screenshot:
+            log_message('Test GUI: SDL initialized')
         if ttf.TTF_Init() != 0: raise RuntimeError('SDL_ttf initialization failed')
+        if _test_gui_install_enabled() and not screenshot:
+            log_message('Test GUI: fonts initialized')
         size = CANVAS
         if screenshot and os.environ.get('HEYLISTEN_SCREENSHOT_SIZE'):
             match = re.fullmatch(r'(\d{1,4})x(\d{1,4})', os.environ['HEYLISTEN_SCREENSHOT_SIZE'])
@@ -2364,6 +2370,8 @@ class LauncherUI:
         s.SDL_RenderClear(renderer)
         s.SDL_RenderPresent(renderer)
         painter = Painter(s, ttf, renderer)
+        if _test_gui_install_enabled() and not screenshot:
+            log_message('Test GUI: SDL renderer initialized')
         def close_pads():
             for pad in self.controllers.values():
                 s.SDL_GameControllerClose(pad)
@@ -2393,12 +2401,14 @@ class LauncherUI:
         last = time.monotonic()
         test_install = _test_gui_install_enabled() and not screenshot
         if test_install:
+            log_message('Test GUI: starting fixture installation')
             self.start_operation()
         try:
             while self.running:
                 was_playing = self.state == State.PLAYING
                 self.drain()
                 if test_install and self.operation is None:
+                    log_message(f'Test GUI: installation finished, state={self.state}, error={self.last_error}')
                     self.running = False
                 if was_playing and self.state != State.PLAYING:
                     open_pads()
