@@ -506,6 +506,43 @@ def show_error(err: UserError) -> None:
         say(f"Details were saved to: {LOG_PATH}", "dim")
 
 
+class ParentExited(BaseException):
+    """Cooperative stop after the GUI that started this child exits."""
+
+
+def check_parent_alive():
+    value = os.environ.get('SILVER_LANTERN_PARENT_PID')
+    if not value:
+        return
+    try:
+        pid = int(value)
+        if pid <= 0:
+            raise ValueError('invalid parent PID')
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel.OpenProcess.restype = wintypes.HANDLE
+            kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel.WaitForSingleObject.restype = wintypes.DWORD
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel.OpenProcess(0x00100000, False, pid)
+            if not handle:
+                if ctypes.get_last_error() == 87:
+                    raise ParentExited()
+                return  # Access denied is not proof the parent exited.
+            try:
+                if kernel.WaitForSingleObject(handle, 0) == 0:
+                    raise ParentExited()
+            finally:
+                kernel.CloseHandle(handle)
+        else:
+            os.kill(pid, 0)
+    except ProcessLookupError:
+        raise ParentExited() from None
+
+
 def _retry_locked(operation, budget=60.0):
     """Retry a file operation while Windows or antivirus holds the file."""
     delays = (1, 2, 5, 10)
@@ -530,7 +567,10 @@ def _replace_with_retry(src: Path, dst: Path, budget: float = 60.0) -> None:
 
 
 def _open_with_retry(path: Path, mode: str):
-    return _retry_locked(lambda: path.open(mode))
+    def open_if_alive():
+        check_parent_alive()
+        return path.open(mode)
+    return _retry_locked(open_if_alive)
 
 
 @contextlib.contextmanager
@@ -604,6 +644,7 @@ def checksum_session(source=None):
 def metadata_get(client, url, **kwargs):
     kwargs['timeout'] = (10, 60)
     for attempt in range(2):
+        check_parent_alive()
         try:
             return client.get(url, **kwargs)
         except Exception:
@@ -778,6 +819,7 @@ def _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet
     """Resumable streaming download into dest (via `part`, default dest + '.part')."""
     part = part or Path(str(dest) + ".part")
     for attempt in range(1, max_retries + 1):
+        check_parent_alive()
         have = part.stat().st_size if part.exists() else 0
         if expect is not None and have > expect:
             part.unlink()
@@ -927,6 +969,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
     def worker(i, response=None, retries_used=0):
         start, end = bounds[i]
         for attempt in range(retries_used, 2):
+            check_parent_alive()
             r = None
             pos = start
             try:
@@ -976,6 +1019,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
     a, b = bounds[first]
     probe_session = session_factory()
     for attempt in range(2):
+        check_parent_alive()
         try:
             probe = probe_session.get(url, headers={'range': f'bytes={a}-{b-1}', 'accept': '*/*'}, stream=True, timeout=(10, 30))
             break
@@ -1359,6 +1403,7 @@ def fetch_update_checksum(s: "requests.Session", url: str) -> str:
 
 def _fetch_update_checksum(s, url):
     for attempt in range(2):
+        check_parent_alive()
         response = None
         try:
             response = s.get(url, stream=True, timeout=(10, 60))
@@ -1425,7 +1470,10 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
             replacement = stage_executable(Path(local_zip).resolve(strict=True), stage, target.name)
             helper = stage / 'update-helper.exe'
             shutil.copy2(target, helper)
-            subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), '--update-only-internal', 'local fixture'], cwd=str(target.parent))
+            check_parent_alive()
+            helper_env = dict(os.environ)
+            helper_env.pop('SILVER_LANTERN_PARENT_PID', None)
+            subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), '--update-only-internal', 'local fixture'], cwd=str(target.parent), env=helper_env)
             _self_update_started = True
         except BaseException:
             shutil.rmtree(stage, ignore_errors=True)
@@ -1469,7 +1517,10 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
             # Launched by double-click (GUI): the restart must open the app window,
             # not a console-mode run that would die with no stdout attached.
             rest = ['--gui', '--no-self-update']
-        subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), *rest], cwd=str(target.parent))
+        check_parent_alive()
+        helper_env = dict(os.environ)
+        helper_env.pop('SILVER_LANTERN_PARENT_PID', None)
+        subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), *rest], cwd=str(target.parent), env=helper_env)
         _self_update_started = True
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
@@ -1582,6 +1633,7 @@ def parse_game_manifest(text: str) -> dict:
 def load_game_manifest(s, source: str) -> dict:
     if urlparse(source).scheme in ('https', 'http'):
         for attempt in range(2):
+            check_parent_alive()
             response = None
             try:
                 say('Fetching manifest…')
@@ -1793,6 +1845,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                     os.lseek(fd, segment['offset'], os.SEEK_SET)
                     remaining = segment['length']
                     segment_hash = hashlib.sha256()
+                    check_parent_alive()
                     game_path(root, state['item']['path'])
                     with parent_lock:
                         if state['temp'].parent not in created_parents:
@@ -1844,6 +1897,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
         thread.start()
     try:
         for name in names:
+            check_parent_alive()
             with cond:
                 while shared['slots'] >= shared['cap'] and not shared['error']:
                     cond.wait(0.05)
@@ -1982,6 +2036,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
         progress = GameProgress(download_bytes)
         verified_assets = set()
         def fetch(part):
+            check_parent_alive()
             dest = cache / part['asset']
             if part['asset'] in verified_assets and dest.is_file():
                 return
@@ -2028,6 +2083,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 for name in {part['asset'] for part in item['segments' if v2 else 'parts']}:
                     remaining_uses[name] += 1
             for item in pending:
+                check_parent_alive()
                 # Fetch only assets this file needs, in manifest order. Shared assets stay
                 # until their final pending file is fully assembled and verified.
                 names = list(dict.fromkeys(part['asset'] for part in item['segments' if v2 else 'parts']))
@@ -2038,6 +2094,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 temp = target.with_name(target.name + '.heylisten-new')
                 try:
                     file_hash = hashlib.sha256()
+                    check_parent_alive()
                     with _open_with_retry(temp, 'wb') as output:
                         for part in item['segments' if v2 else 'parts']:
                             with (cache / part['asset']).open('rb') as source:
@@ -2401,6 +2458,7 @@ def main() -> int:
         folder = Path(a.install_game).expanduser()
         fresh_install = not (folder / 'hookshot_options.ini').exists()
         install_from_manifest(s, a, folder)
+        check_parent_alive()
         if not a.dry_run and not a.no_preset:
             apply_preset_step(folder, fresh_install=fresh_install)
         return 0
@@ -2441,6 +2499,7 @@ def install_from_manifest(s, a, folder: Path) -> None:
     import game_channel
     try:
         with game_channel.install_lock(folder):
+            check_parent_alive()
             _install_from_manifest_locked(s, a, folder)
     except TimeoutError as exc:
         raise UserError('Another game installation or update is in progress.', 'Wait for it to finish and try again.', 'busy') from exc
@@ -2459,11 +2518,13 @@ def _install_from_manifest_locked(s, a, folder: Path) -> None:
     except Exception:
         done("failed", "yellow")
         raise
+    check_parent_alive()
     done("up to date")
     local_manifest = None if a.game_manifest is None or urlparse(a.game_manifest).scheme in ('http', 'https') else Path(a.game_manifest).expanduser()
     with keep_awake():
         install_game(None, game_manifest, folder, a.dry_run, a.prune, local_manifest, a.keep_assets)
     if not a.dry_run:
+        check_parent_alive()
         cache_game_manifest(folder, game_manifest)
 
 
@@ -2621,7 +2682,11 @@ def run() -> None:
         pass
     no_pause = '--no-pause' in sys.argv
     try:
+        check_parent_alive()
         code = main()
+    except ParentExited:
+        log('parent exited; stopping')
+        sys.exit(0)
     except KeyboardInterrupt:
         log("interrupted by user")
         say()
