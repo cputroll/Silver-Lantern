@@ -9,6 +9,17 @@ spec.loader.exec_module(packer)
 
 
 class PackExclusionTests(unittest.TestCase):
+    def test_launcher_is_excluded_without_excluding_game_executables(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); source = root / 'game'; source.mkdir()
+            excluded = ['Ocarina of Time.exe', 'OCARINA OF TIME.EXE']
+            included = ['HeyListen.exe', 'bin/HeyListen.exe', 'nested/Ocarina of Time.exe',
+                        'Ocarina of Time Test.exe']
+            for name in excluded + included:
+                path = source / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'exe')
+            result = packer.pack(source, root / 'out')
+            self.assertEqual(set(f['path'] for f in result['files']), set(included))
+
     def test_live_folder_artifacts_excluded_and_settings_opt_in(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); source = root / 'game'; source.mkdir()

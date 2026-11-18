@@ -144,6 +144,49 @@ def main():
         output = command(exe, '--install-game', target, '--game-manifest', manifest, '--no-self-update', '--no-preset', '--no-pause', '--plain')
         assert (target / 'bin' / 'HeyListen.exe').read_bytes() == b'silver-lantern-fixture\n'
         return output
+    def relocated_game_update():
+        folder = artifacts / 'relocated-game-update'
+        folder.mkdir()
+        target = folder / 'Ocarina of Time.exe'
+        shutil.copy2(root / 'Run Silver Lantern.exe', target)
+        game = folder / 'game'
+        game.mkdir()
+        sentinel = game / 'save.dat'
+        sentinel.write_bytes(b'do-not-modify\n')
+        shadow = folder / 'Update-Game.ps1'
+        marker = folder / 'shadow-executed.txt'
+        shadow.write_text("Set-Content -LiteralPath $env:SILVER_LANTERN_SHADOW_MARKER -Value 'executed'\nexit 1\n", encoding='utf-8')
+        run_env = env.copy()
+        run_env['SILVER_LANTERN_SHADOW_MARKER'] = str(marker)
+        # The updater invokes its preset by $PSScriptRoot; verify both resources in the
+        # actual relocated executable, without executing an update or touching game files.
+        from PyInstaller.archive.readers import CArchiveReader
+        archive = CArchiveReader(str(target))
+        for name in ('Update-Game.ps1', 'Apply-HeyListen-Preset.ps1'):
+            bundled = archive.extract(name)
+            expected = (root / 'support' / name).read_bytes()
+            if bundled != expected:
+                raise RuntimeError(f'packaged {name} differs from release support resource')
+        if b"Join-Path $PSScriptRoot 'Apply-HeyListen-Preset.ps1'" not in archive.extract('Update-Game.ps1'):
+            raise RuntimeError('bundled updater does not reference the adjacent bundled preset')
+        # Missing version is rejected before the updater contacts GitHub or changes game files.
+        log = profile / 'local' / 'HeyListenBuilder' / 'game-update-cli.log'
+        log_offset = log.stat().st_size if log.exists() else 0
+        child = subprocess.run([str(target), '--cli', '--update-game', str(game), '--update-dry-run', '--no-pause'],
+                               cwd=folder, env=run_env, capture_output=True, text=True, timeout=90)
+        output = child.stdout + child.stderr
+        with log.open('rb') if log.exists() else open(os.devnull, 'rb') as stream:
+            stream.seek(log_offset)
+            log_text = stream.read().decode('utf-8', errors='replace')
+        if child.returncode != 1 or 'no-version-file' not in log_text:
+            raise RuntimeError(f'relocated dry run did not reach updater validation: exit={child.returncode}\n{output}\n{log_text}')
+        if sorted(p.name for p in game.iterdir()) != ['save.dat'] or sentinel.read_bytes() != b'do-not-modify\n':
+            raise RuntimeError('game files changed during relocated updater dry run')
+        if marker.exists():
+            raise RuntimeError('untrusted working-directory updater executed')
+        if (folder / 'support').exists() or (folder / 'Apply-HeyListen-Preset.ps1').exists():
+            raise RuntimeError('test unexpectedly supplied adjacent trusted resources')
+        return 'Relocated launcher ignored shadow updater, reached offline validation, and contains both updater resources; game fixture unchanged.'
     def update():
         target = artifacts / 'update' / 'HeyListen-Get.exe'
         target.parent.mkdir()
@@ -630,6 +673,7 @@ def main():
 
     checks = [
         ('fixture-cli-install', install),
+        ('relocated-game-update-dry-run', relocated_game_update),
         ('stale-update-backup', update),
         ('zip-first-run-install', gui_first_run),
         ('interrupt-resume', interrupt_resume),

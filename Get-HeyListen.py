@@ -42,6 +42,7 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import quote, urlparse
 import qa_pause
+from update_resources import resolve_update_script
 
 try:
     import build_flags
@@ -62,7 +63,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -2130,9 +2131,12 @@ def restore_segment_checkpoint(temp, checkpoint, item):
                     raise ValueError('checkpoint hash mismatch')
         return index, hasher
     except (OSError, ValueError, KeyError, TypeError):
-        _retry_locked(lambda: temp.unlink(missing_ok=True), path=temp)
-        _retry_locked(lambda: checkpoint.unlink(missing_ok=True), path=checkpoint)
-        return 0, hashlib.sha256()
+        pass
+    # Retry cleanup after leaving the handler so an expected invalid or missing
+    # checkpoint is not attached to a subsequent, recoverable file-lock error.
+    _retry_locked(lambda: temp.unlink(missing_ok=True), path=temp)
+    _retry_locked(lambda: checkpoint.unlink(missing_ok=True), path=checkpoint)
+    return 0, hashlib.sha256()
 
 
 class SegmentMismatch(ValueError):
@@ -2280,9 +2284,13 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                         checkpoint = Path(str(state['temp']) + '.json')
                         staging = Path(str(checkpoint) + '.tmp')
                         verify_write_boundary(root, state['target'], state['item']['path'])
-                        _write_staging_exclusive(staging, json.dumps(
-                            {'next_index': state['next'], 'bytes_written': state['temp'].stat().st_size}).encode('utf-8'))
-                        _replace_with_retry(staging, checkpoint)
+                        try:
+                            _write_staging_exclusive(staging, json.dumps(
+                                {'next_index': state['next'], 'bytes_written': state['temp'].stat().st_size}).encode('utf-8'))
+                            _replace_with_retry(staging, checkpoint)
+                        except OSError:
+                            verify_write_boundary(root, state['target'], state['item']['path'])
+                            raise
                     if state['next'] == len(state['item']['segments']):
                         if state['temp'].stat().st_size != state['item']['size'] or state['hasher'].hexdigest() != state['item']['sha256']:
                             raise SegmentMismatch(f"assembled SHA-256 mismatch: {state['item']['path']}", segment['asset'], state['item']['path'])
@@ -2692,7 +2700,7 @@ def _update_say(message: str) -> None:
 
 
 def run_game_update(folder: Path, dry_run: bool = False, force: bool = False, silent: bool = False) -> int:
-    script = next((p for p in (HERE / 'Update-Game.ps1', HERE / 'support' / 'Update-Game.ps1', Path.cwd() / 'Update-Game.ps1') if p.is_file()), None)
+    script = resolve_update_script(HERE)
     if script is None:
         _update_say('Update failed: Update-Game.ps1 not found.')
         return 1

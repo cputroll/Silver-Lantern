@@ -83,6 +83,38 @@ class JunctionSwapDuringAssemblyTests(unittest.TestCase):
         running = patch.object(h, 'running_launcher_paths', return_value=set())
         running.start(); self.addCleanup(running.stop)
 
+    def test_swap_after_checkpoint_boundary_check_is_classified(self):
+        if os.name != 'nt':
+            self.skipTest('junctions require Windows')
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / 'game'
+            root.mkdir()
+            outside = Path(d) / 'outside'
+            outside.mkdir()
+            sentinel = outside / 'game.exe'
+            sentinel.write_bytes(b'safe')
+            real_stat = Path.stat
+            swapped = False
+
+            def swap_before_stat(path, *args, **kwargs):
+                nonlocal swapped
+                if path.name == 'game.exe.heylisten-new' and not swapped:
+                    swapped = True
+                    (root / 'bin').rename(root / 'bin.moved')
+                    make_junction(outside, root / 'bin')
+                return real_stat(path, *args, **kwargs)
+
+            def stream(s, url, dest, **kw):
+                data = {'bundle-0.tar': b'xxabc!', 'bundle-1.tar': b'?defyy'}[url.rsplit('/', 1)[-1]]
+                dest.write_bytes(data)
+                kw['progress'](len(data))
+
+            with patch.object(h, 'stream_to', side_effect=stream), patch.object(Path, 'stat', swap_before_stat):
+                with self.assertRaises(h.InvalidGamePath):
+                    h.install_game(object(), h.parse_game_manifest(json.dumps(sample())), root)
+            self.assertTrue(swapped)
+            self.assertEqual(sentinel.read_bytes(), b'safe')
+
     def test_swapped_parent_directory_refused_before_write(self):
         if os.name != 'nt':
             self.skipTest('junctions require Windows')
