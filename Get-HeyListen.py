@@ -476,7 +476,7 @@ def friendly(exc: BaseException, resumable_bytes: int = 0) -> UserError:
     if isinstance(exc, UserError):
         return exc
     if isinstance(exc, InvalidGamePath):
-        return UserError(f'The game package contains an invalid entry: {exc.entry}',
+        return UserError(f'The game package contains an invalid entry: {exc.entry}.',
                          'Tell the person who provided the game package.', 'invalid game package')
     if isinstance(exc, game_channel.LockTimeout):
         return UserError('Another installation or update is using this folder.',
@@ -1979,7 +1979,14 @@ class InvalidGamePath(ValueError):
 
 
 def game_path(root: Path, relative: str) -> Path:
-    target = root.joinpath(*relative.split('/'))
+    parts = relative.split('/')
+    if not relative or any(part in ('', '.', '..') for part in parts) or '\\' in relative or ':' in relative:
+        raise InvalidGamePath(root.resolve(), relative)
+    target = root
+    for part in parts:
+        target = target / part
+        if _leftover_kind(target) == 'reparse':
+            raise InvalidGamePath(root.resolve(), relative)
     if not target.resolve().is_relative_to(root.resolve()):
         raise InvalidGamePath(root.resolve(), relative)
     return target
@@ -2350,13 +2357,20 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     needed = {p['asset'] for f in pending for p in f['segments' if v2 else 'parts']}
     download_bytes = 0
     uncached_asset_sizes = []
+    checking_assets = set()
+    def verify_bundle(path, name):
+        if os.environ.get('SILVER_LANTERN_GUI_PROGRESS') == '1':
+            checking_assets.add(name)
+            _write(f'HLVERIFY done={len(checking_assets)} total={len(needed)}\n')
+            return sha256(path)
+        return sha256(path, progress=True)
     for name in needed:
         part = assets[name]
         cached = cache / name
         partial = Path(str(cached) + '.part')
-        if cached.is_file() and cached.stat().st_size == part['size'] and sha256(cached, progress=True) == part['sha256']:
+        if cached.is_file() and cached.stat().st_size == part['size'] and verify_bundle(cached, name) == part['sha256']:
             continue
-        if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists() and sha256(partial, progress=True) == part['sha256']:
+        if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists() and verify_bundle(partial, part['asset']) == part['sha256']:
             continue
         # Count the entire asset: sparse/preallocated chunks may consume space
         # later, and a server may discard a partial when it ignores ranges.
@@ -2421,13 +2435,13 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             if part['asset'] in verified_assets and dest.is_file():
                 return
             verified_assets.discard(part['asset'])
-            if dest.is_file() and dest.stat().st_size == part['size'] and sha256(dest, progress=True) == part['sha256']:
+            if dest.is_file() and dest.stat().st_size == part['size'] and verify_bundle(dest, part['asset']) == part['sha256']:
                 verified_assets.add(part['asset'])
                 return
             dest.unlink(missing_ok=True)
             partial = Path(str(dest) + '.part')
             if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists():
-                if sha256(partial, progress=True) == part['sha256']:
+                if verify_bundle(partial, part['asset']) == part['sha256']:
                     _replace_with_retry(partial, dest)
                     verified_assets.add(part['asset'])
                     return
@@ -2442,7 +2456,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                     side.unlink(missing_ok=True)
                 worker = stream_session() if s is None else s
                 stream_to(worker, url, dest, expect=part['size'], progress=progress.add, quiet=True)
-            if sha256(dest, progress=True) != part['sha256']:
+            if verify_bundle(dest, part['asset']) != part['sha256']:
                 dest.unlink(missing_ok=True)
                 raise ValueError(f"SHA-256 mismatch: {part['asset']}")
             verified_assets.add(part['asset'])

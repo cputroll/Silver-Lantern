@@ -263,6 +263,27 @@ class StateTests(unittest.TestCase):
         self.assertEqual((info['pct'], info['done'], info['total'], info['speed'], info['phase']), (50, 500, 1000, 2048, 'Downloading'))
         self.assertEqual(launcher.parse_progress('HLPROGRESS done=x total=1')['text'] if launcher.parse_progress('HLPROGRESS done=x total=1') else None, None)
 
+    def test_invalid_entry_error_keeps_sentence_boundary(self):
+        message = 'Problem: The game package contains an invalid entry: romfs/a file.bin. What to do: Tell the person who provided the game package.'
+        rendered = launcher.friendly_gui_text(message)
+        self.assertIn('. What to do: Tell', rendered)
+
+    def test_verification_progress_is_bundle_counts_not_speed(self):
+        info = launcher.parse_progress('HLVERIFY done=4 total=22\n')
+        self.assertEqual(info['phase'], 'Verifying the download...')
+        self.assertEqual(info['text'], 'Checking 4 of 22 bundles')
+        self.assertEqual(info['speed'], 0)
+        self.assertIsNone(info['pct'])
+        legacy = launcher.parse_progress('HLPROGRESS phase=Checking done=100 total=100 speed=999')
+        self.assertEqual((legacy['pct'], legacy['speed'], legacy['text']), (None, 0, 'Checking game files...'))
+        with patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.events.publish('progress', launcher.parse_progress('HLPROGRESS phase=Downloading done=100 total=100 speed=999'))
+            ui.events.publish('progress', info)
+            ui.drain()
+            self.assertEqual(ui.progress, 'Checking 4 of 22 bundles')
+            self.assertEqual(ui.progress_info, info)
+
     def test_progress_info_reaches_ui(self):
         with patch.object(LauncherUI, 'check_updates'):
             ui = LauncherUI()

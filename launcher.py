@@ -975,6 +975,14 @@ def fmt_eta(seconds):
 
 
 def parse_progress(line):
+    if line.startswith('HLVERIFY '):
+        fields = dict(re.findall(r'(\w+)=([^ ]+)', line[9:]))
+        try:
+            done, total = int(fields['done']), int(fields['total'])
+        except (KeyError, ValueError):
+            return None
+        return {'text': f'Checking {done} of {total} bundles', 'phase': 'Verifying the download...',
+                'done': 0, 'total': 0, 'speed': 0, 'pct': None}
     if line.startswith('HLPROGRESS '):
         fields = dict(re.findall(r'(\w+)=([^ ]+)', line[11:]))
         try:
@@ -982,6 +990,9 @@ def parse_progress(line):
         except ValueError:
             return None
         phase = fields.get('phase', 'Downloading').replace('_', ' ')
+        if phase == 'Checking':
+            return {'text': 'Checking game files...', 'phase': 'Verifying the download...',
+                    'done': 0, 'total': 0, 'speed': 0, 'pct': None}
         pct = done * 100 // total if total > 0 else None
         text = f'{phase}: {pct}%' if pct is not None else phase
         return {'text': text, 'phase': phase, 'done': done, 'total': total, 'speed': speed, 'pct': pct}
@@ -1082,7 +1093,7 @@ def child_output(process, phase, idle_timeout=CHILD_IDLE_TIMEOUT):
             raise error
         if line is None:
             return
-        if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ')):
+        if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ', 'HLVERIFY ')):
             phase = line.strip()[:160]
         yield line
 
@@ -1104,7 +1115,7 @@ def worker_command(events, args):
             for line in child_output(process, 'Game installation or update'):
                 log.write(line)
                 log.flush()
-                if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ')):
+                if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ', 'HLVERIFY ')):
                     last_line = gui_child_text(line)
                     screen_lines.append(last_line)
                 progress = parse_progress(line) or {'text': line.strip()}
@@ -2195,7 +2206,7 @@ class LauncherUI:
         tool = self.operation == 'tool'
         title = 'Updating Silver Lantern' if tool else ('Updating the game' if self.operation == 'update' else 'Installing Ocarina of Time')
         pct = info.get('pct')
-        if pct is None:
+        if pct is None and info.get('phase') != 'Verifying the download...':
             match = re.search(r'(\d{1,3})%', self.progress)
             pct = min(100, int(match.group(1))) if match else None
         phase = info.get('phase') or ('Preparing' if pct is None else 'Downloading')
