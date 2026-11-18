@@ -1339,6 +1339,10 @@ def stage_executable(zpath: Path, directory: Path, name: str) -> Path:
         return dest
 
 
+def log_update_phase(phase: str, started: float) -> None:
+    log(f'Self-update phase={phase} elapsed_ms={round((time.monotonic() - started) * 1000)}')
+
+
 def replace_transactionally(target: Path, replacement: Path) -> None:
     backup = target.with_name(target.name + '.update-backup')
     if backup.exists():
@@ -1353,6 +1357,7 @@ def replace_transactionally(target: Path, replacement: Path) -> None:
     fd, name = tempfile.mkstemp(prefix=target.name + '.update-', suffix='.tmp', dir=target.parent)
     staged = Path(name)
     try:
+        verify_started = time.monotonic()
         with os.fdopen(fd, 'wb') as out, replacement.open('rb') as src:
             while True:
                 check_parent_alive()
@@ -1371,7 +1376,10 @@ def replace_transactionally(target: Path, replacement: Path) -> None:
             return h.digest()
         if not staged.stat().st_size or staged.stat().st_size != replacement.stat().st_size or digest(staged) != digest(replacement):
             raise ValueError('staged update failed verification')
+        log_update_phase('verification done', verify_started)
+        swap_started = time.monotonic()
         _replace_with_retry(staged, target)
+        log_update_phase('swap done', swap_started)
     finally:
         try:
             staged.unlink(missing_ok=True)
@@ -1417,13 +1425,23 @@ def cleanup_stage(stage: Path) -> None:
 
 
 def _apply_update(target: Path, replacement: Path, parent: int, args: list[str]) -> None:
+    handoff = os.environ.get('SILVER_LANTERN_UPDATE_SPAWN_MONOTONIC')
+    if handoff:
+        try:
+            log_update_phase('helper startup', float(handoff))
+        except ValueError:
+            log('Self-update timing: invalid helper startup timestamp')
+    wait_started = time.monotonic()
     wait_for_parent(parent)
+    log_update_phase('parent-wait done', wait_started)
     replace_transactionally(target, replacement)
     try:
+        relaunch_started = time.monotonic()
         if len(args) == 2 and args[0] == '--update-only-internal':
             log(f'Updated to {args[1]}. Run the tool again to continue.')
         else:
             subprocess.Popen([str(target), *args], cwd=str(target.parent))
+        log_update_phase('relaunch', relaunch_started)
     finally:
         cleanup_stage(replacement.parent)
 
@@ -1502,13 +1520,18 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
         target = Path(sys.executable).resolve()
         stage = Path(tempfile.mkdtemp(prefix='.heylisten-update-', dir=target.parent))
         try:
+            download_started = time.monotonic()
             replacement = stage_executable(Path(local_zip).resolve(strict=True), stage, target.name)
+            log_update_phase('download done', download_started)
             helper = stage / 'update-helper.exe'
             shutil.copy2(target, helper)
             check_parent_alive()
             helper_env = dict(os.environ)
             helper_env.pop('SILVER_LANTERN_PARENT_PID', None)
+            spawn_started = time.monotonic()
+            helper_env['SILVER_LANTERN_UPDATE_SPAWN_MONOTONIC'] = str(spawn_started)
             subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), '--update-only-internal', 'local fixture'], cwd=str(target.parent), env=helper_env)
+            log_update_phase('helper spawned', spawn_started)
             _self_update_started = True
         except BaseException:
             shutil.rmtree(stage, ignore_errors=True)
@@ -1535,7 +1558,9 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
     stage = Path(tempfile.mkdtemp(prefix='.heylisten-update-', dir=target.parent))
     try:
         zp = stage / UPDATE_ASSET
+        download_started = time.monotonic()
         stream_to(s, assets[UPDATE_ASSET]['browser_download_url'], zp, expect=size, quiet=True)
+        log_update_phase('download done', download_started)
         if zp.stat().st_size != size or sha256(zp) != want:
             raise ValueError("update size or checksum mismatch")
         replacement = stage_executable(zp, stage, target.name)
@@ -1555,7 +1580,10 @@ def check_self_update(s: "requests.Session", man: dict, args: list[str],
         check_parent_alive()
         helper_env = dict(os.environ)
         helper_env.pop('SILVER_LANTERN_PARENT_PID', None)
+        spawn_started = time.monotonic()
+        helper_env['SILVER_LANTERN_UPDATE_SPAWN_MONOTONIC'] = str(spawn_started)
         subprocess.Popen([str(helper), '--apply-update-internal', str(target), str(replacement), str(os.getpid()), *rest], cwd=str(target.parent), env=helper_env)
+        log_update_phase('helper spawned', spawn_started)
         _self_update_started = True
     except BaseException:
         shutil.rmtree(stage, ignore_errors=True)
@@ -2412,6 +2440,8 @@ def main() -> int:
             if sys.argv[1:] == ['--gui']:
                 raise
     if len(sys.argv) >= 5 and sys.argv[1] == "--apply-update-internal":
+        global LOG_PATH
+        LOG_PATH = Path(sys.argv[2]).parent / 'HeyListen-Get.log'
         _apply_update(Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4]), sys.argv[5:])
         return 0
     ap = argparse.ArgumentParser(description="One-click HeyListen + game downloader")

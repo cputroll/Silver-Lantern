@@ -1,0 +1,122 @@
+[
+  {
+    "run": 1,
+    "total_ms": 5185,
+    "phases_ms": {
+      "download done": 75,
+      "helper spawned": 28,
+      "parent-wait done": 1,
+      "verification done": 108,
+      "swap done": 4,
+      "relaunch": 0
+    }
+  },
+  {
+    "run": 2,
+    "total_ms": 6241,
+    "phases_ms": {
+      "download done": 76,
+      "helper spawned": 29,
+      "parent-wait done": 1,
+      "verification done": 111,
+      "swap done": 5,
+      "relaunch": 0
+    }
+  },
+  {
+    "run": 3,
+    "total_ms": 8373,
+    "phases_ms": {
+      "download done": 81,
+      "helper spawned": 30,
+      "parent-wait done": 1,
+      "verification done": 963,
+      "swap done": 4,
+      "relaunch": 0
+    }
+  },
+  {
+    "run": 4,
+    "total_ms": 4155,
+    "phases_ms": {
+      "download done": 90,
+      "helper spawned": 29,
+      "parent-wait done": 1,
+      "verification done": 119,
+      "swap done": 4,
+      "relaunch": 0
+    }
+  },
+  {
+    "run": 5,
+    "total_ms": 4522,
+    "phases_ms": {
+      "download done": 77,
+      "helper spawned": 31,
+      "parent-wait done": 1,
+      "verification done": 115,
+      "swap done": 5,
+      "relaunch": 0
+    }
+  },
+  {
+    "run": 6,
+    "total_ms": 10961,
+    "phases_ms": {
+      "download done": 80,
+      "helper spawned": 29,
+      "parent-wait done": 1,
+      "verification done": 114,
+      "swap done": 4,
+      "relaunch": 0
+    }
+  },
+  {
+    "run": 7,
+    "total_ms": 7208,
+    "phases_ms": {
+      "download done": 92,
+      "helper spawned": 30,
+      "parent-wait done": 1,
+      "verification done": 151,
+      "swap done": 4,
+      "relaunch": 0
+    }
+  },
+  {
+    "run": 8,
+    "total_ms": 9206,
+    "phases_ms": {
+      "download done": 95,
+      "helper spawned": 29,
+      "parent-wait done": 1,
+      "verification done": 130,
+      "swap done": 5,
+      "relaunch": 0
+    }
+  },
+  {
+    "run": 9,
+    "total_ms": 6494,
+    "phases_ms": {
+      "download done": 77,
+      "helper spawned": 29,
+      "parent-wait done": 1,
+      "verification done": 115,
+      "swap done": 4,
+      "relaunch": 0
+    }
+  },
+  {
+    "run": 10,
+    "total_ms": 7906,
+    "phases_ms": {
+      "download done": 113,
+      "helper spawned": 1238,
+      "parent-wait done": 1,
+      "verification done": 113,
+      "swap done": 4,
+      "relaunch": 0
+    }
+  }
+]

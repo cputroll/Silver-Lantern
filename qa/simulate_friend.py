@@ -157,7 +157,8 @@ def main():
         if before != '0.0.1' or expected == before:
             raise RuntimeError(f'expected distinct old/new versions, got {before!r} and {expected!r}')
         command(target, '--self-update-from', args.zip.resolve(), '--no-pause')
-        deadline = time.monotonic() + 90
+        # Ten loaded trials: worst 10.961 s including version probe; 3x rounded up.
+        deadline = time.monotonic() + 33
         while time.monotonic() < deadline:
             try:
                 if command(target, '--version').strip() == expected:

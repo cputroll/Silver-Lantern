@@ -12,6 +12,21 @@ app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
 
 class UpdaterTests(unittest.TestCase):
+    def test_helper_logs_wait_and_relaunch_phases(self):
+        with mock.patch.object(app, 'wait_for_parent'), mock.patch.object(app, 'replace_transactionally'), mock.patch.object(app, 'cleanup_stage'), mock.patch.object(app, 'log_update_phase') as phase:
+            app._apply_update(Path('target'), Path('replacement'), 1, ['--update-only-internal', 'test'])
+        self.assertEqual([call.args[0] for call in phase.call_args_list], ['parent-wait done', 'relaunch'])
+
+    def test_helper_records_cross_process_startup(self):
+        with mock.patch.dict('os.environ', {'SILVER_LANTERN_UPDATE_SPAWN_MONOTONIC': '10.0'}), mock.patch.object(app, 'wait_for_parent'), mock.patch.object(app, 'replace_transactionally'), mock.patch.object(app, 'cleanup_stage'), mock.patch.object(app, 'log_update_phase') as phase:
+            app._apply_update(Path('target'), Path('replacement'), 1, ['--update-only-internal', 'test'])
+        self.assertEqual(phase.call_args_list[0].args, ('helper startup', 10.0))
+
+    def test_update_phase_logs_millisecond_elapsed_time(self):
+        with mock.patch.object(app.time, 'monotonic', return_value=12.345), mock.patch.object(app, 'log') as log:
+            app.log_update_phase('verification done', 10.0)
+        log.assert_called_once_with('Self-update phase=verification done elapsed_ms=2345')
+
     def test_unsigned_local_update_refused_without_test_seam(self):
         with mock.patch.dict('os.environ', {'SILVER_LANTERN_ALLOW_LOCAL_UPDATE': ''}), mock.patch.object(sys, 'frozen', True, create=True), mock.patch.object(app, '_self_update_started', False):
             with self.assertRaisesRegex(ValueError, 'unsigned local updates are disabled'):
@@ -103,7 +118,7 @@ class UpdaterTests(unittest.TestCase):
              mock.patch.object(app, 'log') as log:
             app._apply_update(Path('app.exe'), Path('stage/new.exe'), 123, command[5:])
         launch.assert_not_called()
-        log.assert_called_with('Updated to v999.0.0. Run the tool again to continue.')
+        log.assert_any_call('Updated to v999.0.0. Run the tool again to continue.')
 
     def test_archive_falls_back_to_support_executable(self):
         with tempfile.TemporaryDirectory() as d:
