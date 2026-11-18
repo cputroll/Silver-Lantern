@@ -218,6 +218,53 @@ def main():
             if 'child' in locals() and child.poll() is None: child.kill(); child.wait(timeout=10)
             local.shutdown(); local.server_close()
 
+    def early_partial_adoption():
+        fixture = artifacts / 'early-resume-fixture'
+        source = fixture / 'source'
+        source.mkdir(parents=True)
+        payload = b'A' * 200000
+        (source / 'game.dat').write_bytes(payload)
+        spec = importlib.util.spec_from_file_location('early_packer', Path(__file__).resolve().parents[1] / 'pack-game.py')
+        packer = importlib.util.module_from_spec(spec); spec.loader.exec_module(packer)
+        assets = fixture / 'assets'
+        data = packer.pack(source, assets, limit=65536)
+        mf = assets / 'game-manifest.json'; mf.write_text(json.dumps(data), encoding='utf-8')
+        requests = []
+        class Throttled(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                requests.append(self.path)
+                if len(requests) > 1: time.sleep(10)
+                try: super().do_GET()
+                except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError): pass
+        local = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Throttled, directory=str(assets)))
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        run_env = dict(env, SILVER_LANTERN_TEST_ASSET_URL=f'http://127.0.0.1:{local.server_port}/', SILVER_LANTERN_ASSEMBLY_WORKERS='1')
+        target = artifacts / 'early-resume-game'
+        argv = [str(exe), '--cli', '--install-game', str(target), '--game-manifest', str(mf), '--no-self-update', '--no-preset', '--no-pause', '--plain']
+        try:
+            child = subprocess.Popen(argv, env=run_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            checkpoint = target / 'game.dat.heylisten-new.json'
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and child.poll() is None:
+                if checkpoint.exists() and len(requests) > 1: break
+                time.sleep(.1)
+            else: raise RuntimeError('partial checkpoint was not established')
+            if (target / 'game.dat').exists(): raise RuntimeError('game file completed before interruption')
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(child.pid)], capture_output=True, timeout=10)
+            child.wait(timeout=10)
+            before = list(requests)
+            completed = '/' + data['files'][0]['segments'][0]['asset']
+            if completed not in before: raise RuntimeError('first partial segment was not downloaded')
+            resumed = subprocess.run(argv, env=run_env, capture_output=True, text=True, timeout=90)
+            if resumed.returncode or (target / 'game.dat').read_bytes() != payload:
+                raise RuntimeError(f'partial resume failed: {resumed.returncode} {resumed.stdout} {resumed.stderr}')
+            if completed in requests[len(before):]: raise RuntimeError('adopted segment was downloaded again')
+            return f'partial segment adopted without refetch: {completed}'
+        finally:
+            if 'child' in locals() and child.poll() is None: child.kill(); child.wait(timeout=10)
+            local.shutdown(); local.server_close()
+
     def gui_first_run():
         gui_profile = artifacts / 'gui-profile'
         folder = gui_profile / 'Games' / 'HeyListen'
@@ -273,6 +320,169 @@ def main():
             if holder.poll() is None:
                 holder.terminate()
             holder.wait(timeout=10)
+
+    def first_temp_write_lock():
+        target = artifacts / 'locked-temp-game'
+        final = target / 'bin' / 'HeyListen.exe'
+        temporary = final.with_name(final.name + '.heylisten-new')
+        temporary.parent.mkdir(parents=True)
+        temporary.write_bytes(b'old temporary data')
+        ready = artifacts / 'temp-lock-ready'
+        code = "import ctypes,sys,time,pathlib; k=ctypes.WinDLL('kernel32',use_last_error=True); k.CreateFileW.restype=ctypes.c_void_p; h=k.CreateFileW(sys.argv[1],0x80000000,1,None,3,0,None); assert h != ctypes.c_void_p(-1).value; pathlib.Path(sys.argv[2]).write_text('ready'); time.sleep(8); k.CloseHandle(ctypes.c_void_p(h))"
+        holder = subprocess.Popen([sys.executable, '-c', code, str(temporary), str(ready)])
+        try:
+            deadline = time.monotonic() + 15
+            while not ready.exists() and time.monotonic() < deadline and holder.poll() is None:
+                time.sleep(.1)
+            if not ready.exists():
+                raise RuntimeError('temporary-file lock helper did not start')
+            started = time.monotonic()
+            output = command(exe, '--install-game', target, '--game-manifest', manifest, '--no-self-update', '--no-preset', '--no-pause', '--plain')
+            if time.monotonic() - started < 4 or final.read_bytes() != b'silver-lantern-fixture\n':
+                raise RuntimeError('install did not wait for the first temporary-file write')
+            return output
+        finally:
+            if holder.poll() is None:
+                holder.terminate()
+            holder.wait(timeout=10)
+
+    def swap_boundary(boundary):
+        raise RuntimeError(f'No deterministic packaged interruption hook for swap boundary: {boundary}')
+
+    def sibling_ownership_race():
+        gui_profile = artifacts / 'sibling-profile'
+        folder = gui_profile / 'Games' / 'HeyListen'
+        folder.mkdir(parents=True)
+        stale = folder / 'Ocarina of Time-stale.exe'
+        stale.write_bytes(b'recorded stale copy')
+        unknown = folder / 'Ocarina of Time-unknown.exe'
+        unknown.write_bytes(b'unknown replacement')
+        records = folder / '.heylisten-get' / 'launcher-copies.json'
+        records.parent.mkdir()
+        records.write_text(json.dumps({stale.name: hashlib.sha256(stale.read_bytes()).hexdigest(), unknown.name: hashlib.sha256(b'former owned content').hexdigest()}), encoding='utf-8')
+        state = gui_profile / 'local' / 'SilverLantern'
+        state.mkdir(parents=True)
+        (state / 'launcher.json').write_text(json.dumps({'game_dir': str(folder)}), encoding='utf-8')
+        gui_env = dict(env, USERPROFILE=str(gui_profile), LOCALAPPDATA=str(gui_profile / 'local'), APPDATA=str(gui_profile / 'roaming'), SDL_VIDEODRIVER='dummy', SDL_RENDER_DRIVER='software', SILVER_LANTERN_TEST_GUI_INSTALL='1')
+        child = subprocess.Popen([str(root / 'Run Silver Lantern.exe'), '--gui', '--no-self-update'], env=gui_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            if child.wait(timeout=30): raise RuntimeError('GUI relocation failed')
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and not (folder / 'bin' / 'HeyListen.exe').exists(): time.sleep(.25)
+            if stale.exists() or unknown.read_bytes() != b'unknown replacement':
+                raise RuntimeError('stale copy not removed or unknown sibling damaged')
+            raise RuntimeError('ownership preservation observed, but concurrent pathname race is not yet exercised')
+        finally:
+            if child.poll() is None: child.kill(); child.wait(timeout=10)
+
+    def parent_only_kill(mode):
+        if mode == 'assembly':
+            raise RuntimeError('No deterministic assembly-phase synchronization is available yet')
+        target = artifacts / ('orphan-' + mode)
+        target.mkdir()
+        sentinel = target / 'unknown.txt'; sentinel.write_bytes(b'unknown')
+        original = target / 'bin' / 'HeyListen.exe'
+        original.parent.mkdir()
+        original.write_bytes(b'original entry point')
+        ready = artifacts / ('orphan-' + mode + '.pid')
+        started = threading.Event()
+        release = threading.Event()
+        class Blocking(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                started.set()
+                if mode == 'assembly': release.wait(60)
+                try: super().do_GET()
+                except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError): pass
+        local = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Blocking, directory=str(manifest.parent)))
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        run_env = dict(env, SILVER_LANTERN_TEST_ASSET_URL=f'http://127.0.0.1:{local.server_port}/')
+        argv = [str(exe), '--cli', '--install-game', str(target), '--game-manifest', str(manifest), '--no-self-update', '--no-preset', '--no-pause', '--plain']
+        lock = None
+        if mode == 'retry':
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+            kernel.CreateFileW.restype = wintypes.HANDLE
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            lock = kernel.CreateFileW(str(original), 0x80000000, 1, None, 3, 0, None)
+            if lock == ctypes.c_void_p(-1).value: raise ctypes.WinError(ctypes.get_last_error())
+        child_output = artifacts / ('orphan-' + mode + '.output')
+        parent_code = "import os,sys,time,subprocess; sys.path.insert(0,sys.argv[1]); from parent_identity import parent_environment; f=open(sys.argv[3],'w'); p=subprocess.Popen(sys.argv[4:],env=parent_environment(),stdout=f,stderr=subprocess.STDOUT); open(sys.argv[2],'w').write(str(p.pid)); time.sleep(90)"
+        parent = subprocess.Popen([sys.executable, '-c', parent_code, str(Path(__file__).resolve().parents[1]), str(ready), str(child_output), *argv], env=run_env)
+        child_pid = None
+        identity = None
+        try:
+            deadline = time.monotonic() + 60
+            while time.monotonic() < deadline and parent.poll() is None and not ready.exists(): time.sleep(.05)
+            if not ready.exists(): raise RuntimeError('parent did not launch packaged child')
+            child_pid = int(ready.read_text())
+            identity = process_creation_time(child_pid)
+            if identity is None or not started.wait(60): raise RuntimeError('child did not begin fixture download')
+            if mode == 'retry':
+                temporary = original.with_name(original.name + '.heylisten-new')
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    if temporary.exists() and child_output.exists() and 'Waiting for Windows to release a file' in child_output.read_text(encoding='utf-8', errors='replace'): break
+                    time.sleep(.1)
+                else: raise RuntimeError('child did not enter locked replacement retry')
+            parent.terminate(); parent.wait(timeout=10)
+            release.set()
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline and process_creation_time(child_pid) == identity: time.sleep(.1)
+            if process_creation_time(child_pid) == identity: raise RuntimeError('orphaned child did not stop')
+            if lock:
+                kernel.CloseHandle(lock); lock = None
+            time.sleep(2)
+            if original.read_bytes() != b'original entry point' or sentinel.read_bytes() != b'unknown':
+                raise RuntimeError('orphan replaced entry point or removed unknown file')
+            return f'parent killed during {mode}; child stopped and files preserved'
+        finally:
+            release.set()
+            if lock: kernel.CloseHandle(lock)
+            if parent.poll() is None: parent.terminate(); parent.wait(timeout=10)
+            if child_pid and identity is not None and process_creation_time(child_pid) == identity:
+                subprocess.run(['taskkill', '/T', '/F', '/PID', str(child_pid)], capture_output=True, timeout=10)
+            local.shutdown(); local.server_close()
+
+    def concurrent_uninstall():
+        target = artifacts / 'concurrent-game'
+        target.mkdir()
+        preserved = target / 'unknown.dat'; preserved.write_bytes(b'keep this file')
+        state = Path(env['LOCALAPPDATA']) / 'SilverLantern'
+        state.mkdir(parents=True, exist_ok=True)
+        (state / 'launcher.json').write_text(json.dumps({'game_dir': str(target)}), encoding='utf-8')
+        started = threading.Event()
+        release = threading.Event()
+        class Blocking(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args): pass
+            def do_GET(self):
+                started.set()
+                release.wait(60)
+                try: super().do_GET()
+                except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError): pass
+        local = http.server.ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(Blocking, directory=str(manifest.parent)))
+        threading.Thread(target=local.serve_forever, daemon=True).start()
+        run_env = dict(env, SILVER_LANTERN_TEST_ASSET_URL=f'http://127.0.0.1:{local.server_port}/')
+        argv = [str(exe), '--cli', '--install-game', str(target), '--game-manifest', str(manifest), '--no-self-update', '--no-preset', '--no-pause', '--plain']
+        child = subprocess.Popen(argv, env=run_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            if not started.wait(60) or child.poll() is not None: raise RuntimeError('install did not reach blocked download')
+            result = subprocess.run([str(exe), '--cli', '--uninstall'], input='y\n', env=env, capture_output=True, text=True, timeout=90)
+            output = result.stdout + result.stderr
+            if 'installation or update is in progress' not in output.lower():
+                raise RuntimeError(f'uninstall did not refuse concurrent install: {result.returncode} {output}')
+            if preserved.read_bytes() != b'keep this file' or child.poll() is not None:
+                raise RuntimeError('concurrent uninstall destroyed files or stopped install')
+            release.set()
+            if child.wait(timeout=90) or (target / 'bin' / 'HeyListen.exe').read_bytes() != b'silver-lantern-fixture\n':
+                raise RuntimeError('install failed after refused uninstall')
+            return output
+        finally:
+            release.set()
+            if child.poll() is None: child.kill(); child.wait(timeout=10)
+            local.shutdown(); local.server_close()
 
     def uninstall():
         import winreg
@@ -350,8 +560,17 @@ def main():
         ('stale-update-backup', update),
         ('zip-first-run-install', gui_first_run),
         ('interrupt-resume', interrupt_resume),
+        ('early-partial-adoption', early_partial_adoption),
         ('file-lock', file_lock),
+        ('first-temp-write-lock', first_temp_write_lock),
         ('previous-release-update', prior_update),
+        ('swap-before-staging', lambda: swap_boundary('before staging')),
+        ('swap-after-staging', lambda: swap_boundary('after staging, before swap')),
+        ('swap-after-swap', lambda: swap_boundary('after swap, before relaunch')),
+        ('sibling-ownership-race', sibling_ownership_race),
+        ('parent-kill-assembly', lambda: parent_only_kill('assembly')),
+        ('parent-kill-lock-retry', lambda: parent_only_kill('retry')),
+        ('concurrent-uninstall', concurrent_uninstall),
         ('uninstall-keeps-saves', uninstall),
         ('crash-and-zombie-safety', safety),
     ]
