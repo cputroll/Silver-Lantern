@@ -506,15 +506,14 @@ def show_error(err: UserError) -> None:
         say(f"Details were saved to: {LOG_PATH}", "dim")
 
 
-def _replace_with_retry(src: Path, dst: Path, budget: float = 60.0) -> None:
-    """Rename with bounded retries while Windows or antivirus holds a file."""
+def _retry_locked(operation, budget=60.0):
+    """Retry a file operation while Windows or antivirus holds the file."""
     delays = (1, 2, 5, 10)
     deadline = time.monotonic() + budget
     attempt = 0
     while True:
         try:
-            Path(src).replace(dst)
-            return
+            return operation()
         except OSError as exc:
             if not isinstance(exc, PermissionError) and getattr(exc, 'winerror', None) not in (32, 33):
                 raise
@@ -524,6 +523,14 @@ def _replace_with_retry(src: Path, dst: Path, budget: float = 60.0) -> None:
             say('Waiting for Windows to release a file...')
             time.sleep(min(delays[min(attempt, len(delays) - 1)], remaining))
             attempt += 1
+
+
+def _replace_with_retry(src: Path, dst: Path, budget: float = 60.0) -> None:
+    _retry_locked(lambda: Path(src).replace(dst), budget)
+
+
+def _open_with_retry(path: Path, mode: str):
+    return _retry_locked(lambda: path.open(mode))
 
 
 @contextlib.contextmanager
@@ -1791,7 +1798,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                         if state['temp'].parent not in created_parents:
                             state['temp'].parent.mkdir(parents=True, exist_ok=True)
                             created_parents.add(state['temp'].parent)
-                    with state['temp'].open('wb' if index == 0 else 'ab') as output:
+                    with _open_with_retry(state['temp'], 'wb' if index == 0 else 'ab') as output:
                         state['started'] = True
                         while remaining:
                             data = os.read(fd, min(remaining, 1024 * 1024))
@@ -2031,7 +2038,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 temp = target.with_name(target.name + '.heylisten-new')
                 try:
                     file_hash = hashlib.sha256()
-                    with temp.open('wb') as output:
+                    with _open_with_retry(temp, 'wb') as output:
                         for part in item['segments' if v2 else 'parts']:
                             with (cache / part['asset']).open('rb') as source:
                                 source.seek(part['offset'] if v2 else 0)
@@ -2621,7 +2628,10 @@ def run() -> None:
         say("Stopped. Run this again any time. It picks up where it left off.", "dim")
         code = 130
     except Exception as exc:  # noqa: BLE001
-        log(traceback.format_exc())
+        if isinstance(exc, PermissionError) or (isinstance(exc, OSError) and getattr(exc, 'winerror', None) in (32, 33)):
+            log(f'File in use: {exc}')
+        else:
+            log(traceback.format_exc())
         if _UI_READY:
             show_error(friendly(exc))
         else:
