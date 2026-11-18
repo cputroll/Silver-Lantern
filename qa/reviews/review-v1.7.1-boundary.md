@@ -1,23 +1,24 @@
 # Independent containment re-review: v1.7.1
 
 **Verdict: FIX-FIRST**  
-Reviewed main `138111db6ffd4190b0fcf60d66705c6362ae0088` on Windows, 2026-11-18. This is a focused containment review, not a full release-gate sign-off.
+Reviewed main `2218846` on Windows, 2026-11-18. This is a focused containment review, not a full release-gate sign-off.
 
 ## Remaining gap
 
-`_leftover_kind` (`Get-HeyListen.py:770-778`) treats every `os.stat(..., follow_symlinks=False)` error as an absent path, including errors other than a missing path. `verify_write_boundary` uses that result when walking the destination (`:2032-2038`), so it cannot substantiate its claim to fail closed on every existing reparse component when inspection fails. Distinguish missing paths from unexpected stat errors and reject the latter; add a focused regression test. This is an inspection-failure gap, not a demonstrated remote-only escape.
+The `verify_write_boundary` docstring (`Get-HeyListen.py:2021-2023`) still describes the substitution window as "the microseconds between this check and the open/replace". There is no such timing guarantee: scheduling or other delays can lengthen the interval. State simply that a same-user local actor can race the pathname-based check and subsequent open/replace; handle-relative operations would be needed for a stronger guarantee. This is a documentation accuracy issue, not a newly demonstrated remote escape.
 
-The same helper's docstring (`:2017-2023`) says a swapped junction can **never** receive a game file, even though its checks and subsequent pathname-based open/replace are not atomic. Correct that absolute claim and describe the residual same-user local race without implying a strict timing bound. Handle-relative operations would be needed for a stronger guarantee against a local racer.
+Also, error classification is not unconditional: the stat-error handler constructs `InvalidGamePath(root.resolve(), ...)`, so if resolving the root itself raises `OSError`, that raw error escapes instead. The boundary still fails closed, but the promised classified error is not guaranteed in that case.
 
 ## Verified
 
-- The previously missing v1 behavioral regression is present: `test_v1_junction_swap_refused_and_referent_untouched` gates the second fetch, replaces `bin` with a Windows junction mid-install, expects `InvalidGamePath`, verifies the sentinel is unchanged, and asserts that the outside directory contains only that sentinel.
-- Fresh execution of `python -m unittest test_write_boundary` exited 0 with the following actual summary:
+- The boundary walk now calls `os.stat(..., follow_symlinks=False)` directly, skips `FileNotFoundError`, rejects other inspection errors, and preserves reparse-point, final-file type, and resolved-containment checks.
+- `test_stat_failure_fails_closed` injects a permission error for an ancestor and verifies rejection. The prior Windows junction-swap behavioral tests remain present.
+- Fresh execution of `python -m unittest test_write_boundary` exited 0:
 
   ```text
-  Ran 8 tests in 0.847s
+  Ran 9 tests in 0.813s
 
   OK
   ```
 
-- The earlier combined execution of six suites reported 59 tests OK, 1 skipped; it was not repeated for this update. Packaged friend simulation and unrelated prior findings remain outside this focused review.
+- The full suite and packaged friend simulation were not rerun for this focused review; release-gate sign-off remains separate.
