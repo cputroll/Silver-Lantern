@@ -1,122 +1,132 @@
 [
   {
     "run": 1,
-    "total_ms": 5185,
+    "total_ms": 5303,
     "phases_ms": {
-      "download done": 75,
-      "helper spawned": 28,
-      "parent-wait done": 1,
-      "verification done": 108,
-      "swap done": 4,
-      "relaunch": 0
+      "download done": 76,
+      "helper spawned": 14,
+      "helper startup": 1107,
+      "parent-wait done": 0,
+      "verification done": 133,
+      "swap done": 5,
+      "relaunch": 25
     }
   },
   {
     "run": 2,
-    "total_ms": 6241,
+    "total_ms": 6523,
     "phases_ms": {
-      "download done": 76,
-      "helper spawned": 29,
+      "download done": 173,
+      "helper spawned": 48,
+      "helper startup": 1770,
       "parent-wait done": 1,
-      "verification done": 111,
-      "swap done": 5,
+      "verification done": 93,
+      "swap done": 4,
       "relaunch": 0
     }
   },
   {
     "run": 3,
-    "total_ms": 8373,
+    "total_ms": 8520,
     "phases_ms": {
-      "download done": 81,
-      "helper spawned": 30,
+      "download done": 77,
+      "helper spawned": 14,
+      "helper startup": 2690,
       "parent-wait done": 1,
-      "verification done": 963,
-      "swap done": 4,
+      "verification done": 1539,
+      "swap done": 7,
       "relaunch": 0
     }
   },
   {
     "run": 4,
-    "total_ms": 4155,
+    "total_ms": 4773,
     "phases_ms": {
-      "download done": 90,
-      "helper spawned": 29,
-      "parent-wait done": 1,
-      "verification done": 119,
+      "download done": 76,
+      "helper spawned": 14,
+      "helper startup": 1050,
+      "parent-wait done": 0,
+      "verification done": 90,
       "swap done": 4,
       "relaunch": 0
     }
   },
   {
     "run": 5,
-    "total_ms": 4522,
+    "total_ms": 6196,
     "phases_ms": {
-      "download done": 77,
-      "helper spawned": 31,
+      "download done": 83,
+      "helper spawned": 14,
+      "helper startup": 1765,
       "parent-wait done": 1,
-      "verification done": 115,
-      "swap done": 5,
+      "verification done": 715,
+      "swap done": 4,
       "relaunch": 0
     }
   },
   {
     "run": 6,
-    "total_ms": 10961,
+    "total_ms": 6144,
     "phases_ms": {
-      "download done": 80,
-      "helper spawned": 29,
+      "download done": 83,
+      "helper spawned": 15,
+      "helper startup": 2951,
       "parent-wait done": 1,
-      "verification done": 114,
+      "verification done": 343,
       "swap done": 4,
       "relaunch": 0
     }
   },
   {
     "run": 7,
-    "total_ms": 7208,
+    "total_ms": 8547,
     "phases_ms": {
-      "download done": 92,
-      "helper spawned": 30,
+      "download done": 74,
+      "helper spawned": 15,
+      "helper startup": 2282,
       "parent-wait done": 1,
-      "verification done": 151,
-      "swap done": 4,
+      "verification done": 111,
+      "swap done": 7,
       "relaunch": 0
     }
   },
   {
     "run": 8,
-    "total_ms": 9206,
+    "total_ms": 7105,
     "phases_ms": {
-      "download done": 95,
-      "helper spawned": 29,
+      "download done": 71,
+      "helper spawned": 13,
+      "helper startup": 1015,
       "parent-wait done": 1,
-      "verification done": 130,
-      "swap done": 5,
+      "verification done": 89,
+      "swap done": 4,
       "relaunch": 0
     }
   },
   {
     "run": 9,
-    "total_ms": 6494,
+    "total_ms": 5839,
     "phases_ms": {
-      "download done": 77,
-      "helper spawned": 29,
+      "download done": 83,
+      "helper spawned": 15,
+      "helper startup": 2968,
       "parent-wait done": 1,
-      "verification done": 115,
-      "swap done": 4,
+      "verification done": 93,
+      "swap done": 5,
       "relaunch": 0
     }
   },
   {
     "run": 10,
-    "total_ms": 7906,
+    "total_ms": 7471,
     "phases_ms": {
-      "download done": 113,
-      "helper spawned": 1238,
+      "download done": 85,
+      "helper spawned": 14,
+      "helper startup": 1054,
       "parent-wait done": 1,
-      "verification done": 113,
-      "swap done": 4,
-      "relaunch": 0
+      "verification done": 102,
+      "swap done": 6,
+      "relaunch": 31
     }
   }
 ]
