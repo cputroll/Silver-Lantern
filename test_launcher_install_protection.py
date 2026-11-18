@@ -23,3 +23,13 @@ class LauncherInstallProtection(unittest.TestCase):
                 V2Tests().run_install(root, man)
             self.assertEqual(running.read_bytes(), b'running')
             self.assertEqual((root / 'bin/game.exe').read_bytes(), b'abcdef')
+
+    def test_other_running_copy_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            running = root / 'bin/game.exe'
+            running.parent.mkdir()
+            running.write_bytes(b'other launcher')
+            with patch.object(h, 'running_launcher_paths', return_value={running}), patch.object(h.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 100 * 1024 ** 3})()):
+                V2Tests().run_install(root, sample())
+            self.assertEqual(running.read_bytes(), b'other launcher')
