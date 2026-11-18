@@ -12,6 +12,31 @@ app = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(app)
 
 class UpdaterTests(unittest.TestCase):
+    def test_file_replace_waits_for_transient_windows_lock(self):
+        locked = OSError('sharing violation')
+        locked.winerror = 32
+        with mock.patch.object(Path, 'replace', side_effect=[locked, PermissionError('locked'), None]) as replace, \
+             mock.patch.object(app.time, 'sleep') as sleep, mock.patch.object(app, 'say') as say:
+            app._replace_with_retry(Path('old'), Path('new'))
+        self.assertEqual(replace.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1, 2])
+        self.assertEqual(say.call_count, 2)
+        self.assertIn('Waiting for Windows to release a file', say.call_args.args[0])
+
+    def test_file_replace_exhausts_deadline_and_keeps_friendly_error(self):
+        clock = [0.0]
+        def advance(seconds):
+            clock[0] += seconds
+        error = PermissionError(13, 'locked', 'Ocarina of Time.exe')
+        with mock.patch.object(Path, 'replace', side_effect=error), \
+             mock.patch.object(app.time, 'monotonic', side_effect=lambda: clock[0]), \
+             mock.patch.object(app.time, 'sleep', side_effect=advance), mock.patch.object(app, 'say'):
+            with self.assertRaises(PermissionError) as raised:
+                app._replace_with_retry(Path('old'), Path('new'))
+        self.assertEqual(clock[0], 60)
+        self.assertIn('Ocarina of Time.exe', app.friendly(raised.exception).problem)
+        self.assertIn('Wait a minute', app.friendly(raised.exception).action)
+
     def _run_update(self, args):
         release = {'tag_name': 'v999.0.0', 'assets': [
             {'name': app.UPDATE_ASSET, 'browser_download_url': 'zip', 'size': 3},

@@ -19,7 +19,7 @@ class ZipRunTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d); temp = root / 'temp'; temp.mkdir(); source = temp / 'app.exe'; source.write_bytes(b'new')
             target = root / 'local' / 'Programs' / 'Silver Lantern' / 'SilverLantern.exe'; target.parent.mkdir(parents=True); target.write_bytes(b'old')
-            with patch.object(h.sys, 'frozen', True, create=True), patch.object(h.sys, 'executable', str(source)), patch.object(h.sys, 'argv', [str(source), '--uninstall']), patch.dict(h.os.environ, {'TEMP': str(temp), 'LOCALAPPDATA': str(root / 'local')}), patch.object(h.os, 'replace', side_effect=PermissionError), patch.object(h.subprocess, 'Popen') as popen:
+            with patch.object(h.sys, 'frozen', True, create=True), patch.object(h.sys, 'executable', str(source)), patch.object(h.sys, 'argv', [str(source), '--uninstall']), patch.dict(h.os.environ, {'TEMP': str(temp), 'LOCALAPPDATA': str(root / 'local')}), patch.object(h, '_replace_with_retry', side_effect=PermissionError), patch.object(h.subprocess, 'Popen') as popen:
                 self.assertTrue(h.relocate_transient())
                 self.assertEqual(target.read_bytes(), b'old')
                 self.assertEqual(popen.call_args.args[0], [str(target), '--uninstall'])

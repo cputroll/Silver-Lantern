@@ -451,7 +451,7 @@ def _is_local_disk_error(exc: BaseException) -> bool:
     if not isinstance(exc, OSError) or _is_network(exc):
         return False
     winerror = getattr(exc, "winerror", None)
-    return (winerror in (112, 39, 32, 5) or exc.errno == errno.ENOSPC
+    return (winerror in (112, 39, 32, 33, 5) or exc.errno == errno.ENOSPC
             or isinstance(exc, PermissionError))
 
 
@@ -468,7 +468,7 @@ def friendly(exc: BaseException, resumable_bytes: int = 0) -> UserError:
     if isinstance(exc, OSError) and (winerror in (112, 39) or exc.errno == errno.ENOSPC):
         return UserError("The disk ran out of space.", "Free up space and run this again." + resumes,
                          "disk full", resumable_bytes)
-    if isinstance(exc, PermissionError) or (isinstance(exc, OSError) and winerror in (32, 5)):
+    if isinstance(exc, PermissionError) or (isinstance(exc, OSError) and winerror in (32, 33, 5)):
         name = Path(getattr(exc, "filename", None) or "a file").name
         return UserError(f"Windows wouldn't let this tool use {name}. Usually antivirus is still scanning it.",
                          "Wait a minute and run this again. If it keeps happening, allow "
@@ -506,18 +506,24 @@ def show_error(err: UserError) -> None:
         say(f"Details were saved to: {LOG_PATH}", "dim")
 
 
-def _replace_with_retry(src: Path, dst: Path, budget: float = 15.0) -> None:
-    """Rename, retrying while antivirus still holds the fresh file."""
-    delay, deadline = 0.5, time.monotonic() + budget
+def _replace_with_retry(src: Path, dst: Path, budget: float = 60.0) -> None:
+    """Rename with bounded retries while Windows or antivirus holds a file."""
+    delays = (1, 2, 5, 10)
+    deadline = time.monotonic() + budget
+    attempt = 0
     while True:
         try:
             Path(src).replace(dst)
             return
-        except PermissionError:
-            if time.monotonic() + delay > deadline:
+        except OSError as exc:
+            if not isinstance(exc, PermissionError) and getattr(exc, 'winerror', None) not in (32, 33):
                 raise
-            time.sleep(delay)
-            delay = min(delay * 2, 2.0)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            say('Waiting for Windows to release a file...')
+            time.sleep(min(delays[min(attempt, len(delays) - 1)], remaining))
+            attempt += 1
 
 
 @contextlib.contextmanager
@@ -909,7 +915,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
     def save():
         temp = Path(str(side) + '.tmp')
         temp.write_text(json.dumps(state), encoding='utf-8')
-        os.replace(temp, side)
+        _replace_with_retry(temp, side)
 
     def worker(i, response=None, retries_used=0):
         start, end = bounds[i]
@@ -1262,12 +1268,12 @@ def replace_transactionally(target: Path, replacement: Path) -> None:
         if target.exists():
             backup.unlink()
         else:
-            os.replace(backup, target)
-    os.replace(target, backup)
+            _replace_with_retry(backup, target)
+    _replace_with_retry(target, backup)
     try:
-        os.replace(replacement, target)
+        _replace_with_retry(replacement, target)
     except BaseException:
-        os.replace(backup, target)
+        _replace_with_retry(backup, target)
         raise
     try:
         backup.unlink()
@@ -1314,15 +1320,7 @@ def cleanup_stage(stage: Path) -> None:
 
 def _apply_update(target: Path, replacement: Path, parent: int, args: list[str]) -> None:
     wait_for_parent(parent)
-    deadline = time.monotonic() + 30
-    while True:
-        try:
-            replace_transactionally(target, replacement)
-            break
-        except PermissionError:
-            if time.monotonic() >= deadline:
-                raise RuntimeError("timed out waiting for executable replacement")
-            time.sleep(0.25)
+    replace_transactionally(target, replacement)
     try:
         if len(args) == 2 and args[0] == '--update-only-internal':
             log(f'Updated to {args[1]}. Run the tool again to continue.')
@@ -1772,12 +1770,12 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                         checkpoint = Path(str(state['temp']) + '.json')
                         staging = Path(str(checkpoint) + '.tmp')
                         staging.write_text(json.dumps({'next_index': state['next'], 'bytes_written': state['temp'].stat().st_size}), encoding='utf-8')
-                        os.replace(staging, checkpoint)
+                        _replace_with_retry(staging, checkpoint)
                     if state['next'] == len(state['item']['segments']):
                         if state['temp'].stat().st_size != state['item']['size'] or state['hasher'].hexdigest() != state['item']['sha256']:
                             raise SegmentMismatch(f"assembled SHA-256 mismatch: {state['item']['path']}", segment['asset'], state['item']['path'])
                         if not state['direct']:
-                            state['temp'].replace(state['target'])
+                            _replace_with_retry(state['temp'], state['target'])
                             Path(str(state['temp']) + '.json').unlink(missing_ok=True)
                         state['complete'] = True
                     with cond:
@@ -1950,7 +1948,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             partial = Path(str(dest) + '.part')
             if partial.is_file() and partial.stat().st_size == part['size'] and not Path(str(partial) + '.json').exists():
                 if sha256(partial, progress=True) == part['sha256']:
-                    partial.replace(dest)
+                    _replace_with_retry(partial, dest)
                     verified_assets.add(part['asset'])
                     return
                 partial.unlink()
@@ -2013,7 +2011,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                                     raise ValueError(f"segment SHA-256 mismatch: {part['asset']}")
                     if temp.stat().st_size != item['size'] or file_hash.hexdigest() != item['sha256']:
                         raise ValueError(f"assembled SHA-256 mismatch: {item['path']}")
-                    temp.replace(target)
+                    _replace_with_retry(temp, target)
                 finally:
                     temp.unlink(missing_ok=True)
                 for name in names:
@@ -2169,7 +2167,7 @@ def relocate_transient() -> bool:
             staging = Path(stream.name)
             with source.open('rb') as original:
                 shutil.copyfileobj(original, stream, 1024 * 1024)
-        os.replace(staging, target)
+        _replace_with_retry(staging, target)
     except PermissionError:
         if not target.is_file():
             raise
@@ -2391,7 +2389,7 @@ def cache_game_manifest(folder: Path, manifest: dict) -> None:
     cache.parent.mkdir(parents=True, exist_ok=True)
     temporary = cache.with_suffix('.tmp')
     temporary.write_text(json.dumps(manifest), encoding='utf-8')
-    os.replace(temporary, cache)
+    _replace_with_retry(temporary, cache)
 
 
 def install_from_manifest(s, a, folder: Path) -> None:
