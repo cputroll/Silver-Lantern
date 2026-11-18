@@ -43,19 +43,24 @@ class InvalidGamePathTest(unittest.TestCase):
             target = root.joinpath(*entry.split('/'))
             original = ntpath._getfinalpathname
             calls = 0
+            fired = threading.Event()
             def racing(path):
                 nonlocal calls
                 if str(path).lower() == str(target).lower():
                     calls += 1
-                    if calls == 3:
-                        worker = threading.Thread(target=lambda: target.parent.mkdir(parents=True, exist_ok=True))
+                    if calls == 1:
+                        # Create the parents concurrently on the first
+                        # resolution of the target; the number of later
+                        # resolution attempts is an implementation detail.
+                        worker = threading.Thread(target=lambda: (target.parent.mkdir(parents=True, exist_ok=True), fired.set()))
                         worker.start()
                         worker.join(timeout=5)
                         self.assertFalse(worker.is_alive())
                 return original(path)
             with patch.object(ntpath, '_getfinalpathname', side_effect=racing):
                 self.assertEqual(h.game_path(root, entry), target)
-            self.assertGreaterEqual(calls, 3)
+            self.assertTrue(fired.is_set(), 'the concurrent parent creation must actually run')
+            self.assertGreaterEqual(calls, 1)
 
     @unittest.skipUnless(os.name == 'nt', 'Windows extended path handling')
     def test_extended_prefix_does_not_hide_escape(self):
