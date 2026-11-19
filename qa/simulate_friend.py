@@ -587,7 +587,7 @@ def main():
             lock = kernel.CreateFileW(str(original), 0x80000000, 1, None, 3, 0, None)
             if lock == ctypes.c_void_p(-1).value: raise ctypes.WinError(ctypes.get_last_error())
         child_output = artifacts / ('orphan-' + mode + '.output')
-        parent_code = "import os,sys,time,subprocess; sys.path.insert(0,sys.argv[1]); from parent_identity import parent_environment; f=open(sys.argv[3],'w'); p=subprocess.Popen(sys.argv[4:],env=parent_environment(),stdout=f,stderr=subprocess.STDOUT); open(sys.argv[2],'w').write(str(p.pid)); time.sleep(90)"
+        parent_code = "import os,sys,time,subprocess; from pathlib import Path; sys.path.insert(0,sys.argv[1]); from parent_identity import parent_environment; f=open(sys.argv[3],'w'); p=subprocess.Popen(sys.argv[4:],env=parent_environment(),stdout=f,stderr=subprocess.STDOUT); ready=Path(sys.argv[2]); temporary=ready.with_suffix('.pid.tmp'); temporary.write_text(str(p.pid),encoding='ascii'); os.replace(temporary,ready); time.sleep(90)"
         parent = subprocess.Popen([sys.executable, '-c', parent_code, str(Path(__file__).resolve().parents[1]), str(ready), str(child_output), *argv], env=run_env)
         child_pid = None
         identity = None
