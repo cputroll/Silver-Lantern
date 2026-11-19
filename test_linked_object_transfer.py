@@ -57,8 +57,8 @@ def _rejects_alternates_and_outside_root(test, tmp_path):
 class LinkedObjectTransferTests(unittest.TestCase):
     def test_transfers_linked_worktree_commit_without_following_dotgit(self):
         with tempfile.TemporaryDirectory() as directory:
-            _transfer_linked_worktree_commit_without_following_dotgit(Path(directory))
+            _transfer_linked_worktree_commit_without_following_dotgit(Path(directory).resolve(strict=True))
 
     def test_rejects_alternates_and_outside_root(self):
         with tempfile.TemporaryDirectory() as directory:
-            _rejects_alternates_and_outside_root(self, Path(directory))
+            _rejects_alternates_and_outside_root(self, Path(directory).resolve(strict=True))
