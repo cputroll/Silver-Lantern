@@ -55,6 +55,16 @@ class FriendlyTests(unittest.TestCase):
 
 
 class ProgressTests(unittest.TestCase):
+    def test_invalidated_eta_keeps_reporting_transfer_speed(self):
+        t = [0.0]
+        out = io.StringIO()
+        with mock.patch.dict(app.os.environ, {'SILVER_LANTERN_GUI_PROGRESS': '1'}), redirect_stdout(out):
+            p = app.Progress('Downloading', 1000, tty=False, clock=lambda: t[0])
+            p.invalidate_eta()
+            t[0] = 1
+            p.add(100)
+        self.assertIn('done=100 total=1000 speed=100 eta=0', out.getvalue())
+
     def test_rollback_does_not_report_old_transfer_rate(self):
         t = [0.0]
         out = io.StringIO()

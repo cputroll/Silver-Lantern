@@ -1,4 +1,5 @@
-# Silver Lantern 1.7.7
+# Silver Lantern 1.7.8
 
-- Highlight the keyboard and controller shortcuts in the game-menu hint. The surrounding text stays muted.
-- Make the hint's motion gentler and improve frame pacing. The hint stays still when Windows animations are disabled or the launcher uses software rendering.
+- Start fresh downloads sooner by checking missing folders once per phase instead of probing each missing file. Existing files and resume checkpoints still get checked.
+- Show estimated download time next to transfer speed when enough information is available. Verification and installation time are not included.
+- Keep static text sharp at fractional window sizes without changing the game-menu hint animation.

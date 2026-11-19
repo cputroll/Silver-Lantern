@@ -108,6 +108,72 @@ class TipTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_fractional_window_preserves_download_glyph_pixels(self):
+        script = r'''
+import ctypes as c
+import sdl2 as s
+import sdl2.sdlttf as t
+from launcher import Painter, render_density, CANVAS, ACCENT, ACCENT_INK
+
+assert s.SDL_Init(s.SDL_INIT_VIDEO) == 0 and t.TTF_Init() == 0
+window = s.SDL_CreateWindow(b'text test', 0, 0, 1500, 844, s.SDL_WINDOW_HIDDEN)
+renderer = s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
+assert window and renderer
+painter = Painter(s, t, renderer)
+painter.set_density(render_density(1500, 844))
+def capture(reference):
+    s.SDL_RenderSetLogicalSize(renderer, 0, 0)
+    s.SDL_SetRenderDrawColor(renderer, *ACCENT, 255)
+    s.SDL_RenderClear(renderer)
+    if reference:
+        texture, w, h = painter.cache[('cta', 'DOWNLOAD', ACCENT_INK, False)]
+        s.SDL_RenderCopy(renderer, texture, None, s.SDL_Rect(0, 0, w, h))
+    else:
+        s.SDL_RenderSetLogicalSize(renderer, *CANVAS)
+        painter.text('cta', 'DOWNLOAD', 0, 0, ACCENT_INK)
+        width, height = c.c_int(), c.c_int()
+        s.SDL_RenderGetLogicalSize(renderer, c.byref(width), c.byref(height))
+        assert (width.value, height.value) == CANVAS, 'Text draw lost logical viewport'
+        s.SDL_RenderSetLogicalSize(renderer, 0, 0)
+    pixels = (c.c_ubyte * (190 * 42 * 4))()
+    assert s.SDL_RenderReadPixels(renderer, s.SDL_Rect(0, 0, 190, 42), s.SDL_PIXELFORMAT_ARGB8888, pixels, 190 * 4) == 0
+    return bytes(pixels)
+try:
+    assert capture(False) == capture(True), 'Static label was resampled'
+    s.SDL_SetWindowSize(window, 1603, 810)
+    painter.set_density(render_density(1603, 810))
+    s.SDL_RenderSetLogicalSize(renderer, *CANVAS)
+    s.SDL_SetRenderDrawColor(renderer, *ACCENT, 255)
+    s.SDL_RenderClear(renderer)
+    clip = s.SDL_Rect(48, 0, 55, 42)
+    s.SDL_RenderSetClipRect(renderer, clip)
+    painter.text('cta', 'DOWNLOAD', 50, 0, ACCENT_INK)
+    restored = s.SDL_Rect()
+    s.SDL_RenderGetClipRect(renderer, c.byref(restored))
+    assert tuple(getattr(restored, k) for k in ('x','y','w','h')) == (48, 0, 55, 42)
+    s.SDL_RenderSetClipRect(renderer, None)
+    s.SDL_RenderSetLogicalSize(renderer, 0, 0)
+    pixels = (c.c_ubyte * (180 * 42 * 4))()
+    assert s.SDL_RenderReadPixels(renderer, s.SDL_Rect(137, 0, 180, 42), s.SDL_PIXELFORMAT_ARGB8888, pixels, 720) == 0
+    tex, w, h = painter.cache[('cta', 'DOWNLOAD', ACCENT_INK, False)]
+    assert w > 60
+    s.SDL_RenderClear(renderer)
+    s.SDL_RenderSetClipRect(renderer, s.SDL_Rect(135, 0, 61, 47))
+    s.SDL_RenderCopy(renderer, tex, None, s.SDL_Rect(137, 0, w, h))
+    reference = type(pixels)()
+    assert s.SDL_RenderReadPixels(renderer, s.SDL_Rect(137, 0, 180, 42), s.SDL_PIXELFORMAT_ARGB8888, reference, 720) == 0
+    assert bytes(pixels) == bytes(reference), 'Letterboxed clip or label position changed'
+finally:
+    painter.close()
+    s.SDL_DestroyRenderer(renderer)
+    s.SDL_DestroyWindow(window)
+    t.TTF_Quit()
+    s.SDL_Quit()
+'''
+        result = subprocess.run([sys.executable, '-c', script], cwd=Path(launcher.__file__).parent,
+                                env=dict(os.environ, SDL_VIDEODRIVER='dummy'), capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_standalone_version_matches_release_version(self):
         import json
         version = json.loads((Path(launcher.__file__).parent / 'sources.json').read_text(encoding='utf-8'))['tool']['version']
@@ -393,13 +459,13 @@ class StateTests(unittest.TestCase):
                         if line.startswith('Preparing download: 135566'):
                             self.assertIn('Checking 135,566 of 186,614 files', labels)
                         self.assertEqual([label for label in labels if '/s' in label],
-                                         [launcher.fmt_bytes(10485760) + '/s'] if phase == 'DOWNLOADING GAME FILES' else [])
+                                         ['10.0 MB/s · About 1 s left to download'] if phase == 'DOWNLOADING GAME FILES' else [])
 
     def test_game_download_speed_expires_without_fresh_transfer(self):
         with patch.object(LauncherUI, 'check_updates'), patch.object(LauncherUI, 'save'), patch.object(launcher, 'probe_writable'), patch.object(launcher.threading, 'Thread'):
             ui = LauncherUI()
             ui.start_operation(False)
-            rate = launcher.parse_progress('HLPROGRESS phase=Downloading done=80 total=100 speed=10485760')
+            rate = launcher.parse_progress('HLPROGRESS phase=Downloading done=104857600 total=891289600 speed=10485760')
             ui.events.publish('progress', dict(rate, rate_received_at=100))
             with patch.object(launcher.time, 'monotonic', return_value=104):
                 ui.drain()
@@ -409,13 +475,22 @@ class StateTests(unittest.TestCase):
                     ui.draw_progress(painter, .016)
                 return [call.args[1] for call in painter.text.call_args_list]
 
-            label = launcher.fmt_bytes(10485760) + '/s'
+            label = '10.0 MB/s · About 1 min 15 s left to download'
             self.assertNotIn(label, labels_at(104))
             ui.events.publish('progress', dict(rate, rate_received_at=105))
             ui.drain()
             self.assertIn(label, labels_at(107))
+            retry_rate = launcher.parse_progress('HLPROGRESS phase=Downloading done=104857600 total=891289600 speed=10485760 eta=0')
+            ui.events.publish('progress', dict(retry_rate, rate_received_at=107))
+            ui.drain()
+            self.assertIn('10.0 MB/s', labels_at(107))
+            self.assertNotIn(label, labels_at(107))
             ui.events.publish('progress', dict(rate, speed=0, rate_received_at=107))
             ui.drain()
+            self.assertNotIn(label, labels_at(107))
+            ui.events.publish('progress', dict(rate, done=rate['total'], rate_received_at=107))
+            ui.drain()
+            self.assertIn('10.0 MB/s', labels_at(107))
             self.assertNotIn(label, labels_at(107))
 
     def test_tool_progress_ignores_game_install_events(self):

@@ -63,7 +63,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.7.7"
+APP_VERSION = "1.7.8"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -225,6 +225,11 @@ class Progress:
         self.next_pct = 10
         self.lock = threading.Lock()
         self.finished = False
+        self.eta_reliable = True
+
+    def invalidate_eta(self):
+        with self.lock:
+            self.eta_reliable = False
 
     def add(self, amount: int, *, received: int | None = None) -> None:
         """Add progress credit and, when different, specify bytes received for speed."""
@@ -253,7 +258,8 @@ class Progress:
             if now - self.last_draw >= 0.5 or (self.total and self.done >= self.total):
                 self.last_draw = now
                 live_speed = int(self.speed) if received else 0
-                _write(f"HLPROGRESS phase={self.label.replace(' ', '_')} done={self.done} total={self.total} speed={live_speed}\n")
+                eta = '' if self.eta_reliable else ' eta=0'
+                _write(f"HLPROGRESS phase={self.label.replace(' ', '_')} done={self.done} total={self.total} speed={live_speed}{eta}\n")
         elif self.total:
             pct = self.done * 100 // self.total
             if pct >= self.next_pct:
@@ -2147,6 +2153,28 @@ def _parent_needs_segment_checks(root, parts, entry):
     return True
 
 
+# A missing prefix is only evidence for ordinary DOS path components. Leave
+# device names, trailing dots/spaces, and other special spellings to resolve().
+_SPECIAL_WINDOWS_GAME_PATH = re.compile(
+    r'[<>"|?*\x00-\x1f]|[. ](?=/|$)|(?:^|/)(?:CON|PRN|AUX|NUL|'
+    r'CONIN\$|CONOUT\$|(?:COM|LPT)[1-9¹²³]) *(?=[./]|$)', re.IGNORECASE)
+
+
+def _ordinary_plan_path(relative):
+    return os.name != 'nt' or not _SPECIAL_WINDOWS_GAME_PATH.search(relative)
+
+
+def _missing_plan_parent(root, parts, relative):
+    try:
+        if not _parent_needs_segment_checks(root, parts, relative):
+            parent = root.joinpath(*parts).resolve()
+            if _comparable_resolved_path(parent).is_relative_to(_comparable_resolved_path(root.resolve())):
+                return parent
+    except (InvalidGamePath, OSError):
+        pass  # Leave existing/ambiguous paths and their diagnostics to the original check.
+    return None
+
+
 def restore_segment_checkpoint(temp, checkpoint, item):
     """Trust a retained prefix only after checking every segment hash."""
     hasher = hashlib.sha256()
@@ -2199,7 +2227,7 @@ def _log_assembly_exception(exc):
 
 
 def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=False,
-                       on_commit=None, on_assembly=None):
+                       on_commit=None, on_assembly=None, on_fetch_schedule=None):
     """Download bundles in order while workers consume segments in file order."""
     cond = threading.Condition()
     bundles = deque()
@@ -2238,6 +2266,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
             if index >= state['next']:
                 by_asset[segment['asset']].append((state, index, segment))
     names = [name for name in assets if by_asset[name]]
+    if on_fetch_schedule is not None:
+        on_fetch_schedule(names)
     log(f"Preparation complete: {len(pending)} files, {len(names)} bundles ready", echo=True)
     shared = {'done': False, 'error': None, 'cap': 2, 'slots': 0, 'stalled': 0}
 
@@ -2526,6 +2556,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     pending = []
     kept = 0
     inventory = destination_inventory(root)
+    missing_plan_parents = {}
     running = {os.path.normcase(str(p.resolve())) for p in running_launcher_paths()}
     running.add(os.path.normcase(str(Path(sys.executable).resolve())))
     last_report = time.monotonic()
@@ -2535,11 +2566,21 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             log(f"Checking installation plan: {count - 1}/{len(man['files'])} files checked", echo=True)
             last_report = now
         relative = item['path']
-        target, resolved_target = _checked_game_paths(root, relative)
+        parts = _game_path_parts(root, relative)
+        missing_parent = None
+        if len(parts) > 1 and relative not in inventory and _ordinary_plan_path(relative):
+            parent_key = relative.rpartition('/')[0]
+            if parent_key not in missing_plan_parents:
+                missing_plan_parents[parent_key] = _missing_plan_parent(root, parts[:-1], relative)
+            missing_parent = missing_plan_parents[parent_key]
+        if missing_parent is None:
+            target, resolved_target = _checked_game_paths(root, relative)
+        else:
+            resolved_target = missing_parent / parts[-1]
         if os.path.normcase(str(resolved_target)) in running:
             log('launcher executable left in place; the launcher updates itself separately')
             continue
-        if inventory.get(relative) == item['size']:
+        if missing_parent is None and inventory.get(relative) == item['size']:
             if item['size'] >= 256 * 1024 * 1024:
                 log(f"Checking SHA-256: {item['path']} ({human(item['size'])})")
             if sha256(target, progress=item['size'] >= 256 * 1024 * 1024) == item['sha256']:
@@ -2554,6 +2595,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     gui_progress = os.environ.get('SILVER_LANTERN_GUI_PROGRESS') == '1'
     work = InstallWorkProgress({name: assets[name]['size'] for name in needed}, pending) if gui_progress and not dry_run else None
     download_bytes = 0
+    has_partial_download = False
     uncached_asset_sizes = []
     checking_assets = set()
     def verify_bundle(path, name):
@@ -2586,6 +2628,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             have = partial.stat().st_size if partial.is_file() and not Path(str(partial) + '.json').exists() else 0
             have = have if have < part['size'] else 0
         download_bytes += part['size'] - have
+        has_partial_download |= have > 0
     log(f"Plan: {len(man['files']) - len(pending)} files present, {len(pending)} to download ({download_bytes / 1024**3:.2f} GB), {kept / 1024**3:.2f} GB kept")
     log('Installation plan complete', echo=True)
     step("Game files")
@@ -2632,8 +2675,14 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             log('Windows security preparation complete', echo=True)
         cache.mkdir(parents=True, exist_ok=True)
         progress = GameProgress(download_bytes)
+        if has_partial_download:
+            progress.invalidate_eta()
         verified_assets = set()
-        retry_hook = {'on_retry': work.retrying} if work is not None else {}
+        def retrying():
+            progress.invalidate_eta()
+            work.retrying()
+
+        retry_hook = {'on_retry': retrying} if work is not None else {}
         def fetch(part):
             check_parent_alive()
             dest = cache / part['asset']
@@ -2670,11 +2719,16 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
         if v2:
             work_hooks = {'on_commit': work.committed, 'on_assembly': work.assembling} if work is not None else {}
             if man.get('layout') == 'whole':
+                def check_fetch_schedule(names):
+                    if set(names) != needed:
+                        progress.invalidate_eta()
+
                 try:
-                    assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=True, **work_hooks)
+                    assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=True,
+                                       on_fetch_schedule=check_fetch_schedule, **work_hooks)
                 except SegmentMismatch as error:
                     if work is not None:
-                        work.retrying()
+                        retrying()
                     log(traceback.format_exc())
                     verified_assets.discard(error.asset)
                     remaining = [item for item in pending if not (game_path(root, item['path']).is_file() and sha256(game_path(root, item['path'])) == item['sha256'])]

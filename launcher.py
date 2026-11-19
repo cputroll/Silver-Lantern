@@ -73,7 +73,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.7')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.8')
 
 
 def play_tip_parts(folder):
@@ -1048,7 +1048,8 @@ def parse_progress(line):
                     'done': 0, 'total': 0, 'speed': 0, 'pct': None}
         pct = done * 100 // total if total > 0 else None
         text = f'{phase}: {pct}%' if pct is not None else phase
-        return {'text': text, 'phase': phase, 'done': done, 'total': total, 'speed': speed, 'pct': pct}
+        return {'text': text, 'phase': phase, 'done': done, 'total': total, 'speed': speed, 'pct': pct,
+                'eta_reliable': fields.get('eta') != '0'}
     if line.startswith('HLUPDATE '):
         return dict(re.findall(r'(\w+)=([^ ]+)', line[9:]))
     if 'Downloading:' in line:
@@ -1080,7 +1081,12 @@ def game_progress_phase(value):
 
 def game_progress_detail(value):
     if value.get('phase') == 'Downloading' and value.get('speed', 0) > 0:
-        return fmt_bytes(value['speed']) + '/s'
+        speed = value['speed']
+        detail = fmt_bytes(speed) + '/s'
+        remaining = value.get('total', 0) - value.get('done', 0)
+        if remaining > 0 and value.get('eta_reliable', True):
+            detail += f' · About {fmt_eta((remaining + speed - 1) // speed)} left to download'
+        return detail
     text = value.get('text', '').strip()
     start = re.fullmatch(r'Preparing download: organizing ([0-9]{1,9}) destination files', text)
     if start:
@@ -1580,8 +1586,19 @@ class Painter:
         s.SDL_SetTextureAlphaMod(texture, alpha)
         if subpixel:
             s.SDL_RenderCopyF(self.r, texture, None, s.SDL_FRect(x, y, w, h))
-        else:
-            s.SDL_RenderCopy(self.r, texture, None, s.SDL_Rect(int(x), int(y), int(round(w)), int(round(h))))
+            return w
+        if self.density > 1:
+            sx, sy = ctypes.c_float(), ctypes.c_float()
+            s.SDL_RenderGetScale(self.r, ctypes.byref(sx), ctypes.byref(sy))
+            if min(sx.value, sy.value) > 1 and s.SDL_RenderSetScale(self.r, 1, 1) == 0:
+                # Keep SDL's physical viewport and clip, but don't resample text.
+                try:
+                    rect = s.SDL_Rect(round(x * sx.value), round(y * sy.value), pixel_w, pixel_h)
+                    s.SDL_RenderCopy(self.r, texture, None, rect)
+                finally:
+                    s.SDL_RenderSetScale(self.r, sx.value, sy.value)
+                return w
+        s.SDL_RenderCopy(self.r, texture, None, s.SDL_Rect(int(x), int(y), int(round(w)), int(round(h))))
         return w
 
     # -- shapes
@@ -2603,7 +2620,8 @@ class LauncherUI:
             scene('main', 'main', State.READY, 'Silver Lantern is up to date.'),
             scene('hero-download', 'main', State.NOT_INSTALLED, 'Game data: 2026.11.16', folder=long),
             scene('progress', 'progress', State.DOWNLOADING, operation='download', _game_progress_pct=63,
-                  progress='Downloading game files', progress_info={'game_detail': fmt_bytes(23218411) + '/s'}),
+                  progress='Downloading game files', progress_info={'game_detail': game_progress_detail(
+                      {'phase': 'Downloading', 'speed': 23218411, 'done': 19300000000, 'total': 30871262365})}),
             scene('tool-update', 'progress', State.READY, operation='tool', progress_info={}, progress='Updating Silver Lantern…'),
             scene('settings', 'settings', State.READY, 'Silver Lantern is up to date.', focus=2, folder=long),
             scene('settings-back', 'settings', State.READY, 'Silver Lantern is up to date.', focus=7, folder=long),
