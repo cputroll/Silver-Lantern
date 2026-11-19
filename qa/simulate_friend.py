@@ -247,14 +247,17 @@ def main():
         if before != '0.0.1' or expected == before:
             raise RuntimeError(f'expected distinct old/new versions, got {before!r} and {expected!r}')
         command(target, '--self-update-from', args.zip.resolve(), '--no-pause')
-        # Ten loaded trials: worst 10.961 s including version probe; 3x rounded up.
+        # Do not execute the target until the helper finishes replacing it.
         deadline = time.monotonic() + 33
+        update_log = folder / 'HeyListen-Get.log'
         while time.monotonic() < deadline:
-            try:
+            stages = list(folder.glob('.heylisten-update-*'))
+            if (stages and all(not (stage / 'replacement.exe').exists() for stage in stages)
+                    and update_log.is_file()
+                    and 'Self-update phase=relaunch' in update_log.read_text(encoding='utf-8', errors='replace')):
                 if command(target, '--version').strip() == expected:
                     return f'version {before} -> {expected}'
-            except (OSError, RuntimeError):
-                pass
+                raise RuntimeError('old-client update completed but the installed version did not change')
             time.sleep(.5)
         raise TimeoutError('updated executable did not report new version')
 
