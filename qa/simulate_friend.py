@@ -6,6 +6,7 @@ import http.server
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -16,20 +17,46 @@ import zipfile
 from pathlib import Path
 
 
-def fixture_manifest(root: Path) -> Path:
+def fixture_manifest(root: Path, *, multi_bundle=False) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     source = root / 'source'
     source.mkdir()
     (source / 'bin').mkdir()
     (source / 'bin' / 'HeyListen.exe').write_bytes(b'silver-lantern-fixture\n')
     (source / 'hookshot_version.txt').write_text('fixture\n', encoding='utf-8')
+    if multi_bundle:
+        for index in range(2):
+            (source / f'payload-{index}.dat').write_bytes(bytes([index + 1]) * 48 * 1024)
     spec = importlib.util.spec_from_file_location('pack_game', Path(__file__).resolve().parents[1] / 'pack-game.py')
     packer = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(packer)
-    manifest = packer.pack(source, root / 'assets')
+    options = {'limit': 64 * 1024} if multi_bundle else {}
+    manifest = packer.pack(source, root / 'assets', **options)
     path = root / 'assets' / 'game-manifest.json'
     path.write_text(json.dumps(manifest), encoding='utf-8')
     return path
+
+
+def assert_gui_install_progress(log, *, complete):
+    prefix = 'Test GUI progress: '
+    samples = []
+    for line in log.splitlines():
+        if not line.startswith(prefix):
+            continue
+        match = re.fullmatch(r'state=(State\.\w+) pct=(\d+|None)', line[len(prefix):])
+        if not match or match[2] == 'None':
+            raise AssertionError(f'GUI install progress disappeared or was malformed: {line}')
+        samples.append((match[1], int(match[2])))
+    if not samples or samples[0] != ('State.DOWNLOADING', 0):
+        raise AssertionError(f'GUI install progress did not start at 0: {samples}')
+    if complete and samples[-1] != ('State.READY', 100):
+        raise AssertionError(f'GUI install progress did not finish at 100/READY: {samples}')
+    active = samples[:-1] if complete else samples
+    if any(state != 'State.DOWNLOADING' or pct > 99 for state, pct in active):
+        raise AssertionError(f'GUI claimed completion before successful install: {samples}')
+    if any(previous[1] > current[1] for previous, current in zip(samples, samples[1:])):
+        raise AssertionError(f'GUI install progress went backwards: {samples}')
+    return samples
 
 
 def process_creation_time(pid):
@@ -127,7 +154,12 @@ def main():
     for name in ('TEMP', 'SILVER_LANTERN_DESKTOP_DIR', 'SILVER_LANTERN_STARTMENU_DIR'):
         Path(env[name]).mkdir(parents=True, exist_ok=True)
     manifest = fixture_manifest(artifacts / 'fixture')
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(manifest.parent))
+    class FixtureHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.startswith('/gui/assets/') and self.path.endswith('.tar'):
+                time.sleep(.75)  # Cross the install worker's progress-report interval before assembly pauses.
+            super().do_GET()
+    handler = functools.partial(FixtureHandler, directory=str(manifest.parent))
     server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env['SILVER_LANTERN_TEST_ASSET_URL'] = f'http://127.0.0.1:{server.server_port}/'
@@ -331,29 +363,73 @@ def main():
         state = local / 'SilverLantern'
         state.mkdir(parents=True)
         (state / 'launcher.json').write_text(json.dumps({'game_dir': str(folder)}), encoding='utf-8')
-        gui_env = dict(env, USERPROFILE=str(gui_profile), LOCALAPPDATA=str(local), APPDATA=str(gui_profile / 'roaming'), SDL_VIDEODRIVER='dummy', SDL_RENDER_DRIVER='software', SILVER_LANTERN_TEST_GUI_INSTALL='1')
+        gui_manifest = fixture_manifest(manifest.parent / 'gui', multi_bundle=True)
+        data = json.loads(gui_manifest.read_text(encoding='utf-8'))
+        if sum(item['asset'].endswith('.tar') for item in data['assets']) < 2:
+            raise AssertionError('GUI fixture must contain multiple bundles')
+        pause_ready, pause_release = artifacts / 'gui-assembly-ready', artifacts / 'gui-assembly-release'
+        gui_env = dict(env, USERPROFILE=str(gui_profile), LOCALAPPDATA=str(local), APPDATA=str(gui_profile / 'roaming'), SDL_VIDEODRIVER='dummy', SDL_RENDER_DRIVER='software', SILVER_LANTERN_TEST_GUI_INSTALL='1',
+                       SILVER_LANTERN_GAME_MANIFEST=str(gui_manifest), SILVER_LANTERN_TEST_ASSET_URL=f'http://127.0.0.1:{server.server_port}/gui/assets/',
+                       SILVER_LANTERN_PAUSE_AT='assembly', SILVER_LANTERN_PAUSE_READY=str(pause_ready), SILVER_LANTERN_PAUSE_RELEASE=str(pause_release), SILVER_LANTERN_ASSEMBLY_WORKERS='1')
         child = subprocess.Popen([str(root / 'Run Silver Lantern.exe'), '--gui', '--no-self-update'], env=gui_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            exit_code = child.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            subprocess.run(['taskkill', '/T', '/F', '/PID', str(child.pid)], capture_output=True, timeout=10)
-            child.wait(timeout=10)
-            raise RuntimeError('zip-root GUI did not exit within 30 seconds')
-        if exit_code:
-            raise RuntimeError(f'zip-root GUI exit={exit_code}')
-        relocated = folder / 'Ocarina of Time.exe'
-        deadline = time.monotonic() + 30
         installed = folder / 'bin' / 'HeyListen.exe'
         gui_log = state / 'launcher.log'
-        while time.monotonic() < deadline:
-            if installed.exists() and gui_log.exists() and 'Test GUI: installation finished, state=State.READY' in gui_log.read_text(encoding='utf-8', errors='replace'):
-                break
-            time.sleep(.25)
-        if not relocated.exists() or not installed.exists() or installed.read_bytes() != b'silver-lantern-fixture\n' or not gui_log.exists() or 'Test GUI: installation finished, state=State.READY' not in gui_log.read_text(encoding='utf-8', errors='replace'):
-            script = "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:SILVER_FRIEND_ROOT, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-            subprocess.run(['powershell', '-NoProfile', '-Command', script], env=dict(env, SILVER_FRIEND_ROOT=str(gui_profile)), capture_output=True, timeout=20)
-            raise RuntimeError('GUI did not relocate and install fixture')
-        return f'Relocated to {relocated}; fixture installed at {installed}'
+        finished = 'Test GUI: installation finished, state=State.READY'
+        ready_seen = False
+
+        def log_text():
+            return gui_log.read_text(encoding='utf-8', errors='replace') if gui_log.exists() else ''
+
+        try:
+            deadline = time.monotonic() + 25
+            while time.monotonic() < deadline:
+                log = log_text()
+                if pause_ready.exists() and re.search(r'^Test GUI progress: state=State\.DOWNLOADING pct=[1-9]\d?$', log, re.M):
+                    break
+                if child.poll() not in (None, 0) or 'Test GUI: installation finished' in log:
+                    raise RuntimeError('GUI exited or completed before the paused assembly check')
+                time.sleep(.1)
+            else:
+                raise RuntimeError('GUI did not show measurable progress while assembly was paused')
+            assert_gui_install_progress(log, complete=False)
+            work = re.findall(r'^HLINSTALL done=(\d+) total=(\d+)$', log, re.M)
+            if not any(0 < int(done) < int(total) for done, total in work):
+                raise AssertionError('no partial verified install work was reported before assembly was released')
+            if all((folder / item['path']).is_file() for item in data['files']):
+                raise AssertionError('fixture already installed at the assembly checkpoint')
+            pause_release.touch()
+            exit_code = child.wait(timeout=30)
+            if exit_code:
+                raise RuntimeError(f'zip-root GUI exit={exit_code}')
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                log = log_text()
+                if finished in log:
+                    ready_seen = True
+                    break
+                time.sleep(.1)
+            else:
+                raise RuntimeError('GUI did not reach READY')
+            samples = assert_gui_install_progress(log, complete=True)
+            if len(set(re.findall(r'^HLVERIFY done=(\d+) total=\d+$', log, re.M))) < 2:
+                raise AssertionError('GUI installer did not report verification for multiple bundles')
+            relocated = folder / 'Ocarina of Time.exe'
+            if not relocated.exists() or not installed.is_file():
+                raise RuntimeError('GUI did not relocate and install fixture')
+            for item in data['files']:
+                path = folder / item['path']
+                if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item['sha256']:
+                    raise AssertionError(f'GUI fixture file missing or incorrect: {path}')
+            return f'Relocated to {relocated}; {len(data["assets"])} assets installed; GUI progress: {samples}'
+        finally:
+            pause_release.touch(exist_ok=True)
+            if child.poll() is None:
+                subprocess.run(['taskkill', '/T', '/F', '/PID', str(child.pid)], capture_output=True, timeout=10)
+                child.wait(timeout=10)
+            # Relocation can detach the GUI from the process started above.
+            if not ready_seen:
+                script = "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:SILVER_FRIEND_ROOT, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+                subprocess.run(['powershell', '-NoProfile', '-Command', script], env=dict(env, SILVER_FRIEND_ROOT=str(gui_profile)), capture_output=True, timeout=20)
 
     def file_lock():
         target = artifacts / 'locked-game'

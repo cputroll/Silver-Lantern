@@ -73,7 +73,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.2')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.3')
 
 
 def play_tip(folder):
@@ -259,8 +259,28 @@ def cli_command(*args):
     return [sys.executable, str(BASE / 'Get-HeyListen.py'), *map(str, args)]
 
 
+def game_play_target(folder):
+    names = ('HeyListen.exe', 'bin/HeyListen.exe')
+    try:
+        with (folder / '.heylisten-get' / 'game-manifest.json').open(encoding='utf-8-sig') as source:
+            manifest = json.load(source)
+    except FileNotFoundError:
+        return next((folder / name for name in names if (folder / name).is_file()), None)
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if not isinstance(manifest, dict) or not isinstance(manifest.get('files'), list):
+        return None
+    entries = {item['path'].casefold(): item['path'] for item in manifest['files']
+               if isinstance(item, dict) and isinstance(item.get('path'), str)
+               and item['path'].casefold() in {name.casefold() for name in names}}
+    targets = [folder / entries[name.casefold()] for name in names if name.casefold() in entries]
+    # A missing manifest-owned executable is an incomplete install, not a
+    # reason to launch a different executable left behind by an older build.
+    return targets[0] if targets and all(path.is_file() for path in targets) else None
+
+
 def installed(folder):
-    return (folder / 'hookshot_version.txt').exists() and (folder / 'bin' / 'HeyListen.exe').exists()
+    return (folder / 'hookshot_version.txt').is_file() and game_play_target(folder) is not None
 
 
 def probe_writable(folder):
@@ -975,7 +995,21 @@ def fmt_eta(seconds):
     return f'{s} s'
 
 
+PROGRESS_RECORDS = ('HLINSTALL ', 'HLINSTALL_STAGE ', 'HLPROGRESS ', 'HLUPDATE ', 'HLVERIFY ')
+GAME_OPERATIONS = ('download', 'update')
+INSTALL_STAGE_LABELS = {'assembly': 'Installing game files', 'retry': 'Retrying installation'}
+
+
 def parse_progress(line):
+    if line.startswith('HLINSTALL_STAGE '):
+        match = re.fullmatch(r'HLINSTALL_STAGE name=(assembly|retry)', line.strip())
+        return {'install_stage': match[1]} if match else None
+    if line.startswith('HLINSTALL '):
+        match = re.fullmatch(r'HLINSTALL done=([0-9]{1,20}) total=([0-9]{1,20})', line.strip())
+        if match:
+            done, total = map(int, match.groups())
+            return {'install_pct': min(99, done * 100 // total) if total else 0}
+        return None
     if line.startswith('HLVERIFY '):
         fields = dict(re.findall(r'(\w+)=([^ ]+)', line[9:]))
         try:
@@ -1001,6 +1035,26 @@ def parse_progress(line):
         return dict(re.findall(r'(\w+)=([^ ]+)', line[9:]))
     if 'Downloading:' in line:
         return {'text': line.strip()}
+    return None
+
+
+def game_progress_phase(value):
+    if not isinstance(value, dict):
+        return None
+    if 'install_stage' in value:
+        return INSTALL_STAGE_LABELS.get(value['install_stage'])
+    text = value.get('text', '').casefold()
+    phase = value.get('phase')
+    if text.startswith('connection stalled'):
+        return 'Retrying connection'
+    if phase == 'Verifying the download...':
+        return 'Verifying game files'
+    if phase == 'Downloading' or text.startswith('starting bundle download'):
+        return 'Downloading game files'
+    if text.startswith(('checking installation plan', 'planning')):
+        return 'Checking existing files'
+    if text.startswith(('bundle download and installation complete', 'the game is installed')):
+        return 'Finishing installation'
     return None
 
 
@@ -1094,7 +1148,7 @@ def child_output(process, phase, idle_timeout=CHILD_IDLE_TIMEOUT):
             raise error
         if line is None:
             return
-        if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ', 'HLVERIFY ')):
+        if line.strip() and not line.startswith(PROGRESS_RECORDS):
             phase = line.strip()[:160]
         yield line
 
@@ -1116,7 +1170,7 @@ def worker_command(events, args):
             for line in child_output(process, 'Game installation or update'):
                 log.write(line)
                 log.flush()
-                if line.strip() and not line.startswith(('HLPROGRESS ', 'HLUPDATE ', 'HLVERIFY ')):
+                if line.strip() and not line.startswith(PROGRESS_RECORDS):
                     last_line = gui_child_text(line)
                     screen_lines.append(last_line)
                 progress = parse_progress(line) or {'text': line.strip()}
@@ -1615,6 +1669,8 @@ class LauncherUI:
         self.status = 'Checking for updates…'
         self.progress = ''
         self.progress_info = {}
+        self._game_progress_pct = 0
+        self.game_completion_until = None
         self.events = ProgressEvents()
         self.mapper = InputMapper()
         self.controllers = {}
@@ -1705,7 +1761,7 @@ class LauncherUI:
                 return [opt.text(v) for v in game_settings.allowed(opt.key, self.gfx_dlss_ok)]
             return list(self.GFX_ACTIONS) + [o.label for o in game_settings.OPTIONS]
         if self.screen == 'progress':
-            return [] if self.operation == 'tool' else ['Cancel']
+            return [] if self.operation == 'tool' or self.game_completion_until is not None else ['Cancel']
         if self.screen == 'error':
             return ['Retry', 'View log', 'Back']
         if self.screen == 'update':
@@ -1831,6 +1887,10 @@ class LauncherUI:
         threading.Thread(target=tool_update_worker, args=(self.events, args), daemon=True).start()
 
     def start_operation(self, update=False):
+        self.operation = 'update' if update else 'download'
+        self._game_progress_pct = 0
+        self.game_completion_until = None
+        self.__dict__.setdefault('anim', {}).pop('game_bar', None)
         try:
             probe_writable(self.folder)
             # The installer checks free space after verifying existing files and cache.
@@ -1840,12 +1900,14 @@ class LauncherUI:
             self.last_error = str(exc)
             self.set_screen('error')
             return
-        self.operation = 'update' if update else 'download'
-        self.progress = 'Checking for updates…' if update else 'Fetching manifest…'
+        self.progress = 'Preparing update' if update else 'Preparing installation'
         self.progress_info = {}
         self.state = State.UPDATING if update else State.DOWNLOADING
         self.events = ProgressEvents()
-        args = ['--no-self-update', '--update-game' if update else '--install-game', str(self.folder)]
+        # Channel updates reconcile the destination manifest, not the legacy builder.
+        args = ['--no-self-update', '--install-game', str(self.folder)]
+        if update:
+            args.append('--no-preset')
         if _TEST_GAME_MANIFEST and not update:
             args += ['--game-manifest', _TEST_GAME_MANIFEST]
         self.set_screen('progress')
@@ -1862,7 +1924,10 @@ class LauncherUI:
             try:
                 if hasattr(self, 'close_controllers'):
                     self.close_controllers()
-                process = subprocess.Popen([str(self.folder / 'HeyListen.exe')], cwd=str(self.folder))
+                target = game_play_target(self.folder)
+                if target is None:
+                    raise OSError('The game could not be found. Install it again from the launcher.')
+                process = subprocess.Popen([str(target)], cwd=str(self.folder))
                 try:
                     threading.Thread(target=watch_controller_combo, args=(process, self.folder), daemon=True).start()
                 except Exception as exc:
@@ -1978,17 +2043,21 @@ class LauncherUI:
                 break
 
     def action(self, action):
-        if self.screen == 'progress' and self.operation == 'tool':
+        if self.screen == 'progress' and (self.operation == 'tool' or self.game_completion_until is not None):
             return
         if self.screen == 'graphics' and self.gfx_action(action):
             return
         if action == 'up': self.focus = max(0, self.focus - 1)
         elif action == 'down': self.focus = min(len(self.buttons()) - 1, self.focus + 1)
         elif action == 'accept': self.activate()
-        elif action == 'menu': self.set_screen('main' if self.screen == 'settings' else 'settings')
+        elif action == 'menu' and self.screen != 'progress': self.set_screen('main' if self.screen == 'settings' else 'settings')
         elif action in ('back', 'cancel'):
             if self.screen == 'progress' and self.operation != 'tool': terminate_worker(self.events)
             elif self.screen != 'main': self.set_screen('main')
+
+    @property
+    def game_progress_pct(self):
+        return self._game_progress_pct if self.screen == 'progress' and self.operation in GAME_OPERATIONS else None
 
     def drain(self):
         while True:
@@ -1996,6 +2065,15 @@ class LauncherUI:
             except queue.Empty: break
             if kind == 'status': self.status = str(value)
             elif kind == 'progress':
+                install_record = isinstance(value, dict) and 'install_pct' in value
+                if self.operation in GAME_OPERATIONS:
+                    if self.game_completion_until is None:
+                        if install_record:
+                            self._game_progress_pct = max(self._game_progress_pct, value['install_pct'])
+                        self.progress = game_progress_phase(value) or self.progress
+                    continue
+                if install_record or (isinstance(value, dict) and 'install_stage' in value):
+                    continue
                 self.progress = value.get('text', str(value)) if isinstance(value, dict) else str(value)
                 if isinstance(value, dict) and 'done' in value:
                     self.progress_info = value
@@ -2004,12 +2082,20 @@ class LauncherUI:
                     if match and not self.progress_info.get('total'):
                         self.progress_info = dict(self.progress_info, pct=min(100, int(match.group(1))))
             elif kind == 'complete':
-                self.operation = None
-                self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
-                self.status = 'Ready to play.' if self.state == State.READY else 'Installation completed but game files were not found.'
-                if self.state == State.READY:
-                    threading.Thread(target=self.shortcut_worker, daemon=True).start()
-                self.set_screen('main')
+                if self.operation not in GAME_OPERATIONS or self.game_completion_until is not None:
+                    continue
+                if value != 0 or not installed(self.folder):
+                    self.last_error = 'The game could not be found after installation. Select Retry to repair it.'
+                    self.state = State.ERROR
+                    self.set_screen('error')
+                    continue
+                self.state = State.READY
+                self.status = 'Ready to play.'
+                self.progress = 'Ready to play'
+                self._game_progress_pct = 100
+                self.game_completion_until = time.monotonic() + .75
+                self.set_screen('progress')
+                threading.Thread(target=self.shortcut_worker, daemon=True).start()
             elif kind == 'cancelled':
                 self.state = State.NOT_INSTALLED
                 self.status = 'Stopped. Run DOWNLOAD to resume.'
@@ -2069,6 +2155,10 @@ class LauncherUI:
                     self.gfx_values = values
             elif kind == 'upstream_check' and value == 10:
                 self.status = 'An upstream builder update is available.'
+        if self.game_completion_until is not None and time.monotonic() >= self.game_completion_until:
+            self.game_completion_until = None
+            self.operation = None
+            self.set_screen('main')
 
     def shortcut_worker(self):
         actions = ([lambda: create_shortcut(self.folder)] if self.config.get('shortcut', True) else [])
@@ -2208,12 +2298,13 @@ class LauncherUI:
         x, bar_w = MARGIN, 780
         info = self.progress_info or {}
         tool = self.operation == 'tool'
+        game = self.operation in GAME_OPERATIONS
         title = 'Updating Silver Lantern' if tool else ('Updating the game' if self.operation == 'update' else 'Installing Ocarina of Time')
-        pct = info.get('pct')
-        if pct is None and info.get('phase') != 'Verifying the download...':
+        pct = self.game_progress_pct if game else info.get('pct')
+        if not game and pct is None and info.get('phase') != 'Verifying the download...':
             match = re.search(r'(\d{1,3})%', self.progress)
             pct = min(100, int(match.group(1))) if match else None
-        phase = info.get('phase') or ('Preparing' if pct is None else 'Downloading')
+        phase = (self.progress or 'Preparing') if game else (info.get('phase') or ('Preparing' if pct is None else 'Downloading'))
         p.text('overline', phase.upper(), x + 2, 124, ACCENT, max_width=bar_w)
         p.text('title', title, x, 142, INK, max_width=bar_w)
         if pct is not None:
@@ -2223,7 +2314,8 @@ class LauncherUI:
             p.text('body', body, x, 250, INK_DIM, max_width=bar_w)
         p.fill(x, 300, bar_w, 12, (255, 255, 255), 30, 6)
         if pct is not None:
-            fill = self.ease('bar', bar_w * max(0, min(100, pct)) / 100, dt, rate=.12)
+            target = bar_w * max(0, min(100, pct)) / 100
+            fill = target if game and pct == 100 else self.ease('game_bar' if game else 'bar', target, dt, rate=.12)
             if fill >= 12:
                 p.fill(x, 300, fill, 12, ACCENT, 255, 6)
         else:
@@ -2234,20 +2326,20 @@ class LauncherUI:
             if right - left >= 12:
                 p.fill(left, 300, right - left, 12, ACCENT, 255, 6)
         done, total, speed = info.get('done'), info.get('total'), info.get('speed') or 0
-        if total:
+        if not game and total:
             p.text('body', f'{fmt_bytes(done)} of {fmt_bytes(total)}', x, 326, INK)
             right = (fmt_bytes(speed) + '/s') if speed else ''
             if speed and total > done:
                 right += ('  ·  ' if right else '') + fmt_eta((total - done) / speed) + ' left'
             if right:
                 p.text('body', right, x + bar_w, 326, INK_DIM, align='right')
-        if pct is not None or tool:
+        if not game and (pct is not None or tool):
             detail = self.progress if not tool else "The launcher restarts by itself when it's done."
             p.text('caption', detail, x, 364, INK_FAINT, max_width=bar_w, middle=True)
         buttons = self.buttons()
         if buttons:
             self.draw_rows(p, buttons, x, 420, 240, 50, 10, dt)
-            self.draw_hints(p, [('A / ENTER', 'Select'), ('B / ESC', 'Stop download')])
+            self.draw_hints(p, [('A / ENTER', 'Select'), ('B / ESC', 'Cancel')])
         else:
             self.draw_hints(p, [])
 
@@ -2442,12 +2534,11 @@ class LauncherUI:
         defaults = {o.key: o.default for o in game_settings.OPTIONS}
         dlss_values = dict(defaults, **{k: int(v) for k, v in game_settings.PRESET_DLSS.items() if k in game_settings.BY_KEY})
         fsr_values = dict(defaults, **{k: int(v) for k, v in game_settings.PRESET_FSR.items() if k in game_settings.BY_KEY}, hdr=1, output_res=2)
-        info = {'phase': 'Downloading', 'done': int(20.83 * 1024 ** 3), 'total': int(33.05 * 1024 ** 3), 'speed': int(58.4 * 1024 ** 2), 'pct': 63}
         return [
             scene('main', 'main', State.READY, 'Silver Lantern is up to date.'),
             scene('hero-download', 'main', State.NOT_INSTALLED, 'Game data: 2026.11.16', folder=long),
-            scene('progress', 'progress', State.DOWNLOADING, operation='download', progress_info=info,
-                  progress='Downloading: 63% — ' + str(long / 'data' / 'textures' / 'kokiri_forest_hd_pack_part_07.pak')),
+            scene('progress', 'progress', State.DOWNLOADING, operation='download', _game_progress_pct=63,
+                  progress='Downloading game files'),
             scene('tool-update', 'progress', State.READY, operation='tool', progress_info={}, progress='Updating Silver Lantern…'),
             scene('settings', 'settings', State.READY, 'Silver Lantern is up to date.', focus=2, folder=long),
             scene('settings-back', 'settings', State.READY, 'Silver Lantern is up to date.', focus=7, folder=long),
@@ -2530,13 +2621,21 @@ class LauncherUI:
         self.hits = []
         last = time.monotonic()
         test_install = _test_gui_install_enabled() and not screenshot
+        last_test_progress = None
         if test_install:
             log_message('Test GUI: starting fixture installation')
             self.start_operation()
+            last_test_progress = (self.state, self.game_progress_pct)
+            log_message(f'Test GUI progress: state={last_test_progress[0]} pct={last_test_progress[1]}')
         try:
             while self.running:
                 was_playing = self.state == State.PLAYING
                 self.drain()
+                if test_install and (self.operation in GAME_OPERATIONS or self.state in (State.DOWNLOADING, State.UPDATING)):
+                    test_progress = (self.state, self.game_progress_pct)
+                    if test_progress != last_test_progress:
+                        log_message(f'Test GUI progress: state={test_progress[0]} pct={test_progress[1]}')
+                        last_test_progress = test_progress
                 if test_install and self.operation is None:
                     log_message(f'Test GUI: installation finished, state={self.state}, error={self.last_error}')
                     self.running = False

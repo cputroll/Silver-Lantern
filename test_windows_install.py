@@ -23,7 +23,8 @@ class WindowsInstallTests(unittest.TestCase):
         with patch.object(launcher.LauncherUI, 'check_updates'), patch.object(launcher, 'installed', return_value=True), patch.object(launcher.threading, 'Thread') as thread:
             ui = launcher.LauncherUI()
             ui.config['shortcut'] = False
-            ui.events.publish('complete', None)
+            ui.operation = 'download'
+            ui.events.publish('complete', 0)
             ui.drain()
             self.assertTrue(thread.called)
             self.assertEqual(thread.call_args.kwargs['target'], ui.shortcut_worker)
@@ -31,6 +32,29 @@ class WindowsInstallTests(unittest.TestCase):
             ui.shortcut_worker()
             register.assert_called_once_with(ui.folder)
             desktop.assert_not_called()
+
+    def test_stale_root_executable_cannot_override_manifest(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            (folder / 'hookshot_version.txt').touch()
+            (folder / 'HeyListen.exe').touch()
+            (folder / '.heylisten-get').mkdir()
+            (folder / '.heylisten-get' / 'game-manifest.json').write_text(
+                '{"files":[{"path":"bin/HeyListen.exe"}]}', encoding='utf-8')
+            self.assertIsNone(launcher.game_play_target(folder))
+            self.assertFalse(launcher.installed(folder))
+            target = folder / 'bin' / 'HeyListen.exe'
+            target.parent.mkdir()
+            target.touch()
+            self.assertEqual(launcher.game_play_target(folder), target)
+            self.assertTrue(launcher.installed(folder))
+
+    def test_legacy_install_can_still_use_root_executable(self):
+        with tempfile.TemporaryDirectory() as d:
+            folder = Path(d)
+            target = folder / 'HeyListen.exe'
+            target.touch()
+            self.assertEqual(launcher.game_play_target(folder), target)
 
     def test_uninstall_refuses_home_directory(self):
         with patch.object(launcher, 'load_game_folder', return_value=Path.home()), patch('builtins.input', return_value='y'), patch.object(launcher.shutil, 'rmtree') as remove, patch.object(launcher, 'schedule_owned_cleanup') as cleanup:

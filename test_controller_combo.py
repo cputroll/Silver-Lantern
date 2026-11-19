@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 from unittest.mock import Mock, patch
 import launcher
@@ -82,7 +83,10 @@ class ComboTests(unittest.TestCase):
     def test_launcher_releases_sdl_handles_before_starting_game(self):
         with patch.object(launcher.LauncherUI, 'check_updates'):
             ui = launcher.LauncherUI()
-        ui.folder = launcher.Path('.')
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        ui.folder = launcher.Path(folder.name)
+        (ui.folder / 'HeyListen.exe').touch()
         ui.buttons = Mock(return_value=['Play'])
         ui.focus = 0
         order = []

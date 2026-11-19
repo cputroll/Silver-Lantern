@@ -63,7 +63,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -1063,15 +1063,15 @@ def content_range_start(r) -> int | None:
 
 def stream_to(s: "requests.Session", url: str, dest: Path, expect: int | None = None,
               referer: str | None = None, max_retries: int = 2, part: Path | None = None,
-              progress=None, quiet: bool = False) -> int:
+              progress=None, quiet: bool = False, on_retry=None) -> int:
     """Resumable streaming download with an isolated low-speed policy."""
     if isinstance(s, requests.Session):
         with stream_session(s) as client:
-            return _stream_to(client, url, dest, expect, referer, max_retries, part, progress, quiet)
-    return _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet)
+            return _stream_to(client, url, dest, expect, referer, max_retries, part, progress, quiet, on_retry)
+    return _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet, on_retry)
 
 
-def _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet):
+def _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet, on_retry=None):
     """Resumable streaming download into dest (via `part`, default dest + '.part')."""
     part = part or Path(str(dest) + ".part")
     for attempt in range(1, max_retries + 1):
@@ -1132,6 +1132,8 @@ def _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet
             if total and done < total and attempt < max_retries:
                 log(f"  short read ({done}/{total}), resuming...")
                 say('Connection stalled — retrying…')
+                if on_retry is not None:
+                    on_retry()
                 continue
             break
         except Exception as e:  # noqa: BLE001
@@ -1140,6 +1142,8 @@ def _stream_to(s, url, dest, expect, referer, max_retries, part, progress, quiet
                 raise   # a full disk or locked file never fixes itself by retrying
             log(f"  network hiccup ({type(e).__name__}: {e}), retry {attempt}/{max_retries} in 3 s")
             say('Connection stalled — retrying…')
+            if on_retry is not None:
+                on_retry()
             note = getattr(getattr(progress, "__self__", None), "note", None)
             if note:
                 note(f"connection dropped, retrying ({attempt} of {max_retries})...")
@@ -1210,7 +1214,8 @@ def chunk_state(dest, size, streams, chunk_min=CHUNK_MIN):
         return {'size': size, 'bounds': bounds, 'done': [False] * len(bounds), 'hashes': [None] * len(bounds)}
 
 
-def parallel_download(session_factory, url, dest, size, expected_sha, progress, streams, chunk_min=CHUNK_MIN):
+def parallel_download(session_factory, url, dest, size, expected_sha, progress, streams, chunk_min=CHUNK_MIN,
+                      on_retry=None):
     """Download into disjoint offsets; only fully completed regions are resumable."""
     part = Path(str(dest) + '.part')
     side = Path(str(dest) + '.part.json')
@@ -1266,6 +1271,8 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
                 if attempt or _is_local_disk_error(exc):
                     raise
                 say('Connection stalled — retrying…')
+                if on_retry is not None:
+                    on_retry()
             finally:
                 if r is not None:
                     r.close()
@@ -1289,6 +1296,8 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
             if attempt:
                 raise
             say('Connection stalled — retrying…')
+            if on_retry is not None:
+                on_retry()
     if probe.status_code == 200:
         probe.close()
         part.unlink(missing_ok=True)
@@ -1300,7 +1309,9 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
             amount = min(n, remaining_credit)
             remaining_credit -= amount
             progress.add(amount)
-        stream_to(probe_session, url, dest, expect=size, progress=credit, quiet=True, max_retries=2 - attempt)
+        retry_hook = {'on_retry': on_retry} if on_retry is not None else {}
+        stream_to(probe_session, url, dest, expect=size, progress=credit, quiet=True, max_retries=2 - attempt,
+                  **retry_hook)
         return
     if probe.status_code != 206 or (probe.headers.get('content-range') or '').lower().strip() != f'bytes {a}-{b-1}/{size}':
         probe.close()
@@ -2153,7 +2164,8 @@ def _log_assembly_exception(exc):
         log(traceback.format_exc())
 
 
-def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=False):
+def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=False,
+                       on_commit=None, on_assembly=None):
     """Download bundles in order while workers consume segments in file order."""
     cond = threading.Condition()
     bundles = deque()
@@ -2265,6 +2277,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                             created_parents.add(state['temp'].parent)
                     verify_write_boundary(root, state['target'], state['item']['path'])
                     with _open_staging_checked(root, state, index) as output:
+                        if on_assembly is not None:
+                            on_assembly()
                         state['started'] = True
                         while remaining:
                             check_parent_alive()
@@ -2297,6 +2311,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
                         if not state['direct']:
                             verify_write_boundary(root, state['target'], state['item']['path'])
                             _replace_with_retry(state['temp'], state['target'])
+                            if on_commit is not None:
+                                on_commit(state['item']['path'])
                             Path(str(state['temp']) + '.json').unlink(missing_ok=True)
                         state['complete'] = True
                     with cond:
@@ -2410,6 +2426,55 @@ def running_launcher_paths():
     return paths
 
 
+class InstallWorkProgress:
+    """Operation-wide credit for verified bundles and atomic file replacements."""
+
+    def __init__(self, assets, pending):
+        self.remaining = {('bundle', name): size for name, size in assets.items()}
+        self.remaining.update({('file', item['path']): item['size'] for item in pending})
+        self.total = sum(self.remaining.values())
+        self.done = self.reported = 0
+        self.lock = threading.Lock()
+        self.stage_name = None
+        self._emit()
+
+    def _emit(self):
+        self.last_report = time.monotonic()
+        self.reported = self.done
+        _write(f'HLINSTALL done={self.done} total={self.total}\n')
+
+    def credit(self, kind, name):
+        with self.lock:
+            self.done += self.remaining.pop((kind, name), 0)
+            if self.done != self.reported and (self.done == self.total or time.monotonic() - self.last_report >= 0.5):
+                self._emit()
+
+    def committed(self, path):
+        self.credit('file', path)
+
+    def verifying(self, done, total):
+        with self.lock:
+            self.stage_name = 'verify'
+            _write(f'HLVERIFY done={done} total={total}\n')
+
+    def stage(self, name):
+        with self.lock:
+            if name != self.stage_name:
+                self.stage_name = name
+                _write(f'HLINSTALL_STAGE name={name}\n')
+
+    def assembling(self):
+        self.stage('assembly')
+
+    def retrying(self):
+        self.stage('retry')
+
+    def flush(self):
+        with self.lock:
+            if self.done != self.reported:
+                self._emit()
+
+
 def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = False,
                  manifest_path: Path | None = None, keep_assets: bool = False) -> None:
     log('Checking installation plan', echo=True)
@@ -2443,14 +2508,22 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
     assets = {a['asset']: a for a in man['assets']} if v2 else {
         p['asset']: p for f in man['files'] for p in f['parts']}
     needed = {p['asset'] for f in pending for p in f['segments' if v2 else 'parts']}
+    gui_progress = os.environ.get('SILVER_LANTERN_GUI_PROGRESS') == '1'
+    work = InstallWorkProgress({name: assets[name]['size'] for name in needed}, pending) if gui_progress and not dry_run else None
     download_bytes = 0
     uncached_asset_sizes = []
     checking_assets = set()
     def verify_bundle(path, name):
-        if os.environ.get('SILVER_LANTERN_GUI_PROGRESS') == '1':
+        if gui_progress:
             checking_assets.add(name)
-            _write(f'HLVERIFY done={len(checking_assets)} total={len(needed)}\n')
-            return sha256(path)
+            if work is not None:
+                work.verifying(len(checking_assets), len(needed))
+            else:
+                _write(f'HLVERIFY done={len(checking_assets)} total={len(needed)}\n')
+            digest = sha256(path)
+            if work is not None and digest == assets[name]['sha256']:
+                work.credit('bundle', name)
+            return digest
         return sha256(path, progress=True)
     for name in needed:
         part = assets[name]
@@ -2517,6 +2590,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
         cache.mkdir(parents=True, exist_ok=True)
         progress = GameProgress(download_bytes)
         verified_assets = set()
+        retry_hook = {'on_retry': work.retrying} if work is not None else {}
         def fetch(part):
             check_parent_alive()
             dest = cache / part['asset']
@@ -2536,30 +2610,34 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                 partial.unlink()
             url = game_asset_base() + quote(part['asset'])
             if part['size'] >= PARALLEL_THRESHOLD and download_streams() > 1:
-                parallel_download(stream_session, url, dest, part['size'], part['sha256'], progress, download_streams())
+                parallel_download(stream_session, url, dest, part['size'], part['sha256'], progress,
+                                  download_streams(), **retry_hook)
             else:
                 side = Path(str(partial) + '.json')
                 if side.exists():
                     partial.unlink(missing_ok=True)
                     side.unlink(missing_ok=True)
                 worker = stream_session() if s is None else s
-                stream_to(worker, url, dest, expect=part['size'], progress=progress.add, quiet=True)
+                stream_to(worker, url, dest, expect=part['size'], progress=progress.add, quiet=True, **retry_hook)
             if verify_bundle(dest, part['asset']) != part['sha256']:
                 dest.unlink(missing_ok=True)
                 raise ValueError(f"SHA-256 mismatch: {part['asset']}")
             verified_assets.add(part['asset'])
         log('Starting bundle download and installation', echo=True)
         if v2:
+            work_hooks = {'on_commit': work.committed, 'on_assembly': work.assembling} if work is not None else {}
             if man.get('layout') == 'whole':
                 try:
-                    assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=True)
+                    assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=True, **work_hooks)
                 except SegmentMismatch as error:
+                    if work is not None:
+                        work.retrying()
                     log(traceback.format_exc())
                     verified_assets.discard(error.asset)
                     remaining = [item for item in pending if not (game_path(root, item['path']).is_file() and sha256(game_path(root, item['path'])) == item['sha256'])]
-                    assemble_segmented(remaining, assets, cache, root, fetch, keep_assets, soft_retry='resume')
+                    assemble_segmented(remaining, assets, cache, root, fetch, keep_assets, soft_retry='resume', **work_hooks)
             else:
-                assemble_segmented(pending, assets, cache, root, fetch, keep_assets)
+                assemble_segmented(pending, assets, cache, root, fetch, keep_assets, **work_hooks)
         else:
             remaining_uses = {name: 0 for name in needed}
             for item in pending:
@@ -2580,6 +2658,8 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                     check_parent_alive()
                     verify_write_boundary(root, target, item['path'])
                     with _create_staging_exclusive(temp) as output:
+                        if work is not None:
+                            work.assembling()
                         for part in item['segments' if v2 else 'parts']:
                             with (cache / part['asset']).open('rb') as source:
                                 source.seek(part['offset'] if v2 else 0)
@@ -2602,6 +2682,8 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                         raise ValueError(f"assembled SHA-256 mismatch: {item['path']}")
                     verify_write_boundary(root, target, item['path'])
                     _replace_with_retry(temp, target)
+                    if work is not None:
+                        work.committed(item['path'])
                 finally:
                     temp.unlink(missing_ok=True)
                 for name in names:
@@ -2609,6 +2691,10 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                     if remaining_uses[name] == 0 and not keep_assets:
                         (cache / name).unlink(missing_ok=True)
                         Path(str(cache / name) + '.part').unlink(missing_ok=True)
+        if work is not None:
+            # Restored segment checkpoints can bypass bundle verification.
+            # Do not synthesize credit for those bundles; worker exit signals success.
+            work.flush()
         progress.finish()
         log('Bundle download and installation complete', echo=True)
     if pending and not keep_assets and cache.exists():

@@ -2,7 +2,7 @@ import unittest
 import launcher
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import os
 import subprocess
 from launcher import create_shortcut, cli_command, LauncherUI, tool_update_worker
@@ -292,6 +292,48 @@ class StateTests(unittest.TestCase):
             self.assertEqual(ui.progress_info['pct'], 63)
             self.assertEqual(ui.progress, 'Downloading: 63%')
 
+    def test_game_progress_only_uses_monotonic_install_events(self):
+        with patch.object(LauncherUI, 'check_updates'), patch.object(LauncherUI, 'save'), patch.object(launcher, 'probe_writable'), patch.object(launcher.threading, 'Thread'):
+            for update in (False, True):
+                with self.subTest(update=update):
+                    ui = LauncherUI()
+                    ui.start_operation(update)
+                    self.assertEqual(ui.game_progress_pct, 0)
+                    for line, expected, phase in (
+                        ('Downloading: 77% C:/raw/path', 0, 'PREPARING UPDATE' if update else 'PREPARING INSTALLATION'),
+                        ('HLPROGRESS phase=Downloading done=80 total=100 speed=100', 0, 'DOWNLOADING GAME FILES'),
+                        ('HLINSTALL done=1 total=0', 0, 'DOWNLOADING GAME FILES'),
+                        ('HLINSTALL done=61 total=100', 61, 'DOWNLOADING GAME FILES'),
+                        ('HLVERIFY done=1 total=2', 61, 'VERIFYING GAME FILES'),
+                        ('HLINSTALL done=30 total=100', 61, 'VERIFYING GAME FILES'),
+                        ('HLINSTALL_STAGE name=assembly', 61, 'INSTALLING GAME FILES'),
+                        ('HLINSTALL_STAGE name=retry', 61, 'RETRYING INSTALLATION'),
+                        ('HLINSTALL_STAGE name=unknown', 61, 'RETRYING INSTALLATION'),
+                        ('Connection stalled — retrying…', 61, 'RETRYING CONNECTION'),
+                        ('HLINSTALL done=120 total=100', 99, 'RETRYING CONNECTION'),
+                    ):
+                        ui.events.publish('progress', launcher.parse_progress(line) or {'text': line})
+                        ui.drain()
+                        self.assertEqual(ui.game_progress_pct, expected, line)
+                        painter = MagicMock()
+                        with patch.object(ui, 'draw_rows'), patch.object(ui, 'draw_hints'):
+                            ui.draw_progress(painter, .016)
+                        figures = [c.args[1] for c in painter.text.call_args_list if c.args[0] == 'figure']
+                        self.assertEqual(figures, [f'{expected}%'])
+                        self.assertEqual(painter.text.call_args_list[0].args[1], phase)
+                        self.assertFalse(any('raw/path' in c.args[1] or '/s' in c.args[1] for c in painter.text.call_args_list))
+
+    def test_tool_progress_ignores_game_install_events(self):
+        with patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.operation = 'tool'
+            ui.screen = 'progress'
+            ui.progress = 'Updating Silver Lantern…'
+            ui.events.publish('progress', launcher.parse_progress('HLINSTALL done=50 total=100') or {})
+            ui.drain()
+            self.assertIsNone(ui.game_progress_pct)
+            self.assertEqual(ui.progress, 'Updating Silver Lantern…')
+
     def test_cli_emits_gui_progress_when_requested(self):
         import io, importlib.util
         from contextlib import redirect_stdout
@@ -400,14 +442,56 @@ class StateTests(unittest.TestCase):
                 ui.drain()
             start.assert_called_once_with(True)
 
-    def test_completed_update_clears_operation(self):
-        with patch.object(LauncherUI, 'check_updates'), patch.object(launcher, 'installed', return_value=True):
+    def test_channel_update_uses_measured_manifest_worker_without_pruning(self):
+        with patch.object(LauncherUI, 'check_updates'), patch.object(LauncherUI, 'save'), patch.object(launcher, 'probe_writable'), patch.object(launcher, 'installed_manifest_digest', return_value='old'), patch.object(launcher, '_TEST_GAME_MANIFEST', None), patch.object(launcher.threading, 'Thread') as thread:
             ui = LauncherUI()
+            ui.folder, ui.state, ui.screen = Path('existing game'), State.READY, 'main'
+            ui.events.publish('check', (2, 'new'))
+            ui.drain()
+            thread.assert_called_once_with(target=launcher.worker_command, args=(ui.events, [
+                '--no-self-update', '--install-game', str(ui.folder), '--no-preset',
+            ]), daemon=True)
+            self.assertEqual((ui.state, ui.operation, ui.game_progress_pct), (State.UPDATING, 'update', 0))
+            ui.events.publish('progress', launcher.parse_progress('HLINSTALL done=1 total=2'))
+            ui.drain()
+            self.assertEqual(ui.game_progress_pct, 50)
+
+    def test_completed_update_clears_operation(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(LauncherUI, 'check_updates'), patch.object(launcher.threading, 'Thread'), patch.object(launcher.time, 'monotonic', return_value=10) as clock:
+            ui = LauncherUI()
+            ui.folder = Path(d)
+            (ui.folder / 'hookshot_version.txt').touch()
+            (ui.folder / 'bin').mkdir()
+            exe = ui.folder / 'bin' / 'HeyListen.exe'
+            exe.touch()
             ui.operation = 'update'
-            ui.events.publish('complete', None)
-            with patch.object(ui, 'shortcut_worker'):
-                ui.drain()
+            ui.set_screen('progress')
+            ui.events.publish('complete', 0)
+            ui.drain()
+            self.assertEqual((ui.screen, ui.state, ui.game_progress_pct), ('progress', State.READY, 100))
+            self.assertEqual(ui.buttons(), [])
+            painter = MagicMock()
+            ui.draw_progress(painter, .016)
+            self.assertEqual([c.args[1] for c in painter.text.call_args_list if c.args[0] == 'figure'], ['100%'])
+            clock.return_value = 11
+            ui.drain()
             self.assertIsNone(ui.operation)
+            self.assertEqual(ui.screen, 'main')
+            self.assertIn('Play', ui.buttons())
+            with patch.object(launcher.subprocess, 'Popen') as popen:
+                ui.activate()
+            popen.assert_called_once_with([str(exe)], cwd=str(ui.folder))
+
+    def test_missing_game_target_is_not_success(self):
+        with tempfile.TemporaryDirectory() as d, patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.folder = Path(d)
+            ui.operation = 'download'
+            ui.set_screen('progress')
+            ui.events.publish('complete', 0)
+            ui.drain()
+            self.assertEqual((ui.screen, ui.state, ui.operation), ('error', State.ERROR, 'download'))
+            self.assertIn('Retry', ui.buttons())
 
     def test_detected_game_update_does_not_interrupt_active_operation(self):
         with patch.object(LauncherUI, 'check_updates'), patch.object(launcher, 'installed_manifest_digest', return_value='old'):
