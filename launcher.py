@@ -73,7 +73,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.8')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.9')
 
 
 def play_tip_parts(folder):
@@ -319,7 +319,7 @@ def _known_desktop():
         from ctypes import wintypes
         class GUID(ctypes.Structure):
             _fields_ = [('Data1', wintypes.DWORD), ('Data2', wintypes.WORD), ('Data3', wintypes.WORD), ('Data4', ctypes.c_ubyte * 8)]
-        desktop = GUID(0xB4BFCC3A, 0xDB1C, 0x4D44, (ctypes.c_ubyte * 8)(0x83, 0x4F, 0x28, 0x4F, 0xB3, 0x87, 0xCD, 0x39))
+        desktop = GUID(0xB4BFCC3A, 0xDB2C, 0x424C, (ctypes.c_ubyte * 8)(0xB0, 0x29, 0x7F, 0xE9, 0x9A, 0x87, 0xC6, 0x41))
         ole = ctypes.windll.ole32
         shell = ctypes.windll.shell32
         initialized = ole.CoInitializeEx(None, 2)
@@ -345,10 +345,14 @@ def shortcut_path():
 
 
 def launcher_target(folder):
-    fallback = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Programs' / 'Ocarina of Time' / 'Ocarina of Time.exe'
-    if getattr(sys, 'frozen', False) and Path(sys.executable).resolve() == fallback.resolve():
-        return fallback
-    return Path(folder) / 'Ocarina of Time.exe'
+    folder = Path(folder)
+    fallback = Path(os.environ.get('LOCALAPPDATA', str(Path.home()))) / 'Programs' / 'Ocarina of Time'
+    if getattr(sys, 'frozen', False):
+        running = Path(sys.executable).resolve()
+        if (running.parent in (folder.resolve(), fallback.resolve())
+                and re.fullmatch(r'Ocarina of Time(?:-[^/\\]+)?\.exe', running.name, re.IGNORECASE)):
+            return running
+    return folder / 'Ocarina of Time.exe'
 
 
 def create_shortcut(folder, enabled=True, exe=None):
@@ -488,6 +492,16 @@ def remove_defender_exclusion():
     return True
 
 
+def play_install_chime():
+    if os.name != 'nt' or _test_gui_install_enabled():
+        return
+    try:
+        import winsound
+        winsound.PlaySound('SystemNotification', winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+    except (ImportError, RuntimeError, OSError):
+        pass  # Sound is optional; an unavailable audio device cannot fail an install.
+
+
 def create_link(link, target, working_dir):
     script = '$s=New-Object -ComObject WScript.Shell; $l=$s.CreateShortcut(' + ps_quote(link) + '); $l.TargetPath=' + ps_quote(target) + '; $l.WorkingDirectory=' + ps_quote(working_dir) + '; $l.Save()'
     for attempt in range(2):
@@ -513,8 +527,9 @@ OWNED_FILES = ('SilverLantern.exe', 'HeyListen-Get.exe', 'SDL2.dll', 'sources.js
                'README.md', 'Apply-HeyListen-Preset.ps1', 'SilverLantern-Get.cmd',
                'SilverLantern-Preset.cmd', 'Update-Game.ps1', 'Watch-Game.ps1',
                'SilverLantern-AutoUpdate.cmd', 'sources.cache.json', 'HeyListen-Get.log',
-               'SilverLantern.exe.update-backup', 'HeyListen-Get.exe.update-backup', 'Run Silver Lantern.exe')
-OWNED_FILES += tuple('support/' + name for name in OWNED_FILES if name not in ('Run Silver Lantern.exe',))
+               'SilverLantern.exe.update-backup', 'HeyListen-Get.exe.update-backup',
+               'Run Silver Lantern.exe', 'Run HeyListen.exe')
+OWNED_FILES += tuple('support/' + name for name in OWNED_FILES if name not in ('Run Silver Lantern.exe', 'Run HeyListen.exe'))
 
 
 def register_install(folder, exe=None):
@@ -2165,7 +2180,10 @@ class LauncherUI:
                 self._game_progress_pct = 100
                 self.game_completion_until = time.monotonic() + .75
                 self.set_screen('progress')
-                threading.Thread(target=self.shortcut_worker, daemon=True).start()
+                self.install_registration = threading.Thread(target=self.shortcut_worker, daemon=True)
+                self.install_registration.start()
+                if self.operation == 'download':
+                    play_install_chime()
             elif kind == 'cancelled':
                 self.state = State.NOT_INSTALLED
                 self.status = 'Stopped. Run DOWNLOAD to resume.'
@@ -2723,7 +2741,8 @@ class LauncherUI:
                     if test_progress != last_test_progress:
                         log_message(f'Test GUI progress: state={test_progress[0]} pct={test_progress[1]}')
                         last_test_progress = test_progress
-                if test_install and self.operation is None:
+                registration = getattr(self, 'install_registration', None)
+                if test_install and self.operation is None and (registration is None or not registration.is_alive()):
                     log_message(f'Test GUI: installation finished, state={self.state}, error={self.last_error}')
                     self.running = False
                 if was_playing and self.state != State.PLAYING:

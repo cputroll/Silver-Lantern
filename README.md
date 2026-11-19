@@ -10,8 +10,8 @@ Silver Lantern installs the game for you and keeps it up to date. The app instal
 
 ## Install
 
-1. Download the latest release ZIP. No extraction needed - open `Run Silver Lantern.exe` directly from the ZIP; it installs itself into the game folder.
-2. Alternatively, extract the ZIP anywhere you can write files and double-click `Run Silver Lantern.exe` in the extracted folder. Support files are in `support/`.
+1. Download the latest release ZIP. No extraction needed - open `Run HeyListen.exe` directly from the ZIP; it installs itself into the game folder.
+2. Alternatively, extract the ZIP anywhere you can write files and double-click `Run HeyListen.exe` in the extracted folder. Support files are in `support/`.
 3. If Windows SmartScreen appears, select **More info -> Run anyway**. This warning can appear for a small app; only run a copy you trust.
 4. Choose a folder and select **Download**. The first download is about 33 GB. Downloaded bundles are cleaned up automatically as installation proceeds.
 5. When installation finishes, select **Play**.

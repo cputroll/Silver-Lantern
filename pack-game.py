@@ -76,7 +76,7 @@ def pack(source, out, limit=LIMIT, prefix='', include_settings=False):
                 continue
             # Launcher-owned executables at the root and in support/.
             rel = (Path(root) / name).relative_to(source).as_posix().lower()
-            if rel in {'ocarina of time.exe', 'silverlantern.exe', 'heylisten-get.exe', 'run silver lantern.exe',
+            if rel in {'ocarina of time.exe', 'silverlantern.exe', 'heylisten-get.exe', 'run silver lantern.exe', 'run heylisten.exe',
                        'support/silverlantern.exe', 'support/heylisten-get.exe'}:
                 continue
             if Path(root) == source and lower.endswith('.exe') and any(

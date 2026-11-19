@@ -69,12 +69,12 @@ try {
   if ($bakedVersion -cne $version) { throw "Executable version $bakedVersion does not match $version in sources.json and tag $Tag." }
   $support = Join-Path $stage 'support'
   New-Item -ItemType Directory -Force -Path $support | Out-Null
-  Copy-Item $exe (Join-Path $stage 'Run Silver Lantern.exe')
+  Copy-Item $exe (Join-Path $stage 'Run HeyListen.exe')
   Move-Item $exe (Join-Path $support 'SilverLantern.exe')
   Copy-Item (Join-Path $support 'SilverLantern.exe') (Join-Path $support 'HeyListen-Get.exe')
   Copy-Item $sdlDll $support
   Copy-Item sources.json, README.md, Apply-HeyListen-Preset.ps1, SilverLantern-Get.cmd, SilverLantern-Preset.cmd, Update-Game.ps1, Watch-Game.ps1, SilverLantern-AutoUpdate.cmd $support
-  [System.IO.File]::WriteAllText((Join-Path $stage 'Read me.txt'), "Double-click Run Silver Lantern.exe to start.`r`nMore information is in the support folder.`r`n", [System.Text.UTF8Encoding]::new($false))
+  [System.IO.File]::WriteAllText((Join-Path $stage 'Read me.txt'), "Double-click Run HeyListen.exe to start.`r`nMore information is in the support folder.`r`n", [System.Text.UTF8Encoding]::new($false))
   $artifactName = Get-BuildArtifactName -Qa:$Qa
   $zip = Join-Path $out $artifactName
   Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force

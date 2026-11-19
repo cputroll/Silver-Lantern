@@ -1,5 +1,6 @@
-# Silver Lantern 1.7.8
+# HeyListen 1.7.9
 
-- Start fresh downloads sooner by checking missing folders once per phase instead of probing each missing file. Existing files and resume checkpoints still get checked.
-- Show estimated download time next to transfer speed when enough information is available. Verification and installation time are not included.
-- Keep static text sharp at fractional window sizes without changing the game-menu hint animation.
+- Start from `Run HeyListen.exe` in the release ZIP.
+- Create the Desktop shortcut in the Desktop folder Windows actually displays, including when OneDrive redirects it.
+- Keep Desktop and Start Menu shortcuts pointed at the installed auto-updating launcher, even when the launcher needs a different filename.
+- Play a short Windows notification sound when a successful download reaches Ready to play. Updates, failures, and cancellations stay silent.

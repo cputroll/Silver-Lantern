@@ -26,7 +26,7 @@ class PackExclusionTests(unittest.TestCase):
             excluded = ['.heylisten-get/state', '.heylisten-parts/bundle', '.heylisten-new123',
                         'nested/file.heylisten-new', 'nested/file.update-backup', 'HeyListen-Get.log',
                         'launcher.log', 'SilverLantern.exe', 'HeyListen-Get.exe',
-                        'Run Silver Lantern.exe', 'support/SilverLantern.exe',
+                        'Run Silver Lantern.exe', 'Run HeyListen.exe', 'support/SilverLantern.exe',
                         'support/HeyListen-Get.exe', 'hookshot_options.ini']
             included = ['game.dat', 'nested/SilverLantern.exe', 'Ocarina of Time Test.exe',
                         'Run Silver Lantern x.exe', 'SilverLantern-v2.exe', 'Ship of Harkinian.exe']

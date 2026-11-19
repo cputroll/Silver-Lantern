@@ -180,7 +180,7 @@ def main():
         folder = artifacts / 'relocated-game-update'
         folder.mkdir()
         target = folder / 'Ocarina of Time.exe'
-        shutil.copy2(root / 'Run Silver Lantern.exe', target)
+        shutil.copy2(root / 'Run HeyListen.exe', target)
         game = folder / 'game'
         game.mkdir()
         sentinel = game / 'save.dat'
@@ -359,10 +359,17 @@ def main():
             local.shutdown(); local.server_close()
 
     def gui_first_run():
+        import winreg
+        import uuid
         gui_profile = artifacts / 'gui-profile'
         folder = gui_profile / 'Games' / 'HeyListen'
         folder.mkdir(parents=True)
         local = gui_profile / 'local'
+        fallback = local / 'Programs' / 'Ocarina of Time'
+        fallback.mkdir(parents=True)
+        occupied_paths = (folder / 'Ocarina of Time.exe', fallback / 'Ocarina of Time.exe')
+        for occupied in occupied_paths:
+            occupied.write_bytes(b'not an owned launcher')
         state = local / 'SilverLantern'
         state.mkdir(parents=True)
         (state / 'launcher.json').write_text(json.dumps({'game_dir': str(folder)}), encoding='utf-8')
@@ -374,11 +381,16 @@ def main():
         gui_env = dict(env, USERPROFILE=str(gui_profile), LOCALAPPDATA=str(local), APPDATA=str(gui_profile / 'roaming'), SDL_VIDEODRIVER='dummy', SDL_RENDER_DRIVER='software', SILVER_LANTERN_TEST_GUI_INSTALL='1',
                        SILVER_LANTERN_GAME_MANIFEST=str(gui_manifest), SILVER_LANTERN_TEST_ASSET_URL=f'http://127.0.0.1:{server.server_port}/gui/assets/',
                        SILVER_LANTERN_PAUSE_AT='assembly', SILVER_LANTERN_PAUSE_READY=str(pause_ready), SILVER_LANTERN_PAUSE_RELEASE=str(pause_release), SILVER_LANTERN_ASSEMBLY_WORKERS='1')
-        child = subprocess.Popen([str(root / 'Run Silver Lantern.exe'), '--gui', '--no-self-update'], env=gui_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        registry_root = r'Software\SilverLanternFriendTest-' + uuid.uuid4().hex
+        registry_key = registry_root + r'\SilverLantern'
+        links = [gui_profile / where / 'Legend of Zelda Ocarina of Time.lnk' for where in ('desktop', 'start')]
+        gui_env.update(SILVER_LANTERN_REG_ROOT=registry_root,
+                       SILVER_LANTERN_DESKTOP_DIR=str(gui_profile / 'desktop'),
+                       SILVER_LANTERN_STARTMENU_DIR=str(gui_profile / 'start'))
+        child = subprocess.Popen([str(root / 'Run HeyListen.exe'), '--gui', '--no-self-update'], env=gui_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         installed = folder / 'bin' / 'HeyListen.exe'
         gui_log = state / 'launcher.log'
         finished = 'Test GUI: installation finished, state=State.READY'
-        ready_seen = False
 
         def log_text():
             return gui_log.read_text(encoding='utf-8', errors='replace') if gui_log.exists() else ''
@@ -400,6 +412,13 @@ def main():
                 raise AssertionError('no partial verified install work was reported before assembly was released')
             if all((folder / item['path']).is_file() for item in data['files']):
                 raise AssertionError('fixture already installed at the assembly checkpoint')
+            copies = list(fallback.glob('Ocarina of Time-*.exe'))
+            if len(copies) != 1:
+                raise AssertionError('Expected one collision-safe launcher copy')
+            relocated = copies[0]
+            for link in links:
+                link.unlink()
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, registry_key)
             pause_release.touch()
             exit_code = child.wait(timeout=30)
             if exit_code:
@@ -408,7 +427,6 @@ def main():
             while time.monotonic() < deadline:
                 log = log_text()
                 if finished in log:
-                    ready_seen = True
                     break
                 time.sleep(.1)
             else:
@@ -416,23 +434,55 @@ def main():
             samples = assert_gui_install_progress(log, complete=True)
             if len(set(re.findall(r'^HLVERIFY done=(\d+) total=\d+$', log, re.M))) < 2:
                 raise AssertionError('GUI installer did not report verification for multiple bundles')
-            relocated = folder / 'Ocarina of Time.exe'
             if not relocated.exists() or not installed.is_file():
                 raise RuntimeError('GUI did not relocate and install fixture')
+            if any(path.read_bytes() != b'not an owned launcher' for path in occupied_paths):
+                raise AssertionError('Relocation overwrote an unowned executable')
             for item in data['files']:
                 path = folder / item['path']
                 if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != item['sha256']:
                     raise AssertionError(f'GUI fixture file missing or incorrect: {path}')
-            return f'Relocated to {relocated}; {len(data["assets"])} assets installed; GUI progress: {samples}'
+            if not all(link.is_file() for link in links):
+                raise AssertionError('Desktop or Start Menu shortcut missing')
+            script = '''$shell = New-Object -ComObject WScript.Shell
+foreach ($name in 'SL_DESKTOP_LINK', 'SL_START_LINK') {
+    $link = $shell.CreateShortcut([Environment]::GetEnvironmentVariable($name))
+    if ($link.TargetPath -ine $env:SL_EXPECTED_EXE -or $link.WorkingDirectory -ine $env:SL_EXPECTED_DIR -or $link.Arguments) {
+        throw 'Shortcut does not launch the installed auto-updating launcher'
+    }
+}'''
+            subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
+                           env=dict(gui_env, SL_DESKTOP_LINK=str(links[0]), SL_START_LINK=str(links[1]),
+                                    SL_EXPECTED_EXE=str(relocated), SL_EXPECTED_DIR=str(relocated.parent)),
+                           check=True, capture_output=True, timeout=15)
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, registry_key) as key:
+                if (Path(winreg.QueryValueEx(key, 'InstallLocation')[0]) != relocated.parent
+                        or Path(winreg.QueryValueEx(key, 'DisplayIcon')[0]) != relocated
+                        or winreg.QueryValueEx(key, 'UninstallString')[0] != f'"{relocated}" --uninstall'):
+                    raise AssertionError('Installed Apps entry does not point to the installed launcher')
+            return f'Relocated to {relocated}; shortcuts and Installed Apps verified; {len(data["assets"])} assets installed; GUI progress: {samples}'
         finally:
             pause_release.touch(exist_ok=True)
             if child.poll() is None:
                 subprocess.run(['taskkill', '/T', '/F', '/PID', str(child.pid)], capture_output=True, timeout=10)
                 child.wait(timeout=10)
             # Relocation can detach the GUI from the process started above.
-            if not ready_seen:
-                script = "Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($env:SILVER_FRIEND_ROOT, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-                subprocess.run(['powershell', '-NoProfile', '-Command', script], env=dict(env, SILVER_FRIEND_ROOT=str(gui_profile)), capture_output=True, timeout=20)
+            script = r'''$ErrorActionPreference = 'Stop'
+$prefix = [IO.Path]::GetFullPath($env:SILVER_FRIEND_ROOT).TrimEnd('\') + '\'
+foreach ($row in (Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })) {
+    $owned = Get-Process -Id $row.ProcessId -ErrorAction SilentlyContinue
+    if ($owned -and $owned.Path -ieq $row.ExecutablePath -and !$owned.WaitForExit(2000)) {
+        $owned.Kill()
+        if (!$owned.WaitForExit(3000)) { throw 'Fixture process did not exit' }
+    }
+}'''
+            subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
+                           env=dict(env, SILVER_FRIEND_ROOT=str(gui_profile)), check=True, capture_output=True, timeout=20)
+            for key in (registry_key, registry_root):
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+                except FileNotFoundError:
+                    pass
 
     def file_lock():
         target = artifacts / 'locked-game'
@@ -534,7 +584,7 @@ def main():
         gui_env.update(SILVER_LANTERN_PAUSE_AT='sibling_race', SILVER_LANTERN_PAUSE_READY=str(ready), SILVER_LANTERN_PAUSE_RELEASE=str(release_file))
         replacement = folder / 'replacement.tmp'
         replacement.write_bytes(b'unknown replacement')
-        child = subprocess.Popen([str(root / 'Run Silver Lantern.exe'), '--gui', '--no-self-update'], env=gui_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        child = subprocess.Popen([str(root / 'Run HeyListen.exe'), '--gui', '--no-self-update'], env=gui_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             deadline = time.monotonic() + 30
             while not ready.exists() and time.monotonic() < deadline: time.sleep(.1)

@@ -626,6 +626,58 @@ finally:
             ui.drain()
             self.assertEqual(ui.game_progress_pct, 50)
 
+    def test_completion_chimes_once_for_successful_download_only(self):
+        for operation, installed, result, expected in (
+                ('download', True, 0, 1), ('update', True, 0, 0),
+                ('download', False, 0, 0), ('download', True, 1, 0),
+                ('download', True, None, 0)):
+            with self.subTest(operation=operation, installed=installed, result=result), \
+                 patch.object(LauncherUI, 'check_updates'), \
+                 patch.object(launcher, 'installed', return_value=installed), \
+                 patch.object(launcher.threading, 'Thread'), \
+                 patch.object(launcher, 'play_install_chime', create=True) as chime:
+                ui = LauncherUI()
+                ui.operation = operation
+                ui.set_screen('progress')
+                if result is None:
+                    ui.events.publish('cancelled', None)
+                else:
+                    ui.events.publish('complete', result)
+                    ui.events.publish('complete', result)
+                ui.drain()
+                self.assertEqual(chime.call_count, expected)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows Known Folder API')
+    def test_desktop_lookup_uses_windows_desktop_known_folder(self):
+        import uuid
+        with patch.object(launcher.ctypes, 'windll') as windll:
+            lookup = windll.shell32.SHGetKnownFolderPath
+            lookup.return_value = -1
+            launcher._known_desktop()
+            guid = lookup.call_args.args[0]._obj
+            self.assertEqual(uuid.UUID(bytes_le=bytes(guid)),
+                             uuid.UUID('B4BFCC3A-DB2C-424C-B029-7FE99A87C641'))
+
+    def test_shortcut_refresh_keeps_running_relocated_launcher_target(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            fallback = root / 'Programs' / 'Ocarina of Time'
+            fallback.mkdir(parents=True)
+            exe = fallback / 'Ocarina of Time-copy.exe'
+            menu = root / 'Start' / 'Ocarina of Time.lnk'
+            with patch.dict(os.environ, LOCALAPPDATA=str(root)), \
+                 patch.object(sys, 'frozen', True, create=True), \
+                 patch.object(sys, 'executable', str(exe)), \
+                 patch.object(launcher, 'create_shortcut') as desktop, \
+                 patch.object(launcher, 'start_menu_path', return_value=menu), \
+                 patch.object(launcher, 'create_link') as link, \
+                 patch.object(launcher, 'winreg') as registry:
+                launcher.register_install(root / 'game')
+                desktop.assert_called_once_with(root / 'game', exe=exe.resolve())
+                link.assert_called_once_with(menu, exe.resolve(), exe.resolve().parent)
+                self.assertIn(('UninstallString', '"' + str(exe.resolve()) + '" --uninstall'),
+                              [(c.args[1], c.args[4]) for c in registry.SetValueEx.call_args_list])
+
     def test_completed_update_clears_operation(self):
         with tempfile.TemporaryDirectory() as d, patch.object(LauncherUI, 'check_updates'), patch.object(launcher.threading, 'Thread'), patch.object(launcher.time, 'monotonic', return_value=10) as clock:
             ui = LauncherUI()

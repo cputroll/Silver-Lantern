@@ -28,8 +28,9 @@ class ReleaseTests(unittest.TestCase):
         self.assertIn(hashlib.sha256(archive.read_bytes()).hexdigest() + '  HeyListen-Get.zip', sums)
         with zipfile.ZipFile(archive) as z:
             names = z.namelist()
-            self.assertEqual({n for n in names if '/' not in n}, {'Run Silver Lantern.exe', 'Read me.txt'})
-            exe_bytes = z.read('Run Silver Lantern.exe')
+            self.assertEqual({n for n in names if '/' not in n}, {'Run HeyListen.exe', 'Read me.txt'})
+            self.assertIn(b'Double-click Run HeyListen.exe', z.read('Read me.txt'))
+            exe_bytes = z.read('Run HeyListen.exe')
             self.assertEqual(z.read('support/SilverLantern.exe'), exe_bytes)
             self.assertEqual(z.read('support/HeyListen-Get.exe'), exe_bytes)
             self.assertEqual(len(z.read('Read me.txt').decode('utf-8').splitlines()), 2)
