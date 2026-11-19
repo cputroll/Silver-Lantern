@@ -193,7 +193,7 @@ class SharedPublisherRace(unittest.TestCase):
                 game, public, local = (root / (name + '-' + x) for x in ('game', 'public', 'local'))
                 for directory in (game, public, local): directory.mkdir()
                 (game / 'hookshot_version.txt').write_text('2.0.0', encoding='utf-8')
-                env = safe_env.copy()
+                env = fixture.fixture_powershell_env(safe_env)
                 env.update(PUBLIC=str(public), LOCALAPPDATA=str(local), USERPROFILE=str(root), COMPUTERNAME='testhost', SILVERLANTERN_PUBLISH_HOST='testhost', GH_TOKEN='offline-only', TEST_REMOTE=str(assets), TEST_BARRIER=str(barrier), TEST_ID=name, TEST_GAME=str(game), TEST_GIT=shutil.which('git'), TEST_MODE=mode)
                 processes.append(subprocess.Popen([fixture.SHELL, '-NoProfile', '-NonInteractive', '-File', str(clone / 'AutoShip-Game.ps1'), '-GameFolder', str(game), '-Force'], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True))
             try:

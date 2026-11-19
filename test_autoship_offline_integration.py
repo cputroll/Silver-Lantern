@@ -17,6 +17,12 @@ HOLD = "        throw 'Publication hold: cross-host single-publisher enforcement
 UPDATER_HOLD = "        throw 'Updater process-tree ownership unavailable; publication blocked'"
 SHELL = shutil.which('powershell.exe') or shutil.which('pwsh')
 
+
+def fixture_powershell_env(env):
+    # Hosted CI may export PowerShell 7's module path into a Windows
+    # PowerShell 5.1 child. Use the modules belonging to the actual shell.
+    return dict(env, PSModulePath=str(Path(SHELL).parent / 'Modules'))
+
 MOCKS = r'''
 function Invoke-RestMethod { return @{ tag_name = $env:TEST_LATEST } }
 function git {
@@ -111,7 +117,7 @@ class PublisherOfflineIntegration(unittest.TestCase):
             shutil.copyfile(ROOT / 'OwnedProcess.cs', tmp / 'OwnedProcess.cs')
             (tmp / 'Update-Game.ps1').write_text("Add-Content -LiteralPath $env:TEST_EVENTS -Value ('updater ' + ($args -join ' '))\nexit ([int]$env:TEST_UPDATE_EXIT)\n", encoding='utf-8')
             events = tmp / 'events.txt'
-            env = os.environ.copy()
+            env = fixture_powershell_env(os.environ)
             env.update(PUBLIC=str(public), LOCALAPPDATA=str(local), USERPROFILE=str(tmp), COMPUTERNAME='testhost', SILVERLANTERN_PUBLISH_HOST='testhost', GH_TOKEN='offline-only', TEST_LATEST=latest, TEST_POINTER=pointer, TEST_REMOTE=str(remote), TEST_EVENTS=str(events), TEST_GAME=str(game), TEST_UPDATE_EXIT=str(update_exit))
             args = [SHELL, '-NoProfile', '-NonInteractive', '-File', str(script), '-GameFolder', str(game)]
             if force:

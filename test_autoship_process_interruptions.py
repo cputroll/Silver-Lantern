@@ -12,7 +12,7 @@ import tempfile
 import time
 import unittest
 
-from test_autoship_offline_integration import HOLD, MOCKS, ROOT, SHELL
+from test_autoship_offline_integration import HOLD, MOCKS, ROOT, SHELL, fixture_powershell_env
 
 
 @unittest.skipUnless(os.name == 'nt' and SHELL, 'requires Windows PowerShell')
@@ -49,7 +49,7 @@ class PublisherInterruptions(unittest.TestCase):
             (tmp / 'Update-Game.ps1').write_text("[IO.File]::WriteAllText($env:TEST_CHILD_PID, [string]$PID)\n& $env:TEST_SHELL -NoProfile -NonInteractive -File $env:TEST_DESCENDANT_SCRIPT\nexit 10\n", encoding='utf-8')
             events, pidfile = tmp / 'events.txt', tmp / 'child.pid'
             descendant_file = tmp / 'descendant.pid'
-            env = os.environ.copy()
+            env = fixture_powershell_env(os.environ)
             env.update(PUBLIC=str(public), LOCALAPPDATA=str(local), USERPROFILE=str(tmp), COMPUTERNAME='testhost', SILVERLANTERN_PUBLISH_HOST='testhost', GH_TOKEN='offline-only', TEST_LATEST='2.0.0', TEST_POINTER=pointer, TEST_REMOTE=str(remote), TEST_EVENTS=str(events), TEST_GAME=str(game), TEST_SHELL=SHELL, TEST_CHILD_PID=str(pidfile), TEST_DESCENDANT_PID=str(descendant_file), TEST_DESCENDANT_SCRIPT=str(tmp / 'descendant.ps1'))
             output = tmp / 'output.txt'
             child_pid = None

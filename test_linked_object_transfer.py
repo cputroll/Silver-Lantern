@@ -1,8 +1,8 @@
 import os
 import subprocess
 from pathlib import Path
-
-import pytest
+import tempfile
+import unittest
 
 from linked_object_transfer import transfer_commit
 
@@ -12,7 +12,7 @@ def git(*args, cwd=None):
                           capture_output=True, text=True).stdout.strip()
 
 
-def test_transfers_linked_worktree_commit_without_following_dotgit(tmp_path):
+def _transfer_linked_worktree_commit_without_following_dotgit(tmp_path):
     root = tmp_path / 'root'
     root.mkdir()
     main = root / 'main'
@@ -38,7 +38,7 @@ def test_transfers_linked_worktree_commit_without_following_dotgit(tmp_path):
     assert git('--git-dir', target, 'fsck', '--no-reflogs', oid) == ''
 
 
-def test_rejects_alternates_and_outside_root(tmp_path):
+def _rejects_alternates_and_outside_root(test, tmp_path):
     root = tmp_path / 'root'
     root.mkdir()
     source = root / 'source.git'
@@ -47,7 +47,18 @@ def test_rejects_alternates_and_outside_root(tmp_path):
     git('init', '--bare', target)
     alt = source / 'objects' / 'info' / 'alternates'
     alt.write_text(str(tmp_path / 'external'))
-    with pytest.raises(ValueError):
+    with test.assertRaises(ValueError):
         transfer_commit(source / 'objects', target, 'a' * 40, trusted_root=root)
-    with pytest.raises(ValueError):
+    with test.assertRaises(ValueError):
         transfer_commit(tmp_path, target, 'a' * 40, trusted_root=root)
+
+
+@unittest.skipUnless(os.name == 'nt', 'requires Windows volume checks')
+class LinkedObjectTransferTests(unittest.TestCase):
+    def test_transfers_linked_worktree_commit_without_following_dotgit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _transfer_linked_worktree_commit_without_following_dotgit(Path(directory))
+
+    def test_rejects_alternates_and_outside_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            _rejects_alternates_and_outside_root(self, Path(directory))
