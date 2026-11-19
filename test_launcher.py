@@ -147,6 +147,16 @@ class StateTests(unittest.TestCase):
             self.assertNotIn('Disk unavailable', error)
             self.assertIn('Disk unavailable', (Path(d) / 'log').read_text())
 
+    def test_worker_preserves_log_boundary_after_unterminated_prompt(self):
+        import io
+        from unittest.mock import MagicMock
+        proc = MagicMock(stdout=io.StringIO('Press Enter to close this window.'), **{'wait.return_value': 0})
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'LOG', Path(d) / 'log'), patch.object(launcher.subprocess, 'Popen', return_value=proc):
+            launcher.worker_command(launcher.ProgressEvents(), [])
+            launcher.log_message('Test GUI progress: state=State.READY pct=100')
+            self.assertEqual((Path(d) / 'log').read_text().splitlines()[-2:], [
+                'Press Enter to close this window.', 'Test GUI progress: state=State.READY pct=100'])
+
     def test_worker_failure_without_output_identifies_exit_code(self):
         import io
         from unittest.mock import MagicMock

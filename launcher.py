@@ -1168,7 +1168,7 @@ def worker_command(events, args):
             if events.cancelled.is_set():
                 terminate_worker(events)
             for line in child_output(process, 'Game installation or update'):
-                log.write(line)
+                log.write(line if line.endswith('\n') else line + '\n')
                 log.flush()
                 if line.strip() and not line.startswith(PROGRESS_RECORDS):
                     last_line = gui_child_text(line)
