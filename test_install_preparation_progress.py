@@ -1,12 +1,94 @@
 import hashlib
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from test_game_sync import h
+from test_write_boundary import make_junction
 
 
 class PreparationProgressTests(unittest.TestCase):
+    def test_preparation_skips_missing_parents_without_listing_existing_ones(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / 'existing').mkdir()
+            pending = [{'path': f'{parent}/{number}', 'segments': [{'asset': 'a'}]}
+                       for parent in ('existing', 'absent/child') for number in range(20)]
+            with patch.object(h, 'restore_segment_checkpoint', wraps=h.restore_segment_checkpoint) as restore, \
+                 patch.object(h, 'game_path', wraps=h.game_path) as validate, \
+                 patch.object(h.os, 'scandir', wraps=h.os.scandir) as scan:
+                with self.assertRaisesRegex(RuntimeError, 'stop before assembly'):
+                    h.assemble_segmented(pending, {'a': {}}, root, root,
+                                         lambda part: (_ for _ in ()).throw(RuntimeError('stop before assembly')),
+                                         False, soft_retry=True)
+            scan.assert_not_called()
+            self.assertEqual(restore.call_count, 20)
+            self.assertEqual(validate.call_count, 20)
+
+    def test_preparation_never_scans_junction_ancestors(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, outside = base / 'root', base / 'outside'
+            root.mkdir()
+            (outside / 'child').mkdir(parents=True)
+            link = root / 'link'
+            if os.name == 'nt':
+                make_junction(outside, link)
+            else:
+                link.symlink_to(outside, target_is_directory=True)
+            pending = [{'path': 'link/child/file', 'segments': [{'asset': 'a'}]}]
+            with patch.object(h.os, 'scandir', wraps=h.os.scandir) as scan:
+                with self.assertRaisesRegex(h.InvalidGamePath, 'reparse point'):
+                    h.assemble_segmented(pending, {'a': {}}, root, root,
+                                         lambda part: self.fail('fetched before preparation rejected junction'),
+                                         False, soft_retry=True)
+                scan.assert_not_called()
+
+    def test_preparation_rejects_a_final_target_reparse_before_fetch(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            root, outside = base / 'root', base / 'outside'
+            root.mkdir()
+            outside.mkdir()
+            if os.name == 'nt':
+                make_junction(outside, root / 'file')
+            else:
+                (root / 'file').symlink_to(outside, target_is_directory=True)
+            pending = [{'path': 'file', 'segments': [{'asset': 'a'}]}]
+            with self.assertRaisesRegex(h.InvalidGamePath, 'reparse point'):
+                h.assemble_segmented(pending, {'a': {}}, root, root,
+                                     lambda part: self.fail('fetched before preparation rejected junction'),
+                                     False, soft_retry=True)
+
+    def test_preparation_restores_checkpoint_and_discards_orphan_in_same_parent(self):
+        def digest(data):
+            return hashlib.sha256(data).hexdigest()
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            cache = root / 'cache'
+            cache.mkdir()
+            temp = root / 'resume.heylisten-new'
+            temp.write_bytes(b'a')
+            (root / 'resume.heylisten-new.json').write_text(json.dumps({'next_index': 1, 'bytes_written': 1}))
+            orphan = root / 'orphan.heylisten-new'
+            orphan.write_bytes(b'old')
+            first = {'asset': 'a', 'offset': 0, 'length': 1, 'sha256': digest(b'a')}
+            second = {'asset': 'b', 'offset': 0, 'length': 1, 'sha256': digest(b'b')}
+            pending = [{'path': 'resume', 'size': 2, 'sha256': digest(b'ab'), 'segments': [first, second]},
+                       {'path': 'orphan', 'size': 1, 'sha256': digest(b'b'), 'segments': [second]}]
+
+            def fetch(asset):
+                self.assertEqual(asset, 'b')  # The verified prefix is not fetched again.
+                (cache / asset).write_bytes(b'b')
+
+            h.assemble_segmented(pending, {'a': 'a', 'b': 'b'}, cache, root, fetch, False, soft_retry=True)
+            self.assertEqual((root / 'resume').read_bytes(), b'ab')
+            self.assertEqual((root / 'orphan').read_bytes(), b'b')
+            self.assertFalse(orphan.exists())
+
     def test_preparation_reports_progress_during_scan(self):
         item = {'path': 'file', 'size': 1, 'sha256': '0' * 64,
                 'segments': [{'asset': 'a', 'offset': 0, 'length': 1, 'sha256': '0' * 64}]}

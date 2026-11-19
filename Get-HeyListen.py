@@ -63,7 +63,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.7.5"
+APP_VERSION = "1.7.6"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -216,7 +216,8 @@ class Progress:
         self.t0 = clock()
         self.last_draw = -1.0
         self.last_t = self.t0
-        self.last_done = base
+        self.received = 0
+        self.last_received = 0
         self.speed = 0.0
         self.tty = is_tty() if tty is None else tty
         self.width = width
@@ -225,22 +226,24 @@ class Progress:
         self.lock = threading.Lock()
         self.finished = False
 
-    def add(self, amount: int) -> None:
+    def add(self, amount: int, *, received: int | None = None) -> None:
+        """Add progress credit and, when different, specify bytes received for speed."""
         with self.lock:
-            self._set(self.done + amount)
+            self._set(self.done + amount, max(0, amount) if received is None else received)
 
     def update(self, done: int) -> None:
         with self.lock:
-            self._set(done)
+            self._set(done, max(0, done - self.done))
 
-    def _set(self, done: int) -> None:
+    def _set(self, done: int, received: int) -> None:
         self.done = done
+        self.received += received
         now = self.clock()
         dt = now - self.last_t
         if dt >= 0.25:
-            inst = (self.done - self.last_done) / dt
+            inst = (self.received - self.last_received) / dt
             self.speed = inst if self.speed == 0 else 0.2 * inst + 0.8 * self.speed
-            self.last_t, self.last_done = now, self.done
+            self.last_t, self.last_received = now, self.received
         if self.tty:
             if now - self.last_draw >= 0.25:
                 self.last_draw = now
@@ -249,7 +252,8 @@ class Progress:
             # Machine-readable feed for the launcher window: bytes, total and smoothed speed.
             if now - self.last_draw >= 0.5 or (self.total and self.done >= self.total):
                 self.last_draw = now
-                _write(f"HLPROGRESS phase={self.label.replace(' ', '_')} done={self.done} total={self.total} speed={int(self.speed)}\n")
+                live_speed = int(self.speed) if received else 0
+                _write(f"HLPROGRESS phase={self.label.replace(' ', '_')} done={self.done} total={self.total} speed={live_speed}\n")
         elif self.total:
             pct = self.done * 100 // self.total
             if pct >= self.next_pct:
@@ -1267,7 +1271,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
             except Exception as exc:
                 log(traceback.format_exc())
                 if pos > start:
-                    progress.add(start - pos)
+                    progress.add(start - pos, received=0)
                 if attempt or _is_local_disk_error(exc):
                     raise
                 say('Connection stalled — retrying…')
@@ -1308,7 +1312,7 @@ def parallel_download(session_factory, url, dest, size, expected_sha, progress, 
             nonlocal remaining_credit
             amount = min(n, remaining_credit)
             remaining_credit -= amount
-            progress.add(amount)
+            progress.add(amount, received=n)
         retry_hook = {'on_retry': on_retry} if on_retry is not None else {}
         stream_to(probe_session, url, dest, expect=size, progress=credit, quiet=True, max_retries=2 - attempt,
                   **retry_hook)
@@ -2001,12 +2005,16 @@ def _comparable_resolved_path(path):
     return Path(text)
 
 
-def game_path(root: Path, relative: str) -> Path:
+def _game_path_parts(root: Path, relative: str) -> list[str]:
     parts = relative.split('/')
     if not relative or any(part in ('', '.', '..') for part in parts) or '\\' in relative or ':' in relative:
         raise InvalidGamePath(root.resolve(), relative)
+    return parts
+
+
+def _checked_game_paths(root: Path, relative: str) -> tuple[Path, Path]:
     target = root
-    for part in parts:
+    for part in _game_path_parts(root, relative):
         target = target / part
         if _leftover_kind(target) == 'reparse':
             raise InvalidGamePath(root.resolve(), relative, f'reparse point at {str(target)!r}')
@@ -2018,6 +2026,11 @@ def game_path(root: Path, relative: str) -> Path:
         raise
     if not _comparable_resolved_path(resolved_target).is_relative_to(_comparable_resolved_path(resolved_root)):
         raise InvalidGamePath(resolved_root, relative, f'resolved target={str(resolved_target)!r}; resolved root={str(resolved_root)!r}')
+    return target, resolved_target
+
+
+def game_path(root: Path, relative: str) -> Path:
+    target, _ = _checked_game_paths(root, relative)
     return target
 
 
@@ -2113,6 +2126,27 @@ def destination_inventory(root: Path) -> dict:
     return walk_destination(root)
 
 
+def _parent_needs_segment_checks(root, parts, entry):
+    """Skip checkpoint probes only below a missing parent; never enumerate it."""
+    parent = root
+    try:
+        root_info = os.stat(root, follow_symlinks=False)
+        if stat.S_ISLNK(root_info.st_mode) or getattr(root_info, 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+            return True  # An explicitly chosen linked root uses the original checks.
+        for part in parts:
+            parent = parent / part
+            info = os.stat(parent, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+                raise InvalidGamePath(root, entry, f'reparse point at {str(parent)!r}')
+            if not stat.S_ISDIR(info.st_mode):
+                return True  # Let the normal checks report a blocked path.
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True  # An unreadable directory is not evidence of absence.
+    return True
+
+
 def restore_segment_checkpoint(temp, checkpoint, item):
     """Trust a retained prefix only after checking every segment hash."""
     hasher = hashlib.sha256()
@@ -2171,6 +2205,8 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
     bundles = deque()
     states = []
     created_parents = set()
+    # Local to this call: a retry can see checkpoints created by the prior attempt.
+    parents_needing_checks = {}
     parent_lock = threading.Lock()
     by_asset = {name: [] for name in assets}
     log(f"Preparing download: organizing {len(pending)} destination files", echo=True)
@@ -2181,15 +2217,22 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
         if now - last_report >= 5:
             log(f"Preparing download: {count - 1}/{len(pending)} destination files checked", echo=True)
             last_report = now
-        target = root.joinpath(*item['path'].split('/'))
+        relative = item['path']
+        parts = _game_path_parts(root, relative) if soft_retry else relative.split('/')
+        target = root.joinpath(*parts)
         direct = False  # Always stage so cancellation cannot truncate a final target.
         state = {'item': item, 'target': target,
                  'temp': target if direct else target.with_name(target.name + '.heylisten-new'),
                  'direct': direct, 'next': 0, 'started': False, 'complete': False,
                  'hasher': hashlib.sha256(), 'lock': threading.Lock()}
         if soft_retry and not direct:
-            game_path(root, item['path'])
-            state['next'], state['hasher'] = restore_segment_checkpoint(state['temp'], Path(str(state['temp']) + '.json'), item)
+            parent_key = relative.rpartition('/')[0]
+            if parent_key not in parents_needing_checks:
+                parents_needing_checks[parent_key] = _parent_needs_segment_checks(root, parts[:-1], relative)
+            if parents_needing_checks[parent_key]:
+                game_path(root, relative)
+                state['next'], state['hasher'] = restore_segment_checkpoint(
+                    state['temp'], Path(str(state['temp']) + '.json'), item)
         states.append(state)
         for index, segment in enumerate(item['segments']):
             if index >= state['next']:
@@ -2492,8 +2535,8 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             log(f"Checking installation plan: {count - 1}/{len(man['files'])} files checked", echo=True)
             last_report = now
         relative = item['path']
-        target = game_path(root, relative)
-        if os.path.normcase(str(target.resolve())) in running:
+        target, resolved_target = _checked_game_paths(root, relative)
+        if os.path.normcase(str(resolved_target)) in running:
             log('launcher executable left in place; the launcher updates itself separately')
             continue
         if inventory.get(relative) == item['size']:

@@ -157,6 +157,15 @@ class StateTests(unittest.TestCase):
             self.assertEqual((Path(d) / 'log').read_text().splitlines()[-2:], [
                 'Press Enter to close this window.', 'Test GUI progress: state=State.READY pct=100'])
 
+    def test_worker_timestamps_transfer_before_ui_drain(self):
+        import io
+        events = launcher.ProgressEvents()
+        proc = MagicMock(stdout=io.StringIO('HLPROGRESS phase=Downloading done=80 total=100 speed=10485760\n'), **{'wait.return_value': 0})
+        with tempfile.TemporaryDirectory() as d, patch.object(launcher, 'STATE_DIR', Path(d)), patch.object(launcher, 'LOG', Path(d) / 'log'), patch.object(launcher.subprocess, 'Popen', return_value=proc), patch.object(launcher.time, 'monotonic', return_value=100):
+            launcher.worker_command(events, [])
+        kind, value = events.queue.get_nowait()
+        self.assertEqual((kind, value.get('rate_received_at')), ('progress', 100))
+
     def test_worker_failure_without_output_identifies_exit_code(self):
         import io
         from unittest.mock import MagicMock
@@ -311,7 +320,11 @@ class StateTests(unittest.TestCase):
                     self.assertEqual(ui.game_progress_pct, 0)
                     for line, expected, phase in (
                         ('Downloading: 77% C:/raw/path', 0, 'PREPARING UPDATE' if update else 'PREPARING INSTALLATION'),
-                        ('HLPROGRESS phase=Downloading done=80 total=100 speed=100', 0, 'DOWNLOADING GAME FILES'),
+                        ('Checking installation plan: 12345/186614 files checked', 0, 'CHECKING EXISTING FILES'),
+                        ('Starting bundle download and installation', 0, 'PREPARING DOWNLOAD'),
+                        ('Preparing download: organizing 186614 destination files', 0, 'PREPARING DOWNLOAD'),
+                        ('Preparing download: 135566/186614 destination files checked', 0, 'PREPARING DOWNLOAD'),
+                        ('HLPROGRESS phase=Downloading done=80 total=100 speed=10485760', 0, 'DOWNLOADING GAME FILES'),
                         ('HLINSTALL done=1 total=0', 0, 'DOWNLOADING GAME FILES'),
                         ('HLINSTALL done=61 total=100', 61, 'DOWNLOADING GAME FILES'),
                         ('HLVERIFY done=1 total=2', 61, 'VERIFYING GAME FILES'),
@@ -331,7 +344,39 @@ class StateTests(unittest.TestCase):
                         figures = [c.args[1] for c in painter.text.call_args_list if c.args[0] == 'figure']
                         self.assertEqual(figures, [f'{expected}%'])
                         self.assertEqual(painter.text.call_args_list[0].args[1], phase)
-                        self.assertFalse(any('raw/path' in c.args[1] or '/s' in c.args[1] for c in painter.text.call_args_list))
+                        labels = [c.args[1] for c in painter.text.call_args_list]
+                        self.assertFalse(any('raw/path' in label for label in labels))
+                        if line.startswith('Checking installation plan:'):
+                            self.assertIn('Checking 12,345 of 186,614 files', labels)
+                        if line.startswith('Preparing download: organizing'):
+                            self.assertIn('Checking 0 of 186,614 files', labels)
+                        if line.startswith('Preparing download: 135566'):
+                            self.assertIn('Checking 135,566 of 186,614 files', labels)
+                        self.assertEqual([label for label in labels if '/s' in label],
+                                         [launcher.fmt_bytes(10485760) + '/s'] if phase == 'DOWNLOADING GAME FILES' else [])
+
+    def test_game_download_speed_expires_without_fresh_transfer(self):
+        with patch.object(LauncherUI, 'check_updates'), patch.object(LauncherUI, 'save'), patch.object(launcher, 'probe_writable'), patch.object(launcher.threading, 'Thread'):
+            ui = LauncherUI()
+            ui.start_operation(False)
+            rate = launcher.parse_progress('HLPROGRESS phase=Downloading done=80 total=100 speed=10485760')
+            ui.events.publish('progress', dict(rate, rate_received_at=100))
+            with patch.object(launcher.time, 'monotonic', return_value=104):
+                ui.drain()
+            def labels_at(now):
+                painter = MagicMock()
+                with patch.object(launcher.time, 'monotonic', return_value=now), patch.object(ui, 'draw_rows'), patch.object(ui, 'draw_hints'):
+                    ui.draw_progress(painter, .016)
+                return [call.args[1] for call in painter.text.call_args_list]
+
+            label = launcher.fmt_bytes(10485760) + '/s'
+            self.assertNotIn(label, labels_at(104))
+            ui.events.publish('progress', dict(rate, rate_received_at=105))
+            ui.drain()
+            self.assertIn(label, labels_at(107))
+            ui.events.publish('progress', dict(rate, speed=0, rate_received_at=107))
+            ui.drain()
+            self.assertNotIn(label, labels_at(107))
 
     def test_tool_progress_ignores_game_install_events(self):
         with patch.object(LauncherUI, 'check_updates'):

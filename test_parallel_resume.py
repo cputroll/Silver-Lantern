@@ -29,11 +29,13 @@ class ParallelResumeTests(unittest.TestCase):
             dest = Path(d) / 'asset'
             Path(str(dest)+'.part').write_bytes(b'abcdXXXX')
             Path(str(dest)+'.part.json').write_text(json.dumps({'size': 8, 'bounds': [[0,4],[4,8]], 'done': [True,False], 'hashes': [hashlib.sha256(b'abcd').hexdigest(), None]}))
-            progress = h.Progress('test', 4, tty=False)
+            ticks = iter((0.0, 1.0))
+            progress = h.Progress('test', 4, tty=False, clock=lambda: next(ticks))
             h.parallel_download(Session, 'http://example/', dest, 8, '', progress, 2, chunk_min=1)
             self.assertEqual(calls, ['bytes=4-7'])
             self.assertEqual(dest.read_bytes(), data)
             self.assertEqual(progress.done, 4)
+            self.assertEqual(progress.speed, 4)
             self.assertFalse(Path(str(dest)+'.part.json').exists())
 
     def test_corrupted_completed_chunk_is_redownloaded(self):
@@ -72,20 +74,26 @@ class ParallelResumeTests(unittest.TestCase):
             self.assertEqual(progress.done, 8)
 
     def test_resumed_ignored_range_counts_only_missing_bytes(self):
+        now = 0.0
+        class FullResponse(Response):
+            def raise_for_status(self): pass
+            def iter_content(self, size):
+                nonlocal now
+                yield b'abcd'
+                now = 1.0
+                yield b'efgh'
         class Session:
-            def get(self, *args, **kwargs): return Response(200, b'')
+            def get(self, url, headers, **kwargs):
+                return Response(200, b'') if 'range' in headers else FullResponse(200, b'abcdefgh')
         with tempfile.TemporaryDirectory() as d:
             dest = Path(d) / 'asset'
             Path(str(dest)+'.part').write_bytes(b'abcdXXXX')
             Path(str(dest)+'.part.json').write_text(json.dumps({'size': 8, 'bounds': [[0,4],[4,8]], 'done': [True,False], 'hashes': [hashlib.sha256(b'abcd').hexdigest(), None]}))
-            progress = h.Progress('test', 4, tty=False)
-            def stream(s, url, target, **kwargs):
-                target.write_bytes(b'abcdefgh')
-                kwargs['progress'](3)
-                kwargs['progress'](5)
-            with patch.object(h, 'stream_to', side_effect=stream):
-                h.parallel_download(Session, 'http://example/', dest, 8, '', progress, 2, chunk_min=1)
+            progress = h.Progress('test', 4, tty=False, clock=lambda: now)
+            h.parallel_download(Session, 'http://example/', dest, 8, '', progress, 2, chunk_min=1)
+            self.assertEqual(dest.read_bytes(), b'abcdefgh')
             self.assertEqual(progress.done, 4)
+            self.assertEqual(progress.speed, 8)
 
     def test_ignored_range_falls_back(self):
         class Session:

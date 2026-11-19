@@ -1,5 +1,5 @@
-# Silver Lantern 1.7.5
+# Silver Lantern 1.7.6
 
-- Show one progress bar for the whole installation, with separate status messages for checking files, finishing the install, and retrying.
-- Use the same installation flow for game channel updates without resetting graphics presets or pruning unrelated files.
-- Use the installed game manifest to choose the Play executable, so a leftover launcher cannot make an incomplete installation look ready.
+- Start fresh downloads sooner by skipping resume checks in folders that do not exist yet. Existing folders still get the usual checks.
+- Show how many files have been checked during preparation and the current transfer speed during downloads.
+- Keep one progress bar for the whole installation, reaching 100% only when the game is ready.

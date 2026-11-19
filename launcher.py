@@ -73,7 +73,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.5')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.6')
 
 
 def play_tip(folder):
@@ -997,6 +997,7 @@ def fmt_eta(seconds):
 
 PROGRESS_RECORDS = ('HLINSTALL ', 'HLINSTALL_STAGE ', 'HLPROGRESS ', 'HLUPDATE ', 'HLVERIFY ')
 GAME_OPERATIONS = ('download', 'update')
+GAME_RATE_TIMEOUT = 3.0
 INSTALL_STAGE_LABELS = {'assembly': 'Installing game files', 'retry': 'Retrying installation'}
 
 
@@ -1049,13 +1050,33 @@ def game_progress_phase(value):
         return 'Retrying connection'
     if phase == 'Verifying the download...':
         return 'Verifying game files'
-    if phase == 'Downloading' or text.startswith('starting bundle download'):
+    if phase == 'Downloading':
         return 'Downloading game files'
+    if text.startswith(('starting bundle download', 'preparing download', 'preparation complete')):
+        return 'Preparing download'
     if text.startswith(('checking installation plan', 'planning')):
         return 'Checking existing files'
     if text.startswith(('bundle download and installation complete', 'the game is installed')):
         return 'Finishing installation'
     return None
+
+
+def game_progress_detail(value):
+    if value.get('phase') == 'Downloading' and value.get('speed', 0) > 0:
+        return fmt_bytes(value['speed']) + '/s'
+    text = value.get('text', '').strip()
+    start = re.fullmatch(r'Preparing download: organizing ([0-9]{1,9}) destination files', text)
+    if start:
+        return f'Checking 0 of {int(start[1]):,} files'
+    match = re.fullmatch(
+        r'(?:Checking installation plan|Preparing download): ([0-9]{1,9})/([0-9]{1,9}) (?:destination )?files checked',
+        text,
+    )
+    if match:
+        done, total = map(int, match.groups())
+        if done <= total:
+            return f'Checking {done:,} of {total:,} files'
+    return ''
 
 
 def _strip_ansi(text):
@@ -1168,12 +1189,15 @@ def worker_command(events, args):
             if events.cancelled.is_set():
                 terminate_worker(events)
             for line in child_output(process, 'Game installation or update'):
+                rate_received_at = time.monotonic() if line.startswith('HLPROGRESS ') else None
                 log.write(line if line.endswith('\n') else line + '\n')
                 log.flush()
                 if line.strip() and not line.startswith(PROGRESS_RECORDS):
                     last_line = gui_child_text(line)
                     screen_lines.append(last_line)
                 progress = parse_progress(line) or {'text': line.strip()}
+                if rate_received_at is not None and progress.get('phase') == 'Downloading':
+                    progress['rate_received_at'] = rate_received_at
                 if 'text' in progress:
                     progress['text'] = gui_child_text(progress['text'])
                 events.publish('progress', progress)
@@ -2070,7 +2094,14 @@ class LauncherUI:
                     if self.game_completion_until is None:
                         if install_record:
                             self._game_progress_pct = max(self._game_progress_pct, value['install_pct'])
-                        self.progress = game_progress_phase(value) or self.progress
+                        phase = game_progress_phase(value)
+                        if phase:
+                            self.progress = phase
+                            self.progress_info = {'game_detail': game_progress_detail(value)}
+                            if value.get('phase') == 'Downloading':
+                                received = value.get('rate_received_at')
+                                self.progress_info['game_detail_until'] = (
+                                    time.monotonic() if received is None else received) + GAME_RATE_TIMEOUT
                     continue
                 if install_record or (isinstance(value, dict) and 'install_stage' in value):
                     continue
@@ -2326,6 +2357,9 @@ class LauncherUI:
             if right - left >= 12:
                 p.fill(left, 300, right - left, 12, ACCENT, 255, 6)
         done, total, speed = info.get('done'), info.get('total'), info.get('speed') or 0
+        if (game and info.get('game_detail') and pct != 100
+                and ('game_detail_until' not in info or time.monotonic() < info['game_detail_until'])):
+            p.text('body', info['game_detail'], x, 326, INK_DIM, max_width=bar_w)
         if not game and total:
             p.text('body', f'{fmt_bytes(done)} of {fmt_bytes(total)}', x, 326, INK)
             right = (fmt_bytes(speed) + '/s') if speed else ''
@@ -2538,7 +2572,7 @@ class LauncherUI:
             scene('main', 'main', State.READY, 'Silver Lantern is up to date.'),
             scene('hero-download', 'main', State.NOT_INSTALLED, 'Game data: 2026.11.16', folder=long),
             scene('progress', 'progress', State.DOWNLOADING, operation='download', _game_progress_pct=63,
-                  progress='Downloading game files'),
+                  progress='Downloading game files', progress_info={'game_detail': fmt_bytes(23218411) + '/s'}),
             scene('tool-update', 'progress', State.READY, operation='tool', progress_info={}, progress='Updating Silver Lantern…'),
             scene('settings', 'settings', State.READY, 'Silver Lantern is up to date.', focus=2, folder=long),
             scene('settings-back', 'settings', State.READY, 'Silver Lantern is up to date.', focus=7, folder=long),

@@ -55,6 +55,18 @@ class FriendlyTests(unittest.TestCase):
 
 
 class ProgressTests(unittest.TestCase):
+    def test_rollback_does_not_report_old_transfer_rate(self):
+        t = [0.0]
+        out = io.StringIO()
+        with mock.patch.dict(app.os.environ, {'SILVER_LANTERN_GUI_PROGRESS': '1'}), redirect_stdout(out):
+            p = app.Progress('Downloading', 10000000, tty=False, clock=lambda: t[0])
+            t[0] = 1
+            p.add(2000000)
+            t[0] = 16
+            p.add(-1000000, received=0)
+        self.assertIn('speed=2000000', out.getvalue())
+        self.assertTrue(out.getvalue().splitlines()[-1].endswith('done=1000000 total=10000000 speed=0'))
+
     def test_never_wider_than_terminal(self):
         t = [0.0]
         for width in (40, 80, 120):

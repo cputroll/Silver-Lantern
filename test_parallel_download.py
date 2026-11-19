@@ -11,23 +11,30 @@ class ParallelDownloadTests(unittest.TestCase):
     def test_interrupted_range_retries_once_without_double_counting(self):
         from unittest.mock import Mock, patch
         data = b'abcdefgh'
+        now = 0.0
         class Response:
             status_code = 206
             headers = {'content-range': 'bytes 0-7/8'}
             def __init__(self, fail): self.fail = fail
             def iter_content(self, size):
+                nonlocal now
                 yield data[:4]
                 if self.fail: raise TimeoutError('stalled')
+                now = 1.0
                 yield data[4:]
             def close(self): pass
         client = Mock()
         client.get.side_effect = [Response(True), Response(False)]
         with tempfile.TemporaryDirectory() as d, patch.object(h, 'say') as say:
-            progress = h.Progress('test', len(data), tty=False)
+            progress = h.Progress('test', len(data), tty=False, clock=lambda: now)
             dest = Path(d) / 'asset'
-            h.parallel_download(lambda: client, 'https://example.test/a', dest, 8, hashlib.sha256(data).hexdigest(), progress, 1, chunk_min=1)
+            retry_credit = []
+            h.parallel_download(lambda: client, 'https://example.test/a', dest, 8, hashlib.sha256(data).hexdigest(), progress, 1, chunk_min=1,
+                                on_retry=lambda: retry_credit.append(progress.done))
             self.assertEqual(dest.read_bytes(), data)
             self.assertEqual(progress.done, len(data))
+            self.assertEqual(retry_credit, [0])
+            self.assertEqual(progress.speed, 12)
             self.assertEqual(client.get.call_count, 2)
             say.assert_any_call('Connection stalled — retrying…')
 
