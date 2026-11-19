@@ -73,18 +73,22 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.6')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.7')
 
 
-def play_tip(folder):
+def play_tip_parts(folder):
     try:
         shortcut = game_settings.read_values(folder)['menu_shortcut']
         keys = {0: 'F1 or Insert', 1: 'Insert', 2: 'F1'}.get(shortcut)
     except OSError:
         keys = None
-    first = (f'While playing, press {keys} for settings or to quit.' if keys else
-             'While playing, open the game menu for settings or to quit.')
-    return first
+    if keys:
+        return 'While playing, press ', keys, ' for settings or to quit.'
+    return 'While playing, open the game menu for settings or to quit.', '', ''
+
+
+def play_tip(folder):
+    return ''.join(play_tip_parts(folder))
 
 
 class MenuCombo:
@@ -250,7 +254,20 @@ def create_renderer(s, window, screenshot=False):
 
 
 def tip_offset(t, snap=False):
-    return 0 if snap else round(3 * math.sin(t * math.tau / 2))
+    return 0 if snap else 1.25 * math.sin(t * math.tau / 5)
+
+
+def present_frame(s, renderer, flags):
+    s.SDL_RenderPresent(renderer)
+    if not (flags & s.SDL_RENDERER_ACCELERATED and flags & s.SDL_RENDERER_PRESENTVSYNC):
+        s.SDL_Delay(16)
+
+
+def draw_tip_line(p, parts, x, y):
+    for part, color in zip(parts, (INK_DIM, INK, INK_DIM)):
+        if part:
+            p.text('body', part, x, y, color, subpixel=True)
+            x += p.measure('body', part)[0]
 
 
 def cli_command(*args):
@@ -1531,7 +1548,7 @@ class Painter:
             lines = lines[:max_lines - 1] + [' '.join(lines[max_lines - 1:])]
         return [self.fit(role, line, max_width) for line in lines]
 
-    def text(self, role, value, x, y, color=INK, max_width=None, align='left', alpha=255, middle=False):
+    def text(self, role, value, x, y, color=INK, max_width=None, align='left', alpha=255, middle=False, subpixel=False):
         """Draw fitted text; returns the drawn width."""
         s = self.s
         value = str(value)
@@ -1540,7 +1557,7 @@ class Painter:
         value = self._sanitize(value, role)
         if not value:
             return 0
-        key = (role, value, color)
+        key = (role, value, color, subpixel)
         if key not in self.cache:
             if len(self.cache) > 400:
                 for texture, _, _ in self.cache.values():
@@ -1550,6 +1567,8 @@ class Painter:
             if not surface:
                 return 0
             texture = s.SDL_CreateTextureFromSurface(self.r, surface)
+            if subpixel and texture:
+                s.SDL_SetTextureScaleMode(texture, s.SDL_ScaleModeLinear)
             self.cache[key] = (texture, surface.contents.w, surface.contents.h)
             s.SDL_FreeSurface(surface)
         texture, pixel_w, pixel_h = self.cache[key]
@@ -1559,7 +1578,10 @@ class Painter:
         elif align == 'right':
             x -= w
         s.SDL_SetTextureAlphaMod(texture, alpha)
-        s.SDL_RenderCopy(self.r, texture, None, s.SDL_Rect(int(x), int(y), int(round(w)), int(round(h))))
+        if subpixel:
+            s.SDL_RenderCopyF(self.r, texture, None, s.SDL_FRect(x, y, w, h))
+        else:
+            s.SDL_RenderCopy(self.r, texture, None, s.SDL_Rect(int(x), int(y), int(round(w)), int(round(h))))
         return w
 
     # -- shapes
@@ -2285,13 +2307,22 @@ class LauncherUI:
             return SUCCESS
         return INK_FAINT
 
+    def tip_parts_at(self, now):
+        cached = getattr(self, '_tip_cache', None)
+        if cached is None or cached[0] != self.folder or now >= cached[1]:
+            cached = self._tip_cache = (self.folder, now + 1, play_tip_parts(self.folder))
+        return cached[2]
+
     def draw_hero(self, p, dt):
         p.scene()
         x = MARGIN
         if self.state in (State.READY, State.UPDATE_AVAILABLE):
-            tip_y = 60 + tip_offset(time.monotonic(), getattr(self, 'snap', False) or self.reduce_motion)
-            p.text('body', play_tip(self.folder), x, tip_y, INK_DIM, max_width=CANVAS[0] - 2 * MARGIN)
-            p.text('body', 'Hold Start + Back for 2 seconds to open the game menu (XInput controllers).', x, tip_y + 28, INK_DIM, max_width=CANVAS[0] - 2 * MARGIN)
+            now = time.monotonic()
+            static_tip = (getattr(self, 'snap', False) or self.reduce_motion
+                          or not getattr(self, 'tip_motion_supported', True))
+            tip_y = 60 + tip_offset(now, static_tip)
+            draw_tip_line(p, self.tip_parts_at(now), x, tip_y)
+            draw_tip_line(p, ('Hold ', 'Start + Back', ' for 2 seconds to open the game menu (XInput controllers).'), x, tip_y + 28)
         p.text('overline', 'THE LEGEND OF ZELDA', x + 2, 160, ACCENT)
         p.text('display', 'Ocarina of Time', x - 2, 176, INK, max_width=760)
         if self.state == State.PLAYING:
@@ -2620,6 +2651,10 @@ class LauncherUI:
         window = s.SDL_CreateWindow('Ocarina of Time'.encode('utf-8'), s.SDL_WINDOWPOS_CENTERED, s.SDL_WINDOWPOS_CENTERED, *size, s.SDL_WINDOW_RESIZABLE | s.SDL_WINDOW_ALLOW_HIGHDPI)
         renderer = create_renderer(s, window, screenshot=bool(screenshot))
         if not window or not renderer: raise RuntimeError('Could not create the launcher window')
+        renderer_info = s.SDL_RendererInfo()
+        flags = (renderer_info.flags
+                 if s.SDL_GetRendererInfo(renderer, ctypes.byref(renderer_info)) == 0 else 0)
+        self.tip_motion_supported = bool(flags & s.SDL_RENDERER_ACCELERATED)
         s.SDL_RenderSetLogicalSize(renderer, 1280, 720)
         s.SDL_SetRenderDrawColor(renderer, *SURFACE, 255)
         s.SDL_RenderClear(renderer)
@@ -2732,8 +2767,7 @@ class LauncherUI:
                     scene_name, setup = nxt
                     setup()
                     continue
-                s.SDL_RenderPresent(renderer)
-                s.SDL_Delay(16)
+                present_frame(s, renderer, flags)
         finally:
             if self.screen == 'progress' and self.operation != 'tool': terminate_worker(self.events)
             for pad in self.controllers.values(): s.SDL_GameControllerClose(pad)

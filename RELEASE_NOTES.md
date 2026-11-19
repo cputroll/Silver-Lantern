@@ -1,5 +1,4 @@
-# Silver Lantern 1.7.6
+# Silver Lantern 1.7.7
 
-- Start fresh downloads sooner by skipping resume checks in folders that do not exist yet. Existing folders still get the usual checks.
-- Show how many files have been checked during preparation and the current transfer speed during downloads.
-- Keep one progress bar for the whole installation, reaching 100% only when the game is ready.
+- Highlight the keyboard and controller shortcuts in the game-menu hint. The surrounding text stays muted.
+- Make the hint's motion gentler and improve frame pacing. The hint stays still when Windows animations are disabled or the launcher uses software rendering.

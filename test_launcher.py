@@ -46,9 +46,13 @@ class TipTests(unittest.TestCase):
                 self.assertFalse(any(len(c.args) >= 4 and c.args[1] < 140 for c in painter.fill.call_args_list))
                 self.assertFalse(any(len(c.args) >= 4 and c.args[1] < 140 for c in painter.ring.call_args_list))
                 self.assertLess(frame[3] + 20, 160)
-                combo = [c.args for c in painter.text.call_args_list if 'Hold Start + Back' in c.args[1]]
+                keys = [c.args for c in painter.text.call_args_list if c.args[1] == 'F1 or Insert']
+                self.assertEqual(len(keys), 1)
+                self.assertEqual(keys[0][4], launcher.INK)
+                self.assertEqual(keys[0][3], frame[3])
+                combo = [c.args for c in painter.text.call_args_list if c.args[1] == 'Start + Back']
                 self.assertEqual(len(combo), 1)
-                self.assertEqual(combo[0][4], launcher.INK_DIM)
+                self.assertEqual(combo[0][4], launcher.INK)
                 self.assertEqual(combo[0][3], frame[3] + 28)
                 self.assertLess(combo[0][3] + 20, 160)
                 self.assertTrue(all(y >= 330 for _, y, _, _, _ in ui.hits))
@@ -60,11 +64,47 @@ class TipTests(unittest.TestCase):
             with patch.object(LauncherUI, 'check_updates'):
                 self.assertTrue(LauncherUI().reduce_motion)
 
+    def test_software_renderer_holds_tip_still(self):
+        with patch.object(LauncherUI, 'check_updates'):
+            ui = LauncherUI()
+            ui.state = State.READY
+            ui.reduce_motion = False
+            ui.tip_motion_supported = False
+            ui.hits = []
+            painter = MagicMock()
+            painter.measure.return_value = (20, 20)
+            with patch.object(launcher.time, 'monotonic', return_value=1.25):
+                ui.draw_hero(painter, .016)
+            tip = next(call.args for call in painter.text.call_args_list if 'While playing,' in call.args[1])
+            self.assertEqual(tip[3], 60)
+
     def test_tip_bounce_is_bounded_and_can_snap(self):
         samples = [launcher.tip_offset(t) for t in (0, .25, .5, .75, 1)]
         self.assertGreater(max(samples), min(samples))
-        self.assertTrue(all(-4 <= x <= 4 for x in samples))
+        self.assertTrue(all(-1.25 <= x <= 1.25 for x in samples))
+        self.assertTrue(any(x != round(x) for x in samples))
         self.assertEqual(launcher.tip_offset(.25, snap=True), 0)
+
+    def test_vsync_does_not_also_sleep(self):
+        sdl = MagicMock()
+        sdl.SDL_RENDERER_SOFTWARE = 1
+        sdl.SDL_RENDERER_ACCELERATED = 2
+        sdl.SDL_RENDERER_PRESENTVSYNC = 4
+        launcher.present_frame(sdl, 'renderer', flags=6)
+        sdl.SDL_RenderPresent.assert_called_once_with('renderer')
+        sdl.SDL_Delay.assert_not_called()
+        launcher.present_frame(sdl, 'renderer', flags=5)
+        sdl.SDL_Delay.assert_called_once_with(16)
+
+    def test_tip_settings_are_not_read_every_frame(self):
+        with patch.object(LauncherUI, 'check_updates'), patch.object(launcher, 'play_tip_parts', return_value=('', 'F1', '')) as read:
+            ui = LauncherUI()
+            self.assertEqual(ui.tip_parts_at(0)[1], 'F1')
+            self.assertEqual(ui.tip_parts_at(.5)[1], 'F1')
+            read.assert_called_once_with(ui.folder)
+            read.return_value = ('', 'Insert', '')
+            self.assertEqual(ui.tip_parts_at(1)[1], 'Insert')
+            self.assertEqual(read.call_count, 2)
 
 
 class StateTests(unittest.TestCase):
