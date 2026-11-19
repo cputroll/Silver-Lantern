@@ -11,7 +11,7 @@ class InFolderLinksTests(unittest.TestCase):
             registry = MagicMock(); registry.REG_SZ = 1; registry.REG_DWORD = 4
             with patch.dict(launcher.os.environ, {'LOCALAPPDATA': str(root)}), patch.object(launcher.sys, 'frozen', True, create=True), patch.object(launcher.sys, 'executable', str(fallback)), patch.object(launcher, 'winreg', registry), patch.object(launcher, 'shortcut_path', return_value=root / 'desktop.lnk'), patch.object(launcher, 'start_menu_path', return_value=root / 'start.lnk'), patch.object(launcher, 'create_link') as link:
                 launcher.register_install(game)
-            self.assertEqual([c.args[1] for c in link.call_args_list], [fallback, fallback])
+            self.assertEqual([c.args[1] for c in link.call_args_list], [fallback.resolve(), fallback.resolve()])
 
     def test_links_and_registry_target_game_launcher(self):
         with tempfile.TemporaryDirectory() as d:

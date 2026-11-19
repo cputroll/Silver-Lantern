@@ -498,11 +498,11 @@ finally:
             ui = LauncherUI()
             ui.operation = 'tool'
             ui.screen = 'progress'
-            ui.progress = 'Updating Silver Lantern…'
+            ui.progress = 'Updating HeyListen…'
             ui.events.publish('progress', launcher.parse_progress('HLINSTALL done=50 total=100') or {})
             ui.drain()
             self.assertIsNone(ui.game_progress_pct)
-            self.assertEqual(ui.progress, 'Updating Silver Lantern…')
+            self.assertEqual(ui.progress, 'Updating HeyListen…')
 
     def test_cli_emits_gui_progress_when_requested(self):
         import io, importlib.util

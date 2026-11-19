@@ -73,7 +73,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.7.9')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.8.0')
 
 
 def play_tip_parts(folder):
@@ -918,7 +918,7 @@ def schedule_owned_cleanup():
 
 def confirm_uninstall(message, gui=False):
     if gui and os.name == 'nt':
-        return ctypes.windll.user32.MessageBoxW(None, message, 'Uninstall Silver Lantern', 0x24) == 6
+        return ctypes.windll.user32.MessageBoxW(None, message, 'Uninstall HeyListen', 0x24) == 6
     log_message(message)
     return input('Continue? [y/N] ').strip().lower() == 'y'
 
@@ -943,7 +943,7 @@ def uninstall(keep_saves=True, purge_saves=False, gui=False):
         except TimeoutError:
             message = 'An installation or update is in progress. Please wait for it to finish, then retry uninstall.'
             if gui and os.name == 'nt':
-                ctypes.windll.user32.MessageBoxW(None, message, 'Uninstall Silver Lantern', 0x30)
+                ctypes.windll.user32.MessageBoxW(None, message, 'Uninstall HeyListen', 0x30)
             log_message(message)
             return False
         try:
@@ -1957,7 +1957,7 @@ class LauncherUI:
         if self.operation == 'tool' and self.screen == 'progress':
             return
         self.operation = 'tool'
-        self.progress = 'Updating Silver Lantern…'
+        self.progress = 'Updating HeyListen…'
         self.set_screen('progress')
         args = [arg for arg in sys.argv[1:] if arg not in ('--self-update', '--no-self-update')]
         if not args:
@@ -2214,7 +2214,7 @@ class LauncherUI:
                 match = re.fullmatch(r'v(\d+)\.(\d+)\.(\d+)', value)
                 if match and tuple(map(int, match.groups())) > tuple(map(int, APP_VERSION.split('.'))):
                     self.tool_update_available = True
-                    self.status = 'Silver Lantern update available: ' + value
+                    self.status = 'HeyListen update available: ' + value
                     if self.operation in ('game', 'download', 'update'):
                         try:
                             STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -2227,14 +2227,14 @@ class LauncherUI:
                         self.start_tool_update()
                 elif match:
                     self.tool_update_available = False
-                    self.status = 'Silver Lantern is up to date.'
+                    self.status = 'HeyListen is up to date.'
             elif kind == 'tool_complete':
                 # The child must exit first; its helper then waits for this GUI to exit before swapping.
                 self.running = False
             elif kind == 'tool_current':
                 self.tool_update_available = False
                 self.operation = None
-                self.status = 'Silver Lantern is up to date.'
+                self.status = 'HeyListen is up to date.'
                 self.set_screen('main')
             elif kind == 'graphics':
                 message, values = value
@@ -2388,7 +2388,7 @@ class LauncherUI:
         p.circle(x + 5, 626 + p.height('caption') // 2, 4, self.status_tone())
         p.text('caption', self.status, x + 18, 626, INK_DIM, max_width=700)
         self.draw_hints(p, [('A / ENTER', 'Select'), ('START / F1', 'Settings')])
-        p.text('caption', 'Silver Lantern v' + APP_VERSION, CANVAS[0] - MARGIN, 674, INK_FAINT, align='right')
+        p.text('caption', 'HeyListen v' + APP_VERSION, CANVAS[0] - MARGIN, 674, INK_FAINT, align='right')
 
     def draw_progress(self, p, dt):
         p.scene(scrim=150)
@@ -2396,7 +2396,7 @@ class LauncherUI:
         info = self.progress_info or {}
         tool = self.operation == 'tool'
         game = self.operation in GAME_OPERATIONS
-        title = 'Updating Silver Lantern' if tool else ('Updating the game' if self.operation == 'update' else 'Installing Ocarina of Time')
+        title = 'Updating HeyListen' if tool else ('Updating the game' if self.operation == 'update' else 'Installing Ocarina of Time')
         pct = self.game_progress_pct if game else info.get('pct')
         if not game and pct is None and info.get('phase') != 'Verifying the download...':
             match = re.search(r'(\d{1,3})%', self.progress)
@@ -2635,14 +2635,14 @@ class LauncherUI:
         dlss_values = dict(defaults, **{k: int(v) for k, v in game_settings.PRESET_DLSS.items() if k in game_settings.BY_KEY})
         fsr_values = dict(defaults, **{k: int(v) for k, v in game_settings.PRESET_FSR.items() if k in game_settings.BY_KEY}, hdr=1, output_res=2)
         return [
-            scene('main', 'main', State.READY, 'Silver Lantern is up to date.'),
+            scene('main', 'main', State.READY, 'HeyListen is up to date.'),
             scene('hero-download', 'main', State.NOT_INSTALLED, 'Game data: 2026.11.16', folder=long),
             scene('progress', 'progress', State.DOWNLOADING, operation='download', _game_progress_pct=63,
                   progress='Downloading game files', progress_info={'game_detail': game_progress_detail(
                       {'phase': 'Downloading', 'speed': 23218411, 'done': 19300000000, 'total': 30871262365})}),
-            scene('tool-update', 'progress', State.READY, operation='tool', progress_info={}, progress='Updating Silver Lantern…'),
-            scene('settings', 'settings', State.READY, 'Silver Lantern is up to date.', focus=2, folder=long),
-            scene('settings-back', 'settings', State.READY, 'Silver Lantern is up to date.', focus=7, folder=long),
+            scene('tool-update', 'progress', State.READY, operation='tool', progress_info={}, progress='Updating HeyListen…'),
+            scene('settings', 'settings', State.READY, 'HeyListen is up to date.', focus=2, folder=long),
+            scene('settings-back', 'settings', State.READY, 'HeyListen is up to date.', focus=7, folder=long),
             scene('folder', 'folder', State.NOT_INSTALLED, '', focus=1, folder=long),
             scene('update', 'update', State.UPDATE_AVAILABLE),
             scene('error', 'error', State.ERROR, operation='download', last_error='Could not reach the update server. The connection stalled three times while downloading whole-07.bin from objects.githubusercontent.com; check your network and try again.'),

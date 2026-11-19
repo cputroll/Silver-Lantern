@@ -63,7 +63,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.7.9"
+APP_VERSION = "1.8.0"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -267,7 +267,7 @@ class Progress:
                 _end_step()
                 _write(f"  {self.label}: {pct}% ({human(self.done)} of {human(self.total)})\n")
         if self.total:
-            set_title(f"Silver Lantern - {self.done * 100 // self.total}% downloaded")
+            set_title(f"HeyListen - {self.done * 100 // self.total}% downloaded")
 
     def render(self, now: float | None = None) -> str:
         now = self.clock() if now is None else now
@@ -321,7 +321,7 @@ class Progress:
                     _write("\r\x1b[K")
                 else:
                     _write("\r" + " " * self.prev_len + "\r")
-            set_title("Silver Lantern")
+            set_title("HeyListen")
 
 
 def _log_location() -> Path:
@@ -409,7 +409,7 @@ def ui_init(plain: bool = False) -> None:
     _ANSI = bool(tty and not plain and not os.environ.get("NO_COLOR") and _enable_vt())
     if tty:
         _quickedit_off()
-    set_title("Silver Lantern")
+    set_title("HeyListen")
 
 
 def stdin_is_tty() -> bool:
@@ -3123,7 +3123,7 @@ def main() -> int:
     ui_init(a.plain)
     builder_flow = bool(a.builder_flow or a.builder_only or a.game_only or a.manifest or a.out or a.skip_hash)
     say()
-    say(f"Silver Lantern {APP_VERSION}", "bold")
+    say(f"HeyListen {APP_VERSION}", "bold")
     if builder_flow:
         say("Downloads the game data and the HeyListen Builder, then opens the Builder.")
     elif a.install_game is not None:

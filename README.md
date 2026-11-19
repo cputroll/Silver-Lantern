@@ -1,6 +1,6 @@
-# Silver Lantern
+# HeyListen
 
-Silver Lantern installs the game for you and keeps it up to date. The app installs itself into the game folder.
+HeyListen installs the game for you and keeps it up to date. The app installs itself into the game folder.
 
 ## What you need
 
