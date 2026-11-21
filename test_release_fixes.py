@@ -52,6 +52,19 @@ class PresetTests(unittest.TestCase):
                 ini = app.apply_preset(game)
             self.assertEqual(ini.read_text(encoding='ascii').splitlines(), [f'{k}={v}' for k, v in app.PRESET_FSR.items()])
 
+    def test_fresh_install_preset_seeds_only_unset_xbox_controls(self):
+        with tempfile.TemporaryDirectory() as td:
+            game = Path(td)
+            ini = game / 'hookshot_options.ini'
+            ini.write_text('layout_preset=3\npad_a=3\n', encoding='ascii')
+            with mock.patch.object(app, 'log'), \
+                 mock.patch.object(app, 'choose_preset', return_value=(app.PRESET_FSR, 'test')):
+                self.assertEqual(app.apply_preset_step(game, fresh_install=True), 'FSR 3.1 Performance')
+            lines = ini.read_text(encoding='ascii').splitlines()
+            self.assertIn('layout_preset=3', lines)
+            self.assertIn('button_prompts=2', lines)
+            self.assertIn('pad_a=3', lines)
+
     def _run_main(self, td, *extra):
         argv = ['app', '--no-self-update', '--no-launch', '--out', td, '--game-dir', str(Path(td) / 'g'), *extra]
         man = {'game': {'title': 't'}, 'tool': {}}

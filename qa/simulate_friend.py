@@ -23,7 +23,7 @@ def fixture_manifest(root: Path, *, multi_bundle=False) -> Path:
     source.mkdir()
     (source / 'bin').mkdir()
     (source / 'bin' / 'HeyListen.exe').write_bytes(b'silver-lantern-fixture\n')
-    (source / 'hookshot_version.txt').write_text('fixture\n', encoding='utf-8')
+    (source / 'hookshot_version.txt').write_bytes(b'fixture\n')
     if multi_bundle:
         for index in range(2):
             (source / f'payload-{index}.dat').write_bytes(bytes([index + 1]) * 48 * 1024)
@@ -175,6 +175,29 @@ def main():
         target = artifacts / 'cli-install'
         output = command(exe, '--install-game', target, '--game-manifest', manifest, '--no-self-update', '--no-preset', '--no-pause', '--plain')
         assert (target / 'bin' / 'HeyListen.exe').read_bytes() == b'silver-lantern-fixture\n'
+        return output
+    def long_staging_install():
+        if os.name != 'nt':
+            return 'Windows path-budget fixture not applicable'
+        target = artifacts / 'long-staging-install'
+        leaf = 'payload.bin'
+        fixed = len(str(target / leaf).encode('utf-16-le')) // 2 + 1
+        if not 1 <= 248 - fixed <= 255:
+            raise RuntimeError('Choose a shorter QA artifacts directory for the long-path fixture')
+        relative = 'p' * (248 - fixed) + '/' + leaf
+        installed = target / relative
+        assert len(str(installed).encode('utf-16-le')) == 496
+        candidate = json.loads(manifest.read_text(encoding='utf-8'))
+        # The segmented installer reads by verified bundle offset; reuse the
+        # existing fixture bytes at a deliberately long destination path.
+        data = next(item for item in candidate['files'] if item['path'] == 'hookshot_version.txt')
+        data['path'] = relative
+        fixture = artifacts / 'long-staging-manifest.json'
+        fixture.write_text(json.dumps(candidate), encoding='utf-8')
+        output = command(exe, '--install-game', target, '--game-manifest', fixture,
+                         '--no-self-update', '--no-preset', '--no-launch', '--no-pause', '--plain')
+        assert installed.read_bytes() == b'fixture\n'
+        assert list(installed.parent.iterdir()) == [installed]
         return output
     def relocated_game_update():
         folder = artifacts / 'relocated-game-update'
@@ -802,6 +825,7 @@ foreach ($row in (Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePa
 
     checks = [
         ('fixture-cli-install', install),
+        ('long-staging-install', long_staging_install),
         ('relocated-game-update-dry-run', relocated_game_update),
         ('stale-update-backup', update),
         ('zip-first-run-install', gui_first_run),

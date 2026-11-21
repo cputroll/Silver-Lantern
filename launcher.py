@@ -24,6 +24,10 @@ try:
 except ImportError:
     winreg = None
 import game_settings
+import game_state
+import hint_motion
+from quit_control import top_right
+from window_state import WindowController
 from update_resources import resolve_update_script
 try:
     import build_flags
@@ -73,7 +77,7 @@ def game_manifest_url():
     return MANIFEST_URL
 
 
-APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.8.0')
+APP_VERSION = getattr(sys.modules.get('__main__'), 'APP_VERSION', '1.8.1')
 
 
 def play_tip_parts(folder):
@@ -246,6 +250,34 @@ def enable_dpi_awareness():
         pass
 
 
+def _set_black_caption(hwnd):
+    try:
+        set_attribute = ctypes.windll.dwmapi.DwmSetWindowAttribute
+        set_attribute.argtypes = (ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32)
+        set_attribute.restype = ctypes.c_long
+        # Older Windows versions can honor dark mode even without custom colors.
+        dark = ctypes.c_uint32(1)
+        if set_attribute(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark)) != 0:
+            set_attribute(hwnd, 19, ctypes.byref(dark), ctypes.sizeof(dark))
+        for attribute, color in ((35, 0x000000), (36, 0xffffff)):
+            value = ctypes.c_uint32(color)
+            set_attribute(hwnd, attribute, ctypes.byref(value), ctypes.sizeof(value))
+    except (AttributeError, OSError):
+        pass  # Native system chrome remains usable if DWM is unavailable.
+
+
+def style_window_caption(window):
+    if os.name != 'nt' or not window:
+        return
+    from sdl2 import SDL_VERSION
+    from sdl2.syswm import SDL_GetWindowWMInfo, SDL_SysWMinfo, SDL_SYSWM_WINDOWS
+
+    info = SDL_SysWMinfo()
+    SDL_VERSION(info.version)
+    if SDL_GetWindowWMInfo(window, ctypes.byref(info)) and info.subsystem == SDL_SYSWM_WINDOWS:
+        _set_black_caption(info.info.win.window)
+
+
 def create_renderer(s, window, screenshot=False):
     if screenshot:
         return s.SDL_CreateRenderer(window, -1, s.SDL_RENDERER_SOFTWARE)
@@ -254,7 +286,7 @@ def create_renderer(s, window, screenshot=False):
 
 
 def tip_offset(t, snap=False):
-    return 0 if snap else 1.25 * math.sin(t * math.tau / 5)
+    return 0 if snap else hint_motion.glow(t, reduced_motion=False)[1]
 
 
 def present_frame(s, renderer, flags):
@@ -263,10 +295,13 @@ def present_frame(s, renderer, flags):
         s.SDL_Delay(16)
 
 
-def draw_tip_line(p, parts, x, y):
-    for part, color in zip(parts, (INK_DIM, INK, INK_DIM)):
+def draw_tip_line(p, parts, x, y, highlight_alpha=255):
+    for index, (part, color) in enumerate(zip(parts, (INK_DIM, INK, INK_DIM))):
         if part:
-            p.text('body', part, x, y, color, subpixel=True)
+            if index == 1:
+                p.text('body', part, x, y, color, alpha=highlight_alpha, subpixel=True)
+            else:
+                p.text('body', part, x, y, color, subpixel=True)
             x += p.measure('body', part)[0]
 
 
@@ -1758,7 +1793,20 @@ class LauncherUI:
         self.last_error = ''
         self.tool_update_available = False
         self.tool_handoff_started = False
+        self._own_game_process = None
+        self._own_game_exe = None
+        self._external_game_exe = None
+        self._external_game_folder = None
+        self._window_requests = []
+        self._window_control = WindowController()
+        self._watch = None
+        self._watch_folder = None
+        self._watch_exe = None
+        self._target_cache = None
+        self.quit_button = None
+        self.quit_hover = False
         self.gfx_values, self.gfx_picker, self.gfx_return, self.gfx_dlss_ok = {}, None, 0, True
+        self.gfx_options, self.gfx_schema = game_settings.OPTIONS, game_settings.BY_KEY
         if self.state == State.READY and getattr(sys, 'frozen', False) and '--screenshot' not in sys.argv:
             threading.Thread(target=self.shortcut_worker, daemon=True).start()
         if startup_error is None:
@@ -1835,19 +1883,20 @@ class LauncherUI:
             return ['Change game folder', 'Speed up installs (one Windows permission, instant)', 'Graphics', 'Desktop shortcut: ' + ('On' if self.config.get('shortcut', True) else 'Off'), 'Check for updates automatically: ' + ('On' if self.config.get('auto_tool_update', True) else 'Off'), 'Check for updates now', 'View log', 'Back']
         if self.screen == 'graphics':
             if self.gfx_picker is not None:
-                opt = game_settings.BY_KEY[self.gfx_picker]
-                return [opt.text(v) for v in game_settings.allowed(opt.key, self.gfx_dlss_ok)]
-            return list(self.GFX_ACTIONS) + [o.label for o in game_settings.OPTIONS]
+                opt = self.gfx_schema[self.gfx_picker]
+                return [game_settings.display_value(opt, v, self.gfx_values, self.gfx_schema)
+                        for v in self.gfx_allowed(opt.key)]
+            return list(self.GFX_ACTIONS) + [o.label for o in self.gfx_options]
         if self.screen == 'progress':
             return [] if self.operation == 'tool' or self.game_completion_until is not None else ['Cancel']
         if self.screen == 'error':
             return ['Retry', 'View log', 'Back']
         if self.screen == 'update':
             return ['Update now', 'Later']
+        if self.state == State.PLAYING:
+            return ['Quit game', 'Settings']
         if self.tool_update_available:
             return ['Update now', 'Settings']
-        if self.state == State.PLAYING:
-            return ['Settings']
         return (['Play', 'Update', 'Settings'] if self.state in (State.READY, State.UPDATE_AVAILABLE) else ['Download', 'Settings'])
 
     def set_screen(self, screen):
@@ -1867,6 +1916,8 @@ class LauncherUI:
             self.set_screen('error')
             return
         self.gfx_dlss_ok = game_settings.dlss_available(self.folder)
+        self.gfx_options = game_settings.options_for(self.folder)
+        self.gfx_schema = game_settings.BY_KEY_043 if self.gfx_options is game_settings.OPTIONS_043 else game_settings.BY_KEY
         self.gfx_picker = None
         self.set_screen('graphics')
         self.focus = len(self.GFX_ACTIONS)
@@ -1880,12 +1931,15 @@ class LauncherUI:
     def gfx_option(self, index=None):
         index = self.focus if index is None else index
         index -= len(self.GFX_ACTIONS)
-        return game_settings.OPTIONS[index] if 0 <= index < len(game_settings.OPTIONS) else None
+        return self.gfx_options[index] if 0 <= index < len(self.gfx_options) else None
+
+    def gfx_allowed(self, key):
+        return game_settings.allowed(key, self.gfx_dlss_ok, schema=self.gfx_schema, current=self.gfx_values)
 
     def gfx_write(self, key, value):
         try:
             self.gfx_values = game_settings.set_value(self.folder, key, value, self.gfx_values)
-            opt = game_settings.BY_KEY[key]
+            opt = self.gfx_schema[key]
             self.status = f'{opt.label}: {opt.text(self.gfx_values[key])}' + (' · applies after a restart' if opt.restart else ' · saved')
         except OSError as exc:
             self.status = f"Couldn't save: {exc}"
@@ -1893,7 +1947,8 @@ class LauncherUI:
     def gfx_step(self, direction):
         opt = self.gfx_option()
         if opt:
-            self.gfx_write(opt.key, game_settings.cycle(opt.key, self.gfx_values.get(opt.key, opt.default), direction, self.gfx_dlss_ok))
+            self.gfx_write(opt.key, game_settings.cycle(opt.key, self.gfx_values.get(opt.key, opt.default), direction,
+                                                       self.gfx_dlss_ok, schema=self.gfx_schema, current=self.gfx_values))
 
     def gfx_apply_recommended(self):
         def work():
@@ -1911,7 +1966,7 @@ class LauncherUI:
         if not buttons:
             return
         if self.gfx_picker is not None:
-            values = game_settings.allowed(self.gfx_picker, self.gfx_dlss_ok)
+            values = self.gfx_allowed(self.gfx_picker)
             self.gfx_write(self.gfx_picker, values[min(self.focus, len(values) - 1)])
             self.gfx_picker, self.focus = None, self.gfx_return
             return
@@ -1928,7 +1983,7 @@ class LauncherUI:
             self.gfx_apply_recommended()
         else:
             opt = self.gfx_option()
-            values = game_settings.allowed(opt.key, self.gfx_dlss_ok)
+            values = self.gfx_allowed(opt.key)
             if len(values) > self.GFX_PICKER_MIN:
                 current = self.gfx_values.get(opt.key, opt.default)
                 self.gfx_picker, self.gfx_return = opt.key, self.focus
@@ -1991,6 +2046,114 @@ class LauncherUI:
         self.set_screen('progress')
         threading.Thread(target=worker_command, args=(self.events, args), daemon=True).start()
 
+    _TARGET_CACHE_TTL = 5.0
+
+    def _request_window(self, state):
+        self._window_requests.append(state)
+
+    def _on_window_restored(self):
+        self._window_control.observe('normal')
+        if self.state == State.PLAYING:
+            if self.screen in ('main', 'settings', 'folder', 'error', 'update'):
+                self.quit_button = top_right(CANVAS[0], MARGIN)
+            if self.screen == 'main':
+                self.focus = 0
+
+    def _cached_play_target(self, now=None, force=False):
+        now = time.monotonic() if now is None else now
+        cached = self._target_cache
+        if not force and cached is not None and cached[0] == self.folder and now < cached[1]:
+            return cached[2]
+        target = game_play_target(self.folder)
+        self._target_cache = (self.folder, now + self._TARGET_CACHE_TTL, target)
+        return target
+
+    def _game_watch(self):
+        # While an external game is being tracked, keep polling its exact watch
+        # through exit even if the folder changes or target lookup fails.
+        if (self._own_game_process is None
+                and (self._external_game_exe is not None
+                     or (self.state == State.PLAYING and self._watch is not None and self._watch.running))):
+            if self._watch is not None:
+                return self._watch
+            watch_folder = self._external_game_folder or self.folder
+            self._watch_folder = watch_folder
+            self._watch_exe = self._external_game_exe
+            self._watch = game_state.GameWatch(watch_folder, started=self._external_game_started,
+                                               ended=self._external_game_ended, exe=self._external_game_exe,
+                                               initial_running=True)
+            return self._watch
+        target = self._cached_play_target()
+        if target is None:
+            self._watch = None
+            self._watch_folder = None
+            self._watch_exe = None
+            return None  # No game installed here; nothing to watch.
+        if self._watch is None or self._watch_folder != self.folder or self._watch_exe != str(target):
+            self._watch_folder = self.folder
+            self._watch_exe = str(target)
+            self._watch = game_state.GameWatch(self.folder, started=self._external_game_started,
+                                               ended=self._external_game_ended, exe=str(target))
+        return self._watch
+
+    def _watch_should_poll(self):
+        if self._own_game_process is not None:
+            return False
+        if self.operation in ('download', 'update', 'tool'):
+            return False
+        if self._external_game_exe is not None or self.state == State.PLAYING:
+            return True
+        return self.operation in (None, 'check') and self.state in (State.READY, State.UPDATE_AVAILABLE)
+
+    def _external_game_started(self, exe):
+        if self._own_game_process is None and self.operation in (None, 'check') and self.state in (State.READY, State.UPDATE_AVAILABLE):
+            if hasattr(self, 'close_controllers'):
+                try: self.close_controllers()
+                except Exception: pass
+            self._external_game_exe = exe
+            self._external_game_folder = self._watch_folder or self.folder
+            self.state = State.PLAYING
+            self.status = 'Playing...'
+            self.set_screen('main')
+            self.quit_button = top_right(CANVAS[0], MARGIN)
+            self._request_window('minimized')
+
+    def _external_game_ended(self):
+        if self._own_game_process is None and (self.state == State.PLAYING or self._external_game_exe is not None):
+            self._external_game_exe = None
+            self._external_game_folder = None
+            self.events.publish('game_done', None)
+
+    def _quit_game(self):
+        process = self._own_game_process
+        if process is not None:
+            if process.poll() is not None:
+                return
+            exe = self._own_game_exe
+            if not exe:
+                target = self._cached_play_target()
+                exe = str(target) if target is not None else None
+            if not exe:
+                return
+            try:
+                if game_state.close_game(self.folder, exe, pid=process.pid):
+                    self.status = 'Closing game…'
+            except Exception as exc:
+                log_message(f'Quit game: {exc}')
+            return
+        try:
+            folder = self._external_game_folder or self.folder
+            exe = self._external_game_exe
+            if not exe:
+                target = self._cached_play_target()
+                if target is None:
+                    return
+                exe = str(target)
+            if game_state.close_game(folder, exe):
+                self.status = 'Closing game…'
+        except Exception as exc:
+            log_message(f'Quit game: {exc}')
+
     def activate(self):
         if self.screen == 'graphics':
             return self.gfx_activate()
@@ -2006,12 +2169,17 @@ class LauncherUI:
                 if target is None:
                     raise OSError('The game could not be found. Install it again from the launcher.')
                 process = subprocess.Popen([str(target)], cwd=str(self.folder))
+                self._own_game_process = process
+                self._own_game_exe = str(target)
+                self._request_window('minimized')
                 try:
                     threading.Thread(target=watch_controller_combo, args=(process, self.folder), daemon=True).start()
                 except Exception as exc:
                     log_message(f'Controller menu watcher: {exc}')
                 self.state = State.PLAYING
                 self.status = 'Playing...'
+                self.focus = 0
+                self.quit_button = top_right(CANVAS[0], MARGIN)
                 def wait_game():
                     process.wait()
                     self.events.publish('game_done', None)
@@ -2021,6 +2189,7 @@ class LauncherUI:
                     self.open_controllers()
                 self.last_error = str(exc)
                 self.set_screen('error')
+        elif choice == 'Quit game': self._quit_game()
         elif choice == 'Download': self.start_operation()
         elif choice == 'Update': self.set_screen('update')
         elif choice == 'Update now':
@@ -2102,7 +2271,9 @@ class LauncherUI:
                         schedule_owned_cleanup()
                     self.running = False
                     return
-                self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
+                self._target_cache = None
+                if self.state != State.PLAYING:
+                    self.state = State.READY if installed(self.folder) else State.NOT_INSTALLED
                 self.set_screen('main')
             except OSError as exc:
                 self.last_error = str(exc)
@@ -2110,6 +2281,18 @@ class LauncherUI:
 
     def pointer(self, x, y, click=False):
         """Track hover separately; only a click moves keyboard/controller focus."""
+        self.quit_hover = False
+        button = getattr(self, 'quit_button', None)
+        if button is not None:
+            if button.visible(self.state == State.PLAYING) and button.hit(x, y):
+                self.hover = None
+                self.quit_hover = True
+                if click:
+                    self._quit_game()
+                return
+            if button.hit(x, y):
+                self.hover = None
+                return  # Inactive quit area still never selects rows behind it.
         self.hover = None
         for hx, hy, hw, hh, index in self.hits:
             if hx <= x < hx + hw and hy <= y < hy + hh and index < len(self.buttons()):
@@ -2177,6 +2360,7 @@ class LauncherUI:
                 self.state = State.READY
                 self.status = 'Ready to play.'
                 self.progress = 'Ready to play'
+                self._target_cache = None
                 self._game_progress_pct = 100
                 self.game_completion_until = time.monotonic() + .75
                 self.set_screen('progress')
@@ -2195,12 +2379,22 @@ class LauncherUI:
             elif kind == 'game_done':
                 self.state = State.READY
                 self.status = 'Ready to play.'
+                self._own_game_process = None
+                self._own_game_exe = None
+                self._external_game_exe = None
+                self._external_game_folder = None
+                self.quit_button = None
+                self.quit_hover = False
+                self._request_window('normal')
                 self.check_updates()
             elif kind == 'offline':
                 if self.operation not in ('download', 'update', 'tool'):
-                    self.last_error = str(value or 'Could not reach the update server')
-                    self.operation = 'check'
-                    self.set_screen('error')
+                    if self.state == State.PLAYING:
+                        self.status = str(value or 'Could not reach the update server')
+                    else:
+                        self.last_error = str(value or 'Could not reach the update server')
+                        self.operation = 'check'
+                        self.set_screen('error')
             elif kind == 'check':
                 revision, digest = value
                 self.latest_manifest_hash = digest
@@ -2355,9 +2549,11 @@ class LauncherUI:
             now = time.monotonic()
             static_tip = (getattr(self, 'snap', False) or self.reduce_motion
                           or not getattr(self, 'tip_motion_supported', True))
-            tip_y = 60 + tip_offset(now, static_tip)
-            draw_tip_line(p, self.tip_parts_at(now), x, tip_y)
-            draw_tip_line(p, ('Hold ', 'Start + Back', ' for 2 seconds to open the game menu (XInput controllers).'), x, tip_y + 28)
+            tip_alpha, tip_dy = hint_motion.glow(now, reduced_motion=static_tip)
+            tip_y = 60 + tip_dy
+            draw_tip_line(p, self.tip_parts_at(now), x, tip_y, highlight_alpha=tip_alpha)
+            draw_tip_line(p, ('Hold ', 'Start + Back', ' for 2 seconds to open the game menu (XInput controllers).'),
+                          x, tip_y + 28, highlight_alpha=tip_alpha)
         p.text('overline', 'THE LEGEND OF ZELDA', x + 2, 160, ACCENT)
         p.text('display', 'Ocarina of Time', x - 2, 176, INK, max_width=760)
         if self.state == State.PLAYING:
@@ -2383,7 +2579,10 @@ class LauncherUI:
             p.fill(x, top, w, h, SURFACE_HI, 200, 12)
             p.circle(x + 30, top + h // 2, 6, SUCCESS)
             p.text('cta', 'NOW PLAYING', x + 50, top + (h - p.height('cta')) // 2, INK, max_width=w - 70)
-            rows, first = buttons, 0
+            if buttons and buttons[0] == 'Quit game':
+                rows, first = buttons[1:], 1
+            else:
+                rows, first = buttons, 0
         self.draw_rows(p, rows, x, top + h + 22, w, 50, 10, dt, first)
         p.circle(x + 5, 626 + p.height('caption') // 2, 4, self.status_tone())
         p.text('caption', self.status, x + 18, 626, INK_DIM, max_width=700)
@@ -2404,7 +2603,9 @@ class LauncherUI:
         phase = (self.progress or 'Preparing') if game else (info.get('phase') or ('Preparing' if pct is None else 'Downloading'))
         p.text('overline', phase.upper(), x + 2, 124, ACCENT, max_width=bar_w)
         p.text('title', title, x, 142, INK, max_width=bar_w)
-        if pct is not None:
+        if game and pct == 0 and phase == 'Checking existing files':
+            p.text('body', 'Checking files already on this PC…', x, 250, INK_DIM, max_width=bar_w)
+        elif pct is not None:
             p.text('figure', f'{pct}%', x - 2, 204, INK)
         else:
             body = 'Please wait — this usually takes under a minute.' if tool else (self.progress or 'Getting things ready…')
@@ -2488,7 +2689,7 @@ class LauncherUI:
     def gfx_layout(self):
         """(kind, payload, top, height) for the scrolling list: group headings and option rows."""
         rows, y, group = [], 0, None
-        for i, o in enumerate(game_settings.OPTIONS):
+        for i, o in enumerate(self.gfx_options):
             if o.group != group:
                 group = o.group
                 y += 12 if rows else 0
@@ -2561,7 +2762,8 @@ class LauncherUI:
             right = x + w - 20
             if focused:
                 right -= p.text('body', '›', right, mid, ACCENT, align='right') + 10
-            vw = p.text('body', opt.text(value), right, mid, INK_FAINT if lock else (ACCENT if focused else INK), max_width=300, align='right')
+            label = game_settings.display_value(opt, value, values, self.gfx_schema)
+            vw = p.text('body', label, right, mid, INK_FAINT if lock else (ACCENT if focused else INK), max_width=300, align='right')
             right -= vw + 10
             if focused:
                 right -= p.text('body', '‹', right, mid, ACCENT, align='right') + 14
@@ -2579,8 +2781,10 @@ class LauncherUI:
             p.fill(x + w + 14, view_top, 4, view_h, (255, 255, 255), 25, 2)
             p.fill(x + w + 14, ty, 4, thumb, ACCENT, 200, 2)
         # Help for the focused row, then the status line.
-        opt = game_settings.BY_KEY[picker] if picker is not None else self.gfx_option()
+        opt = self.gfx_schema[picker] if picker is not None else self.gfx_option()
         help_text = opt.desc if opt else self.GFX_ACTION_HELP.get(self.GFX_ACTIONS[min(self.focus, len(self.GFX_ACTIONS) - 1)], '')
+        if opt and opt.key == 'frame_generation_by' and self.gfx_schema is game_settings.BY_KEY_043:
+            help_text = 'Use F1 or Insert in-game for NVIDIA DLSS FG; the game checks your GPU and driver.'
         p.text('caption', help_text, x, 598, INK_DIM, max_width=w)
         if self.status:
             p.circle(x + 5, 628 + p.height('caption') // 2, 4, self.status_tone())
@@ -2592,26 +2796,33 @@ class LauncherUI:
             self.draw_hints(p, [('A / ENTER', 'Change'), ('← / →', 'Adjust'), ('B / ESC', 'Back')])
 
     def draw_gfx_picker(self, p, dt):
-        opt = game_settings.BY_KEY[self.gfx_picker]
+        opt = self.gfx_schema[self.gfx_picker]
         labels = self.buttons()
+        visible = min(10, len(labels))
+        first = max(0, min(self.focus - visible // 2, len(labels) - visible))
         p.fill(0, 0, *CANVAS, SURFACE, 170)
         pw, rh, gap = 460, 40, 6
-        ph = 84 + len(labels) * (rh + gap)
+        ph = 84 + visible * (rh + gap)
         px, py = (CANVAS[0] - pw) // 2, max(40, (CANVAS[1] - ph) // 2 - 10)
         p.fill(px, py, pw, ph, SURFACE, 250, 16)
         p.ring(px, py, pw, ph, SURFACE_FOCUS, 255, 16, 2)
         p.text('overline', 'CHOOSE A VALUE', px + 24, py + 18, ACCENT)
         p.text('heading', opt.label, px + 24, py + 36, INK, max_width=pw - 48)
         top = py + 72
-        self.draw_rows(p, labels, px + 20, top, pw - 40, rh, gap, dt)
-        allowed = game_settings.allowed(opt.key, self.gfx_dlss_ok)
+        self.draw_rows(p, labels[first:first + visible], px + 20, top, pw - 40, rh, gap, dt, first=first)
+        allowed = self.gfx_allowed(opt.key)
         current = self.gfx_values.get(opt.key, opt.default)
-        if current in allowed:
-            i = allowed.index(current)
+        if current in allowed[first:first + visible]:
+            i = allowed.index(current) - first
             p.text('caption', 'Current', px + pw - 40, top + i * (rh + gap) + (rh - p.height('caption')) // 2, ACCENT, align='right')
 
     def render(self, p, dt):
         self.hits = []
+        if self.state == State.PLAYING and self.screen in ('main', 'settings', 'folder', 'error', 'update'):
+            self.quit_button = top_right(CANVAS[0], MARGIN)
+        else:
+            self.quit_button = None
+            self.quit_hover = False
         count = len(self.buttons())
         if count and self.focus >= count:
             self.focus = count - 1
@@ -2619,6 +2830,18 @@ class LauncherUI:
         elif self.screen == 'progress': self.draw_progress(p, dt)
         elif self.screen == 'graphics': self.draw_graphics(p, dt)
         else: self.draw_panel(p, dt)
+        if self.quit_button is not None:
+            left, top, width, height = self.quit_button.rect
+            focused = self.screen == 'main' and self.focus == 0 and self.buttons()[:1] == ['Quit game']
+            hovered = getattr(self, 'quit_hover', False)
+            p.fill(left, top, width, height, SURFACE_FOCUS if focused or hovered else SURFACE_HI,
+                   255 if focused else 230, 10)
+            if focused:
+                p.ring(left - FOCUS_GAP, top - FOCUS_GAP, width + 2 * FOCUS_GAP, height + 2 * FOCUS_GAP,
+                       ACCENT, 255, 10 + FOCUS_GAP, 2)
+            label = 'Quit game'
+            p.text('caption', label, left + (width - p.measure('caption', label)[0]) // 2,
+                   top + (height - p.height('caption')) // 2, INK)
 
     def screenshot_scenes(self):
         """Realistic fake states for the --screenshot design/regression loop."""
@@ -2634,8 +2857,13 @@ class LauncherUI:
         defaults = {o.key: o.default for o in game_settings.OPTIONS}
         dlss_values = dict(defaults, **{k: int(v) for k, v in game_settings.PRESET_DLSS.items() if k in game_settings.BY_KEY})
         fsr_values = dict(defaults, **{k: int(v) for k, v in game_settings.PRESET_FSR.items() if k in game_settings.BY_KEY}, hdr=1, output_res=2)
+        values_043 = {o.key: o.default for o in game_settings.OPTIONS_043}
+        values_043.update(dlss=1, frame_generation=2, hdr=2, hdr_tone_mapper=1)
+        focus_043 = len(self.GFX_ACTIONS) + next(i for i, o in enumerate(game_settings.OPTIONS_043)
+                                                if o.key == 'frame_generation_by')
         return [
             scene('main', 'main', State.READY, 'HeyListen is up to date.'),
+            scene('playing', 'main', State.PLAYING, 'Playing...'),
             scene('hero-download', 'main', State.NOT_INSTALLED, 'Game data: 2026.11.16', folder=long),
             scene('progress', 'progress', State.DOWNLOADING, operation='download', _game_progress_pct=63,
                   progress='Downloading game files', progress_info={'game_detail': game_progress_detail(
@@ -2654,6 +2882,11 @@ class LauncherUI:
                   gfx_values=dlss_values, gfx_picker=None, gfx_dlss_ok=True),
             scene('graphics-picker', 'graphics', State.READY, '', focus=1, gfx_values=dlss_values, gfx_picker='frame_generation',
                   gfx_return=len(self.GFX_ACTIONS) + 5, gfx_dlss_ok=True),
+            scene('graphics-v043', 'graphics', State.READY, '', focus=focus_043, gfx_values=values_043,
+                  gfx_options=game_settings.OPTIONS_043, gfx_schema=game_settings.BY_KEY_043, gfx_picker=None),
+            scene('graphics-v043-hdr-picker', 'graphics', State.READY, '', focus=123, gfx_values=values_043,
+                  gfx_options=game_settings.OPTIONS_043, gfx_schema=game_settings.BY_KEY_043,
+                  gfx_picker='psychov35_ui_brightness'),
         ]
 
     def run(self, screenshot=None):
@@ -2685,6 +2918,8 @@ class LauncherUI:
                 raise ValueError('Invalid screenshot size')
             size = tuple(map(int, match.groups()))
         window = s.SDL_CreateWindow('Ocarina of Time'.encode('utf-8'), s.SDL_WINDOWPOS_CENTERED, s.SDL_WINDOWPOS_CENTERED, *size, s.SDL_WINDOW_RESIZABLE | s.SDL_WINDOW_ALLOW_HIGHDPI)
+        if not screenshot:
+            style_window_caption(window)
         renderer = create_renderer(s, window, screenshot=bool(screenshot))
         if not window or not renderer: raise RuntimeError('Could not create the launcher window')
         renderer_info = s.SDL_RendererInfo()
@@ -2696,6 +2931,12 @@ class LauncherUI:
         s.SDL_RenderClear(renderer)
         s.SDL_RenderPresent(renderer)
         painter = Painter(s, ttf, renderer)
+        class SDLWindowControls:
+            def __init__(self, window): self.window = window
+            def minimize(self): s.SDL_MinimizeWindow(self.window)
+            def restore(self): s.SDL_RestoreWindow(self.window)
+            def raise_window(self): s.SDL_RaiseWindow(self.window)
+        window_controls = SDLWindowControls(window)
         if _test_gui_install_enabled() and not screenshot:
             log_message('Test GUI: SDL renderer initialized')
         def close_pads():
@@ -2736,6 +2977,15 @@ class LauncherUI:
             while self.running:
                 was_playing = self.state == State.PLAYING
                 self.drain()
+                if not screenshot and self._watch_should_poll():
+                    watch = self._game_watch()
+                    if watch is not None:
+                        try: watch.poll()
+                        except Exception as exc: log_message(f'Game watch: {exc}')
+                while self._window_requests:
+                    state_request = self._window_requests.pop(0)
+                    if not screenshot:
+                        self._window_control.apply(state_request, window_controls)
                 if test_install and (self.operation in GAME_OPERATIONS or self.state in (State.DOWNLOADING, State.UPDATING)):
                     test_progress = (self.state, self.game_progress_pct)
                     if test_progress != last_test_progress:
@@ -2753,6 +3003,11 @@ class LauncherUI:
                     typ = event.type
                     if typ == s.SDL_QUIT:
                         if not (self.screen == 'progress' and self.operation == 'tool'): self.running = False
+                    elif typ == s.SDL_WINDOWEVENT:
+                        if event.window.event == s.SDL_WINDOWEVENT_MINIMIZED:
+                            self._window_control.observe('minimized')
+                        elif event.window.event in (s.SDL_WINDOWEVENT_RESTORED, s.SDL_WINDOWEVENT_MAXIMIZED):
+                            self._on_window_restored()
                     elif typ == s.SDL_CONTROLLERDEVICEADDED: open_pads()
                     elif typ == s.SDL_CONTROLLERDEVICEREMOVED:
                         pad = self.controllers.pop(event.cdevice.which, None)

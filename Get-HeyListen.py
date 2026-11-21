@@ -63,7 +63,7 @@ except ImportError:
     sys.exit("Missing dependency. Run:  python -m pip install curl_cffi")
 
 HERE = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.8.1"
 MAX_UPDATE_BYTES = 150 * 1024 * 1024
 MANIFEST_LOCAL = HERE / "sources.json"
 MANIFEST_CACHE = HERE / "sources.cache.json"
@@ -1486,13 +1486,14 @@ def choose_preset(game_dir: Path) -> tuple[dict, str]:
     return PRESET_FSR, f"No RTX/DLSS build ({gpu}) -> FSR 3.1 Performance"
 
 
-def apply_preset(game_dir: Path) -> Path:
+def apply_preset(game_dir: Path, *, fresh_install: bool = False) -> Path:
     """Merge the auto-chosen preset into game_dir/hookshot_options.ini, keeping every line we do not own."""
     game_dir = Path(game_dir)
     preset, why = choose_preset(game_dir)
     log(why)
     # Atomic merge; drops the dead framegen/pace/reflex keys older presets wrote.
-    ini = game_settings.write_values(game_dir, preset)
+    ini = game_settings.write_values(
+        game_dir, game_settings.preset_for(game_dir, preset, fresh_install=fresh_install))
     label = "DLSS" if preset is PRESET_DLSS else "FSR 3.1"
     log(f"{label} preset written: {ini}")
     return ini
@@ -2226,6 +2227,25 @@ def _log_assembly_exception(exc):
         log(traceback.format_exc())
 
 
+def _game_staging_path(target: Path) -> Path:
+    staging = target.with_name(target.name + '.heylisten-new')
+    if os.name != 'nt':
+        return staging
+    # Extended paths bypass DOS normalization. Only use them for ordinary
+    # components so the spelling still names the same sibling on disk.
+    absolute = Path(os.path.abspath(staging))
+    text = str(absolute)
+    if len((text + '.json.tmp').encode('utf-16-le', 'surrogatepass')) < 520:
+        return staging
+    if text.startswith(('\\\\?\\', '\\\\.\\')) or not _ordinary_plan_path('/'.join(absolute.parts[1:])):
+        return staging
+    if text.startswith('\\\\'):
+        return Path('\\\\?\\UNC\\' + text[2:])
+    if len(absolute.anchor) == 3 and absolute.anchor[1:] == ':\\':
+        return Path('\\\\?\\' + text)
+    return staging
+
+
 def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_retry=False,
                        on_commit=None, on_assembly=None, on_fetch_schedule=None):
     """Download bundles in order while workers consume segments in file order."""
@@ -2250,7 +2270,7 @@ def assemble_segmented(pending, assets, cache, root, fetch, keep_assets, soft_re
         target = root.joinpath(*parts)
         direct = False  # Always stage so cancellation cannot truncate a final target.
         state = {'item': item, 'target': target,
-                 'temp': target if direct else target.with_name(target.name + '.heylisten-new'),
+                 'temp': target if direct else _game_staging_path(target),
                  'direct': direct, 'next': 0, 'started': False, 'complete': False,
                  'hasher': hashlib.sha256(), 'lock': threading.Lock()}
         if soft_retry and not direct:
@@ -2548,27 +2568,107 @@ class InstallWorkProgress:
                 self._emit()
 
 
-def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = False,
-                 manifest_path: Path | None = None, keep_assets: bool = False) -> None:
-    log('Checking installation plan', echo=True)
-    validate_bundle_order(man)
-    root = root.expanduser()
+def _plan_game_files_native(root: Path, files: list, running: set, workers: int = 8):
+    """Fast existing-file plan: exact inventory + identity-bound full SHA-256.
+
+    Returns (pending, kept) or None when the native path cannot be trusted; the
+    caller then runs the legacy planner, so a fallback never weakens verification.
+    """
+    import hashlib
+    try:
+        from install_scan_windows import PlainTree, read_inventory
+    except Exception:
+        return None
+    if os.name != 'nt':
+        return None
+    anchor = root.anchor
+    if len(anchor) != 3 or anchor[1:] != ':\\':
+        return None
+    started = time.monotonic()
+    last_report = [started]
+    try:
+        with PlainTree(root) as tree:
+            directory_ids = {}
+            inventory = read_inventory(tree, directory_ids=directory_ids)
+            skipped = set()
+            fetch = set()
+            for item in files:
+                parts = _game_path_parts(root, item['path'])
+                if parts[0].casefold() in ('.heylisten-get', '.heylisten-parts'):
+                    return None  # The native inventory deliberately does not inspect these trees.
+            running = {os.path.normcase(str(p)) for p in running}
+            running_names = {os.path.basename(p).casefold() for p in running}
+            to_hash = []
+            for count, item in enumerate(files, 1):
+                relative = item['path']
+                if not _ordinary_plan_path(relative):
+                    return None
+                if running and relative.rpartition('/')[2].casefold() in running_names:
+                    _, resolved = _checked_game_paths(root, relative)
+                    if os.path.normcase(str(resolved)) in running:
+                        log('launcher executable left in place; the launcher updates itself separately')
+                        skipped.add(relative)
+                        continue
+                entry = inventory.get(relative)
+                if entry is None or entry[0] != item['size']:
+                    fetch.add(relative)
+                    continue
+                to_hash.append(item)
+                if time.monotonic() - last_report[0] >= 5:
+                    log(f'Checking installation plan: {count}/{len(files)} files checked', echo=True)
+                    last_report[0] = time.monotonic()
+
+            def verify(item):
+                entry = inventory[item['path']]
+                with tree.open(item['path'], expected_identity=entry[1]) as stream:
+                    if os.fstat(stream.fileno()).st_size != item['size']:
+                        raise ValueError(f'File size changed: {item["path"]}')
+                    return hashlib.file_digest(stream, 'sha256').hexdigest() == item['sha256']
+
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for offset in range(0, len(to_hash), 256):
+                    check_parent_alive()
+                    window = to_hash[offset:offset + 256]
+                    for item, ok in zip(window, pool.map(verify, window)):
+                        if not ok:
+                            fetch.add(item['path'])
+                    done = min(offset + 256, len(to_hash))
+                    if time.monotonic() - last_report[0] >= 5:
+                        log(f'Checking installation plan: {len(files) - len(to_hash) + done}/{len(files)} files checked', echo=True)
+                        last_report[0] = time.monotonic()
+
+            final_directory_ids = {}
+            if read_inventory(tree, directory_ids=final_directory_ids) != inventory or final_directory_ids != directory_ids:
+                raise ValueError('Inventory changed during verification')
+            planned = []
+            kept = 0
+            for item in files:
+                if item['path'] in fetch:
+                    planned.append(item)
+                elif item['path'] not in skipped:
+                    kept += item['size']
+            return planned, kept
+    except Exception as exc:
+        log(f'Native file check unavailable ({exc}); using the full path check')
+        return None
+
+
+def plan_game_files(root: Path, files: list, workers: int = 32):
     pending = []
     kept = 0
-    inventory = destination_inventory(root)
     missing_plan_parents = {}
     running = {os.path.normcase(str(p.resolve())) for p in running_launcher_paths()}
     running.add(os.path.normcase(str(Path(sys.executable).resolve())))
-    last_report = time.monotonic()
-    for count, item in enumerate(man['files'], 1):
-        now = time.monotonic()
-        if now - last_report >= 5:
-            log(f"Checking installation plan: {count - 1}/{len(man['files'])} files checked", echo=True)
-            last_report = now
+    native = _plan_game_files_native(root, files, running, workers)
+    if native is not None:
+        return native
+    inventory = destination_inventory(root)
+
+    def check(item):
         relative = item['path']
         parts = _game_path_parts(root, relative)
         missing_parent = None
-        if len(parts) > 1 and relative not in inventory and _ordinary_plan_path(relative):
+        if not inventory and len(parts) > 1 and _ordinary_plan_path(relative):
             parent_key = relative.rpartition('/')[0]
             if parent_key not in missing_plan_parents:
                 missing_plan_parents[parent_key] = _missing_plan_parent(root, parts[:-1], relative)
@@ -2579,14 +2679,43 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
             resolved_target = missing_parent / parts[-1]
         if os.path.normcase(str(resolved_target)) in running:
             log('launcher executable left in place; the launcher updates itself separately')
-            continue
+            return 'launcher'
         if missing_parent is None and inventory.get(relative) == item['size']:
             if item['size'] >= 256 * 1024 * 1024:
                 log(f"Checking SHA-256: {item['path']} ({human(item['size'])})")
             if sha256(target, progress=item['size'] >= 256 * 1024 * 1024) == item['sha256']:
+                return 'keep'
+        return 'fetch'
+
+    last_report = time.monotonic()
+    def collect(items, results, offset):
+        nonlocal kept, last_report
+        for count, (item, result) in enumerate(zip(items, results), offset + 1):
+            if result == 'keep':
                 kept += item['size']
-                continue
-        pending.append(item)
+            elif result == 'fetch':
+                pending.append(item)
+            now = time.monotonic()
+            if now - last_report >= 5:
+                log(f'Checking installation plan: {count}/{len(files)} files checked', echo=True)
+                last_report = now
+
+    if inventory and workers > 1:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for offset in range(0, len(files), 256):
+                batch = files[offset:offset + 256]
+                collect(batch, pool.map(check, batch), offset)
+    else:
+        collect(files, map(check, files), 0)
+    return pending, kept
+
+
+def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = False,
+                 manifest_path: Path | None = None, keep_assets: bool = False) -> None:
+    log('Checking installation plan', echo=True)
+    validate_bundle_order(man)
+    root = root.expanduser()
+    pending, kept = plan_game_files(root, man['files'])
     cache = root / '.heylisten-parts'
     v2 = man['version'] == 2
     assets = {a['asset']: a for a in man['assets']} if v2 else {
@@ -2749,7 +2878,7 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
                     fetch(assets[name])
                 target = game_path(root, item['path'])
                 target.parent.mkdir(parents=True, exist_ok=True)
-                temp = target.with_name(target.name + '.heylisten-new')
+                temp = _game_staging_path(target)
                 try:
                     file_hash = hashlib.sha256()
                     check_parent_alive()
@@ -2819,23 +2948,27 @@ def install_game(s, man: dict, root: Path, dry_run: bool = False, prune: bool = 
 def graphics_command(folder: Path, sets: list[str]) -> int:
     """--graphics: apply each KEY=VALUE (by number or by its label), then print every option as JSON."""
     values = game_settings.read_values(folder)
+    schema = game_settings.BY_KEY_043 if game_settings.options_for(folder) is game_settings.OPTIONS_043 else game_settings.BY_KEY
     for item in sets:
         key, _, raw = item.partition('=')
-        opt = game_settings.BY_KEY.get(key.strip())
+        opt = schema.get(key.strip())
         if opt is None:
             print(f"unknown setting: {key}", file=sys.stderr)
             return 2
         raw = raw.strip()
-        labels = [] if opt.ranged else [c.casefold() for c in opt.choices]
+        allowed = game_settings.allowed(opt.key, game_settings.dlss_available(folder), schema=schema, current=values)
+        labels = {opt.text(v).casefold(): v for v in allowed} if not opt.ranged else {}
+        labels.update((game_settings.display_value(opt, v, values, schema).casefold(), v)
+                      for v in allowed if not opt.ranged)
         if raw.casefold() in labels:
-            value = labels.index(raw.casefold())
+            value = labels[raw.casefold()]
         else:
             try:
                 value = int(raw)
             except ValueError:
                 print(f"bad value for {key}: {raw}", file=sys.stderr)
                 return 2
-        if value not in game_settings.allowed(opt.key, game_settings.dlss_available(folder)):
+        if value not in allowed:
             print(f"{key}={raw} is not allowed (min {opt.low}, max {opt.high})", file=sys.stderr)
             return 2
         values = game_settings.set_value(folder, opt.key, value, values)
@@ -3220,12 +3353,13 @@ def _install_from_manifest_locked(s, a, folder: Path) -> None:
         cache_game_manifest(folder, game_manifest)
 
 
-def game_launcher(folder: Path) -> Path:
-    top = folder / 'HeyListen.exe'
-    return top if top.is_file() else folder / 'bin' / 'HeyListen.exe'
+def game_launcher(folder: Path) -> Path | None:
+    from launcher import game_play_target
+    return game_play_target(folder)
 
 
-def finish_lines(folder: Path, launched: bool, preset: str | None = None) -> list[str]:
+def finish_lines(folder: Path, launched: bool, preset: str | None = None,
+                 executable: Path | None = None) -> list[str]:
     """The numbered next-steps block shown after a successful install."""
     lines = ["-" * 70, "The game is installed." + (" It is starting now." if launched else ""), "",
              "Your game folder:", f"  {folder}", "", "Next steps:"]
@@ -3233,7 +3367,11 @@ def finish_lines(folder: Path, launched: bool, preset: str | None = None) -> lis
         lines.append("  1. Wait for the game window to open (the first start can take")
         lines.append("     a minute).")
     else:
-        lines.append("  1. Start the game: double-click HeyListen.exe in the folder above.")
+        target = executable if executable is not None else game_launcher(folder)
+        if target is not None:
+            lines.append(f"  1. Start the game: double-click {target.relative_to(folder).as_posix()} in the folder above.")
+        else:
+            lines.append("  1. Start the game from the HeyListen launcher.")
     lines.append("  2. For game updates later, run this tool again. It only downloads")
     lines.append("     what changed.")
     if preset:
@@ -3251,7 +3389,7 @@ def apply_preset_step(folder: Path, fresh_install: bool = False) -> str | None:
         return None
     step("Graphics settings")
     try:
-        ini = apply_preset(folder)
+        ini = apply_preset(folder, fresh_install=fresh_install)
         dlss = 'dlss=1' in ini.read_text(encoding='ascii', errors='replace').splitlines()
         label = "DLSS Performance" if dlss else "FSR 3.1 Performance"
         done(f"applied ({label})")
@@ -3270,18 +3408,18 @@ def run_default_flow(s, a) -> int:
     install_from_manifest(s, a, folder)
     if a.dry_run:
         return 0
-    if not (folder / 'bin' / 'HeyListen.exe').is_file():
+    exe = game_launcher(folder)
+    if exe is None:
         raise UserError("The game files were installed, but HeyListen.exe is missing.",
                         "Run this again. If it repeats, send the log file to the person who gave you this tool.")
     preset = None if a.no_preset else apply_preset_step(folder, fresh_install=fresh_install)
     launched = False
     if not a.no_launch:
-        exe = game_launcher(folder)
         log(f"launching {exe}")
-        subprocess.Popen([str(exe)], cwd=str(exe.parent))
+        subprocess.Popen([str(exe)], cwd=str(folder))
         launched = True
     say()
-    for line in finish_lines(folder, launched, preset):
+    for line in finish_lines(folder, launched, preset, exe):
         say(line)
     if a.update_on_launch:
         try:

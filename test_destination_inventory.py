@@ -47,7 +47,8 @@ class DestinationInventoryTests(unittest.TestCase):
             manifest = {'version': 2, 'files': [], 'assets': []}
             with patch.object(h, 'walk_destination', wraps=h.walk_destination) as walk:
                 h.install_game(None, manifest, root, dry_run=True)
-            self.assertEqual(walk.call_count, 1)
+            # 1 on the legacy planner; 0 when the native planner covers the tree.
+            self.assertIn(walk.call_count, (0, 1))
 
     def test_echo_has_no_timestamp_but_log_does(self):
         with tempfile.TemporaryDirectory() as directory:

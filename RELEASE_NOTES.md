@@ -1,4 +1,4 @@
-# HeyListen 1.8.0
+# HeyListen 1.8.1
 
 - Start from `Run HeyListen.exe` in the release ZIP.
 - Show HeyListen in launcher status messages, the version footer, and the uninstall dialog.

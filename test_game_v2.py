@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -23,6 +24,62 @@ def sample():
 
 
 class V2Tests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows path length regression')
+    def test_segmented_install_when_staging_suffix_exceeds_max_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leaf = 'example.bgyml'
+            parent = 'p' * (248 - len(str(root)) - len(leaf) - 2)
+            item = sample()
+            item['files'][0]['path'] = f'{parent}/{leaf}'
+            target = root / item['files'][0]['path']
+            self.assertEqual(len(str(target)), 248)
+            relative_root = Path(os.path.relpath(root, Path.cwd())) if root.drive == Path.cwd().drive else None
+            if relative_root is not None:
+                self.assertEqual(h._game_staging_path(relative_root / item['files'][0]['path']),
+                                 h._game_staging_path(target))
+            self.run_install(root, item)
+            self.assertEqual(target.read_bytes(), b'abcdef')
+            self.assertEqual(list(target.parent.iterdir()), [target])
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows path length regression')
+    def test_long_staging_checkpoint_resumes_second_segment_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leaf = 'example.bgyml'
+            relative = 'p' * (248 - len(str(root)) - len(leaf) - 2) + '/' + leaf
+            man = sample()
+            man['files'][0]['path'] = relative
+            man = self.validate(man)
+            assets = {entry['asset']: entry for entry in man['assets']}
+            target = root / relative
+            stage = h._game_staging_path(target)
+            checkpoint = Path(str(stage) + '.json')
+            cache = root / 'cache'
+            cache.mkdir()
+
+            def fetch_bad(asset):
+                name = asset['asset']
+                (cache / name).write_bytes(b'xxabc!' if name == 'bundle-0.tar' else b'?BADyy')
+
+            with self.assertRaises(h.SegmentMismatch):
+                h.assemble_segmented(man['files'], assets, cache, root, fetch_bad, False, soft_retry=True)
+            self.assertFalse(target.exists())
+            self.assertEqual(stage.read_bytes(), b'abc')
+            self.assertEqual(json.loads(checkpoint.read_bytes()), {'next_index': 1, 'bytes_written': 3})
+
+            fetched = []
+
+            def fetch_good(asset):
+                name = asset['asset']
+                fetched.append(name)
+                (cache / name).write_bytes(b'?defyy')
+
+            h.assemble_segmented(man['files'], assets, cache, root, fetch_good, False, soft_retry='resume')
+            self.assertEqual(fetched, ['bundle-1.tar'])
+            self.assertEqual(target.read_bytes(), b'abcdef')
+            self.assertEqual(list(target.parent.iterdir()), [target])
+
     def setUp(self):
         disk = patch.object(h.shutil, 'disk_usage', return_value=type('Usage', (), {'free': 100 * 1024 ** 3})())
         disk.start()

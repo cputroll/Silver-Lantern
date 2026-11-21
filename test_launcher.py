@@ -337,8 +337,7 @@ finally:
             launcher.worker_command(events, [])
         self.assertTrue(events.cancelled.is_set())
         if os.name == 'nt':
-            self.assertTrue(run.called)
-            self.assertIn('4242', ' '.join(str(part) for part in run.call_args.args[0]))
+            self.assertTrue(any('4242' in call.args[0] for call in run.call_args_list if call.args))
         kind, error = events.queue.get_nowait()
         self.assertEqual(kind, 'error')
         self.assertNotIn('progress parser broke', error)
@@ -417,6 +416,19 @@ finally:
             self.assertEqual(ui.progress_info['pct'], 63)
             self.assertEqual(ui.progress, 'Downloading: 63%')
 
+    def test_existing_file_scan_shows_count_without_zero_percent(self):
+        with patch.object(LauncherUI, 'check_updates'), patch.object(LauncherUI, 'buttons', return_value=[]):
+            ui = LauncherUI()
+            ui.operation = 'update'
+            ui.screen = 'progress'
+            ui.progress = 'Checking existing files'
+            ui.progress_info = {'game_detail': 'Checking 121,882 of 186,614 files'}
+            painter = MagicMock()
+            ui.draw_progress(painter, 0)
+        labels = [call.args[1] for call in painter.text.call_args_list]
+        self.assertIn('Checking 121,882 of 186,614 files', labels)
+        self.assertNotIn('0%', labels)
+
     def test_game_progress_only_uses_monotonic_install_events(self):
         with patch.object(LauncherUI, 'check_updates'), patch.object(LauncherUI, 'save'), patch.object(launcher, 'probe_writable'), patch.object(launcher.threading, 'Thread'):
             for update in (False, True):
@@ -448,7 +460,7 @@ finally:
                         with patch.object(ui, 'draw_rows'), patch.object(ui, 'draw_hints'):
                             ui.draw_progress(painter, .016)
                         figures = [c.args[1] for c in painter.text.call_args_list if c.args[0] == 'figure']
-                        self.assertEqual(figures, [f'{expected}%'])
+                        self.assertEqual(figures, [] if phase == 'CHECKING EXISTING FILES' else [f'{expected}%'])
                         self.assertEqual(painter.text.call_args_list[0].args[1], phase)
                         labels = [c.args[1] for c in painter.text.call_args_list]
                         self.assertFalse(any('raw/path' in label for label in labels))

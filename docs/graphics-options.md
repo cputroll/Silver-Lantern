@@ -4,6 +4,14 @@ Every option the game (HeyListen v0.4.0, `bin\hookshot_vk.dll`) reads from its s
 engine's own 64-row menu table (labels, ranges, steps, defaults and value texts) and its ini parser. Silver Lantern's
 launcher (Settings -> Graphics), `--graphics` and the presets all use one module for this: `game_settings.py`.
 
+## HeyListen v0.4.3 compatibility
+
+The launcher Graphics screen and `--graphics` use the v0.4.3 settings schema only when `hookshot_version.txt` identifies that exact version. Older and unknown versions keep the legacy schema. The v0.4.3 definitions come from the upstream `tools/gpu/vk/vk_menu.cpp`, `framegen_rows.h`, and `upscaler_rows.h`.
+
+- DLAA and FSR 4 Native AA are now Render resolution choices. The reader interprets older saved values the same way the engine does, without rewriting the file when you open Graphics.
+- Frame generation provider and multiplier are separate settings. Built-in offers Auto and fixed multipliers; AMD FSR 3.1 offers Off or 2×. To select NVIDIA DLSS Frame Generation, use F1 or Insert in-game: the engine checks GPU, driver, runtime, and upscaler support. The presence of a DLL alone does not establish support.
+- V-Sync, VRR, and HDR tone mapping are separate from frame pacing. PsychoV35 controls apply only with Native HDR and the PsychoV35 tone mapper selected.
+
 ## The file
 
 - Path: `<game folder>\hookshot_options.ini` (e.g. `C:\Users\<you>\Games\HeyListen\hookshot_options.ini`). Plain `key=value` lines.
@@ -100,8 +108,8 @@ launcher (Settings -> Graphics), `--graphics` and the presets all use one module
 | `invert_camera_y` | Invert camera Y | 0 Off, 1 On | Off | Off | Inverts up/down look on the right stick. |
 | `stick_dead_zone` | Stick dead zone | 0 Default (24%), 1 5%, 2 10%, 3 15%, 4 20%, 5 30% | Default (24%) | Default (24%) | How far a stick moves before the game sees it. |
 | `rumble_strength` | Rumble strength | 0-150 step 25 (Off .. 150%) | 100% | 100% | Percent of the game's rumble. |
-| `layout_preset` | Layout preset | 0 Nintendo (Def), 1 Xbox / PC, 2 Swap Face, 3 Custom | Nintendo (Def) | Nintendo (Def) | Which face button is which. |
-| `button_prompts` | Button prompts | 0 Auto, 1 Switch, 2 Xbox, 3 PlayStation 4, 4 PlayStation 5, 5 Steam Deck | Auto | Auto | The button icons the game shows. Applies after a restart. |
+| `layout_preset` | Layout preset | 0 Nintendo (Def), 1 Xbox / PC, 2 Swap Face, 3 Custom | Nintendo (Def) | Xbox / PC on fresh installs only | Which face button is which. HeyListen sets Xbox / PC on fresh installs when no layout is saved. |
+| `button_prompts` | Button prompts | 0 Auto, 1 Switch, 2 Xbox, 3 PlayStation 4, 4 PlayStation 5, 5 Steam Deck | Auto | Xbox on fresh installs only | HeyListen sets Xbox icons on fresh installs when no prompt style is saved. Applies after a restart. |
 
 ### Motion
 

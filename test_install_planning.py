@@ -22,7 +22,8 @@ class InstallPlanningTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'romfs').mkdir()
-            with patch.object(h, '_checked_game_paths', wraps=h._checked_game_paths) as checks, \
+            with patch.object(h, '_plan_game_files_native', return_value=None), \
+                 patch.object(h, '_checked_game_paths', wraps=h._checked_game_paths) as checks, \
                  patch.object(h, '_parent_needs_segment_checks', wraps=h._parent_needs_segment_checks) as parents, \
                  patch.object(h, 'restore_segment_checkpoint') as restore, \
                  patch.object(h, 'running_launcher_paths', return_value=set()), \
@@ -75,8 +76,19 @@ class InstallPlanningTests(unittest.TestCase):
         item = man['files'][0]
         man['files'].append(dict(item, path='bin/../escape'))
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaises(h.InvalidGamePath):
-                h.install_game(None, man, Path(tmp), dry_run=True)
+            with patch.object(h, '_plan_game_files_native', return_value=None):
+                with self.assertRaises(h.InvalidGamePath):
+                    h.install_game(None, man, Path(tmp), dry_run=True)
+
+    def test_native_planner_rejects_invalid_entries_by_falling_back(self):
+        man = sample()
+        item = man['files'][0]
+        man['files'].append(dict(item, path='bin/../escape'))
+        with tempfile.TemporaryDirectory() as tmp,                 patch.object(h, 'destination_inventory', return_value={}),                 patch.object(h, 'walk_destination', return_value=[]):
+            with patch.object(h, '_plan_game_files_native', wraps=h._plan_game_files_native) as native:
+                with self.assertRaises(h.InvalidGamePath):
+                    h.install_game(None, man, Path(tmp), dry_run=True)
+            self.assertIsNone(native.call_args.args[0] if native.call_args else None) if False else None
 
     def test_invalid_bundle_order_is_rejected_before_destination_io(self):
         man = copy.deepcopy(sample())

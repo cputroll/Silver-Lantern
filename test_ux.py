@@ -183,7 +183,7 @@ class DefaultFlowTests(unittest.TestCase):
                  mock.patch.object(app, 'session'), \
                  mock.patch.object(app, 'default_game_folder', return_value=str(folder)), \
                  mock.patch.object(app, 'check_self_update', side_effect=lambda *a: calls.append(('update',))), \
-                 mock.patch('game_channel.fetch_for_folder', side_effect=lambda *a, **k: calls.append(('manifest', app.GAME_MANIFEST_URL)) or {}), \
+                 mock.patch('game_channel.fetch_for_folder', side_effect=lambda *a, **k: calls.append(('manifest', app.GAME_MANIFEST_URL)) or {'files': [{'path': 'bin/HeyListen.exe'}]}), \
                  mock.patch.object(app, 'install_game', side_effect=install), \
                  mock.patch.object(app, 'detect_gpu_name', return_value=None), \
                  mock.patch.object(app, 'run_builder_flow', return_value=0) as builder, \
@@ -208,7 +208,7 @@ class DefaultFlowTests(unittest.TestCase):
         code, _, popen, _, _, out, _, _ = self.run_main('--no-launch')
         self.assertEqual(code, 0)
         popen.assert_not_called()
-        self.assertIn('double-click HeyListen.exe', out)
+        self.assertIn('double-click bin/HeyListen.exe', out)
 
     def test_fresh_install_applies_preset_to_shipped_ini(self):
         with tempfile.TemporaryDirectory() as td:
