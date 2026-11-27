@@ -13,3 +13,13 @@ git am "${patchdir:?set patchdir first}"/000[1-4]-*.patch
 - **0002:** Accept the legacy NGX SDK path and keep the release-specific version stamp out of source control.
 - **0003:** Require a two-second Start+Back hold to open the menu.
 - **0004:** Preserve Quit confirmation when the pointer leaves the button; add regression tests for pointer and focus behavior.
+
+## Launcher packer: game-channel revision 10
+
+Revision 9 shipped three files that Longshot rewrites during play. The next explicit install verification treated those changes as damage. Revision 10 is the first game-channel release packed without these files:
+
+- `cache/longshot_prepared.bin`
+- `cache/longshot_programs.bin`
+- `cache/longshot_programs.idx`
+
+[`launcher-port/`](launcher-port/) contains the complete fixed Longshot packer and its regression test, not another game patch. The root `pack-game.py` on this branch and on `main` lacks the port's earlier exclusions for Longshot launchers, settings, and backup files. The cache-only patch does not apply cleanly to that base. Use these files in the Longshot launcher port's `src` directory alongside its existing test helpers; run `python -m pytest test_mutable_game_caches.py` there.
