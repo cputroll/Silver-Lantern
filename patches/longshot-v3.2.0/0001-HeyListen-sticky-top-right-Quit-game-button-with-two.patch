@@ -1,0 +1,507 @@
+From 1f6a403095af0f6c8402e07e6e9c584ea28eb1b4 Mon Sep 17 00:00:00 2001
+From: GhostDMA <ghostdma1337@gmail.com>
+Date: Thu, 26 Nov 2026 18:53:38 -0800
+Subject: [PATCH 1/3] HeyListen: sticky top-right Quit game button with
+ two-step confirm
+
+---
+ gpu/vk/menu_quit.h             |  33 +++++++++
+ gpu/vk/vk_menu.cpp             | 127 +++++++++++++++++++++++++--------
+ gpu/vk/vk_menu_hit.h           |   1 +
+ tests/test_menu_quit.cpp       |  30 ++++++++
+ tests/test_menu_quit.py        |  87 ++++++++++++++++++++++
+ tests/test_menu_quit_queued.py |  17 +++++
+ 6 files changed, 264 insertions(+), 31 deletions(-)
+ create mode 100644 gpu/vk/menu_quit.h
+ create mode 100644 tests/test_menu_quit.cpp
+ create mode 100644 tests/test_menu_quit.py
+ create mode 100644 tests/test_menu_quit_queued.py
+
+diff --git a/gpu/vk/menu_quit.h b/gpu/vk/menu_quit.h
+new file mode 100644
+index 0000000..dab4da1
+--- /dev/null
++++ b/gpu/vk/menu_quit.h
+@@ -0,0 +1,33 @@
++#pragma once
++#include <algorithm>
++
++namespace mkwvk::menu_quit {
++struct Header { float left, right, tab_left, tab_scale; };
++// Reserve the button first. Shrink the whole tab strip (including its bumpers)
++// together only if it no longer fits to the left of the button.
++inline Header layout(float width, float s, float safe, float strip) {
++    const float right = width - safe, left = right - 132*s;
++    const float room = std::max(0.f, left - 8*s);
++    const float scale = std::min(1.f, room / strip);
++    const float start = std::min((width-strip*scale)/2, room-strip*scale);
++    return {left, right, std::max(0.f,start), scale};
++}
++struct Focus {
++    bool active = false;
++    bool navigate(bool up, bool down, bool first) {
++        if (active && (up || down)) { active = false; return true; }
++        if (first && up) { active = true; return true; }
++        return false;
++    }
++};
++struct Release {
++    bool locked = false;
++    bool accept(bool edge, bool held) {
++        const bool accepted = edge && !locked;
++        // Win32 can report a held key before the host dispatches its queued edge.
++        // Only a consumed activation should block the next one until release.
++        locked = held && (locked || accepted);
++        return accepted;
++    }
++};
++}
+diff --git a/gpu/vk/vk_menu.cpp b/gpu/vk/vk_menu.cpp
+index 78a74af..d79b57b 100644
+--- a/gpu/vk/vk_menu.cpp
++++ b/gpu/vk/vk_menu.cpp
+@@ -37,6 +37,7 @@
+ #include "vk_menu.h"
+ #include "../../host/hos_atomic_file.h"
+ #include "vk_menu_hit.h"
++#include "menu_quit.h"
+ #include "vk_fps.h"    // (the FPS counter's levels and numbers)
+ #include "vk_draw.h"   // (pipeline_cache_save: Restart now keeps what was built)
+ #include "vk_texture.h"   // (the FPS counter's Dev level: texture_count, texture_bytes, texture_stats)
+@@ -597,6 +598,13 @@ struct RowTable {
+ RowTable rows;
+ // ---- end of the rows as drawn ----
+ const Row* pending = nullptr;   // (Restart or Quit: shows Confirm until its second press)
++menu_quit::Focus quit_focus;
++menu_quit::Release quit_release;
++const Row* quit_action() {
++    for (const Row& r : rows)
++        if (r.setting && r.setting->key && !strcmp(r.setting->key, "quit")) return &r;
++    return nullptr;
++}
+ bool cheats_env = false;   // (HOS_OOT_CHEATS=1: on whatever the Debug tab says)
+ /// The debug tools: the Debug tab's row, or HOS_OOT_CHEATS=1
+ bool cheats_on() { return cheats_env || opts.debug_tools; }
+@@ -2392,7 +2400,7 @@ void row_value_cell(ui::Ctx& c, const Row& r, ImVec2 va, ImVec2 vb, bool selecte
+         // (#1633: a module's button with a text of its own, as Test microphone's: Start test, Stop test)
+         if (r.setting && r.setting->kind == menu::Kind::Action && r.setting->text)
+             choice_cell(c, va, vb, r.setting->text(0), selected, false, false);
+-        else if (pending == &r) choice_cell(c, va, vb, "Press again to confirm", selected, false, false);
++        else if (!quit_focus.active && pending == &r) choice_cell(c, va, vb, "Press again to confirm", selected, false, false);
+         else {
+             choice_cell(c, va, vb, "", selected, false, false);
+             ui::triangle(c, ImVec2(vb.x - 15 * s, mid), 10 * s, 1, selected ? ui::kGoldInk : ui::kInk);
+@@ -2505,7 +2513,11 @@ void draw_mods(ui::Ctx& c, float cx0, float cx1, float hx0, float hx1, bool narr
+     ui::Prompt prompt_list[5] = {{ui::kUpDown, "Choose"}, {ui::kLeftRight, "On / Off"}, {ui::kConfirm, "Move"}, {ui::kTabs, "Tabs"},
+                                  {ui::kBack, "Close"}};
+     int prompts_n = 5;
+-    if (mods_grab >= 0) prompt_list[0] = {ui::kUpDown, "Move"}, prompt_list[1] = {ui::kConfirm, "Put down"}, prompts_n = 2;
++    if (quit_focus.active) {
++        name = "Quit game", help = quit_action()->help, hint.clear();
++        prompt_list[1] = {ui::kConfirm, pending ? "Confirm" : "Quit"};
++        prompt_list[2] = prompt_list[3], prompt_list[3] = prompt_list[4], prompts_n = 4;
++    } else if (mods_grab >= 0) prompt_list[0] = {ui::kUpDown, "Move"}, prompt_list[1] = {ui::kConfirm, "Put down"}, prompts_n = 2;
+     else if (count && lines[mods_sel].kind == 'c') {
+         prompt_list[2] = prompt_list[3], prompt_list[3] = prompt_list[4], prompts_n = 4;
+         if (kind != MKWVK_CHEAT_DATA) prompt_list[1] = prompt_list[2], prompt_list[2] = prompt_list[3], prompts_n = 3;
+@@ -2545,7 +2557,7 @@ void draw_mods(ui::Ctx& c, float cx0, float cx1, float hx0, float hx1, bool narr
+             if (l.kind == 'h') c.d->AddLine(ImVec2(rx0 + tw + 16 * s, ty), ImVec2(rx1, ty), ui::alpha(ui::kEdge, 0.9f), std::max(1.0f, s));
+             continue;
+         }
+-        const bool selected = i == mods_sel;
++        const bool selected = !quit_focus.active && i == mods_sel;
+         name_cell(c, ImVec2(rx0, y), ImVec2(split, y + rh), n, selected);
+         const ImVec2 va(split, y), vb(rx1, y + rh);
+         if (l.kind == 'm' && mods_grab == l.index) choice_cell(c, va, vb, "Moving", selected, l.index > 0, true);
+@@ -2565,15 +2577,19 @@ void draw_options(ui::Ctx& c) {
+     float tw[TAB_COUNT], total = 0;
+     const float tab_px = 20 * s, tab_pad = 22 * s;   // (the tabs' ink and the room each side of it)
+     for (int i = 0; i < TAB_COUNT; i++) tw[i] = tab_shown(i) ? ui::size_of(c.f.heading, tab_px, tab_titles[i]).x + 2 * tab_pad : 0, total += tw[i];
+-    float x = (c.w - total) * 0.5f;
++    const auto header = menu_quit::layout(c.w, s, c.safe, total + 82*s);
++    const float ts = s * header.tab_scale;
++    for (float& w : tw) w *= header.tab_scale;
++    total *= header.tab_scale;
++    float x = header.tab_left + 41*ts;
+     const float ty = hh * 0.5f + s;
+     const char* const keys[2] = {c.pad ? "L" : "Q", c.pad ? "R" : "E"};
+     for (int i = 0; i < 2; i++) {
+-        const float cw = 23 * s, cx = i ? x + total + 18 * s : x - 18 * s - cw;
++        const float cw = 23 * ts, cx = i ? x + total + 18 * ts : x - 18 * ts - cw;
+         const bool hover = hover_tab == TAB_COUNT + i;
+         c.d->AddRectFilled(ImVec2(cx, ty - 11.5f * s), ImVec2(cx + cw, ty + 11.5f * s), hover ? ui::kKeyCapHi : ui::kKeyCap, 4 * s);
+-        ui::text_mid_centre(c, c.f.strong, 13 * s, cx + cw * 0.5f, ty, ui::kInk, keys[i]);
+-        hits.add(i ? cx - 10 * s : 0, 0, i ? c.w : cx + cw + 10 * s, hh, i ? menu_hit::kTabNext : menu_hit::kTabPrev, -1);
++        ui::text_mid_centre(c, c.f.strong, 13 * ts, cx + cw * 0.5f, ty, ui::kInk, keys[i]);
++        hits.add(i ? cx - 10 * ts : 0, 0, i ? header.left : cx + cw + 10 * ts, hh, i ? menu_hit::kTabNext : menu_hit::kTabPrev, -1);
+     }
+     for (int i = 0; i < TAB_COUNT; i++) {
+         // (the Motion page: under Controls; the FPS counter details: under Gameplay)
+@@ -2588,13 +2604,13 @@ void draw_options(ui::Ctx& c) {
+                 c.d->AddRectFilled(ImVec2(a.x + 6 * s, b.y - 3 * s), ImVec2(b.x - 6 * s, b.y), ui::kGoldHi, 1.5f * s);
+             }
+         }
+-        ui::text_mid(c, c.f.heading, tab_px, x + tab_pad, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
++        ui::text_mid(c, c.f.heading, tab_px * header.tab_scale, x + tab_pad * header.tab_scale, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
+         hits.add(x, 0, x + tw[i], hh, menu_hit::kTab, i);
+         x += tw[i];
+     }
+     {   // (the banner's left: the Longshot logo and its name, a little larger than the tabs' ink; at Small and Medium smaller
+         // until it fits, at Large at its size or not at all, as the version)
+-        const float room = (c.w - total) * 0.5f - 60 * s - c.safe, px = 24 * s;
++        const float room = header.tab_left - 10*s - c.safe, px = 24 * s;
+         float aspect = 1;
+         ImTextureData* logo = ui::logo(&aspect);
+         const auto width = [&](float p) {
+@@ -2617,7 +2633,7 @@ void draw_options(ui::Ctx& c) {
+         const std::string ver = version_text(LONGSHOT_VERSION);
+         const char* named = getenv("LONGSHOT_BUILD_NAME");
+         const std::string name = named ? named : "";
+-        const float room = (c.w - total) * 0.5f - 60 * s - c.safe, px = 15 * s, right = c.w - c.safe;
++        const float right = header.left - 8*s, room = right - (x + 41*ts) - 8*s, px = 15 * s;
+         const auto width = [&](float p) { return ui::size_of(c.f.body, p, ver.c_str()).x; };
+         // (still too long, as a source build's "v2.0.11-821-g7b81752-dirty": at Small and Medium smaller
+         // until it fits, on half-point steps, 10 points at the least; at Large, the size for a TV across the room, at its size
+@@ -2629,6 +2645,14 @@ void draw_options(ui::Ctx& c) {
+         if (fit > 0) ui::text_mid_right(c, c.f.body, fit, right, vy, ui::kBannerInk, ver.c_str());
+         if (name_fit > 0) ui::text_mid_right(c, c.f.body, name_fit, right, ty + 9 * s, ui::alpha(ui::kBannerInk, 0.8f), name.c_str());
+     }
++    const Row* quit = quit_action();
++    if (quit) {
++        const ImVec2 a(header.left, ty - 18*s), b(header.right, ty + 18*s);
++        c.d->AddRectFilled(a, b, quit_focus.active ? ui::kGold : ui::kTabInset, 3*s);
++        ui::text_mid_centre(c, c.f.strong, 18*s, (a.x+b.x)/2, ty, quit_focus.active ? ui::kGoldInk : ui::kInkBright,
++                            quit_focus.active && pending == quit ? "Confirm quit?" : "Quit game");
++        hits.add(a.x, a.y, b.x, b.y, menu_hit::kQuit, -1);
++    }
+     // the rows, in the column; the help beside it
+     float cx0, cx1, hx0, hx1;
+     bool narrow;
+@@ -2639,7 +2663,7 @@ void draw_options(ui::Ctx& c) {
+         return;
+     }
+     const int count = tab_row_count(cur_tab), sel = tab_selected[cur_tab];
+-    const Row& selr = rows[tab_row_to_global(cur_tab, sel)];
++    const Row& selr = quit_focus.active && quit ? *quit : rows[tab_row_to_global(cur_tab, sel)];
+     const bool mic_help = mic_help_row(selr);
+     const FieldRow* field = field_row(selr);   // (longshot: a text field: why Enter did not take it, while it is edited)
+     const char* hint = selr.value && selr.hint ? selr.hint(*selr.value, -1) : field && editing == field->field ? edit_why : nullptr;
+@@ -2699,7 +2723,7 @@ void draw_options(ui::Ctx& c) {
+     const float rh = 40 * s, pitch = 48 * s, top = hh + 24 * s, rx0 = cx0 + 44 * s, rx1 = cx1 - 44 * s, split = rx0 + (rx1 - rx0) * 0.55f;
+     if (cur_tab == TAB_DEBUG) {   // (the Debug tab: its own layout of the same rows)
+         marquee_max = 0;
+-        draw_debug_rows(c, cx0, cx1, top, bottom, sel);
++        draw_debug_rows(c, cx0, cx1, top, bottom, quit_focus.active ? -1 : sel);
+         ui::prompt_bar(c, prompt_list, prompts_n);
+         return;
+     }
+@@ -2718,7 +2742,7 @@ void draw_options(ui::Ctx& c) {
+             c.d->AddLine(ImVec2(rx0 + tw + 16 * s, ty), ImVec2(rx1, ty), ui::alpha(ui::kEdge, 0.9f), std::max(1.0f, s));
+             continue;
+         }
+-        const bool selected = i == sel;
++        const bool selected = !quit_focus.active && i == sel;
+         name_cell(c, ImVec2(rx0, y), ImVec2(split, y + rh), r.name, selected, restart_changed(r));
+         const ImVec2 va(split, y), vb(rx1, y + rh);
+         float t0 = 0, t1 = 0;
+@@ -4994,12 +5018,12 @@ void menu_tick() {
+             menu_refresh = true;
+         }
+     }
+-    enum { K_N = 18 };
++    enum { K_SPACE = 18, K_N };
+     static bool held[K_N];
+     static const int keys[K_N] = {VK_INSERT, VK_UP, VK_DOWN, VK_LEFT, VK_RIGHT, VK_ESCAPE, VK_F1,   // (F1: for keyboards without Insert)
+                                   VK_RETURN, VK_DELETE, VK_BACK,
+                                   'Q', 'E', VK_TAB,   // (the tabs: Q and E, Tab and Shift+Tab)
+-                                  VK_PRIOR, VK_NEXT, VK_HOME, VK_END, VK_F10};   // (the long lists: a page, the ends)
++                                  VK_PRIOR, VK_NEXT, VK_HOME, VK_END, VK_F10, VK_SPACE};
+     HWND fg = GetForegroundWindow();
+     DWORD pid = 0;
+     if (fg) GetWindowThreadProcessId(fg, &pid);
+@@ -5180,6 +5204,13 @@ void menu_tick() {
+         press[0] = press[6] = press[17] = false;
+     }
+     const bool home_debug = !comparing && press[15] && (!open_now.load() || (quick_debug && page == 0));
++    auto focus_quit = [&](bool on) {
++        if (quit_focus.active != on) quit_focus.active = on, pending = nullptr, changed = true;
++    };
++    if (!mine || press[0] || press[6] || press[17] || home_debug || page != 0) {
++        focus_quit(false);
++        if (pending) pending = nullptr, changed = true;
++    }
+     if ((press[17] || home_debug) && !editing && !listening && !debug_warning && page != 5) {
+         if (home_debug) press[15] = false;
+         if (open_now.load() && quick_debug && page == 0) press[5] = true;
+@@ -5484,6 +5515,8 @@ void menu_tick() {
+             if (ht != hover_tab) hover_tab = ht, changed = true;
+             int& sel = cur_tab == TAB_MODS ? mods_sel : tab_selected[cur_tab];   // (the Mods tab: its line, draw_mods)
+             const bool on_row = hit.part == menu_hit::kRow || hit.part == menu_hit::kSlider;
++            if (mine && drag_row < 0 && (moved || (ptr.pressed & HOS_MOUSE_LEFT)))
++                focus_quit(hit.part == menu_hit::kQuit && mods_grab < 0);
+             if (drag_row >= 0) {   // (a slider held: it follows the cursor's x until let go)
+                 Row& d = rows[tab_row_to_global(cur_tab, drag_row)];
+                 if (!(ptr.held & HOS_MOUSE_LEFT) || !d.value) {
+@@ -5501,7 +5534,8 @@ void menu_tick() {
+                 sel = hit.index, scrolled_to[cur_tab] = sel, changed = true;
+             }
+             if ((ptr.pressed & HOS_MOUSE_LEFT) && drag_row < 0) {
+-                if (hit.part == menu_hit::kTabPrev) tab_left = true;
++                if (hit.part == menu_hit::kQuit && quit_focus.active) press[7] = true;
++                else if (hit.part == menu_hit::kTabPrev) tab_left = true;
+                 else if (hit.part == menu_hit::kTabNext) tab_right = true;
+                 else if (hit.part == menu_hit::kTab && hit.index != cur_tab) cur_tab = hit.index, changed = true;
+                 else if (hit.part == menu_hit::kRow && cur_tab == TAB_MODS) {
+@@ -5535,11 +5569,15 @@ void menu_tick() {
+             tune_cancelled = true;
+         const bool tune_toggle = tune_release || pad(HOS_PAD_WEST);
+         if (tune_toggle && listening == 0) tune_mode = !tune_mode, changed = true;
+-        if (press[5] && cur_tab == TAB_MOTION) cur_tab = TAB_CONTROLS, press[5] = false, changed = true;   // (back)
+-        if (press[5] && cur_tab == TAB_FPS_DEV) cur_tab = TAB_GAMEPLAY, press[5] = false, changed = true;   // (back)
+-        if (press[5] && cur_tab == TAB_RECORDINGS) cur_tab = TAB_DEBUG, press[5] = false, changed = true;   // (back)
+-        if (press[5] && cur_tab == TAB_SPEAKER) cur_tab = TAB_AUDIO, press[5] = false, changed = true;   // (back)
+-        if (press[5] && cur_tab == TAB_SIM_TURF) cur_tab = TAB_GRAPHICS, press[5] = false, changed = true;   // (back)
++        if (quit_focus.active) {
++            press[7] |= press[K_SPACE];
++            held[7] |= held[K_SPACE];
++        }
++        if (tab_left || tab_right || tune_toggle) focus_quit(false);
++        if (press[5]) {
++            press[7] = false;
++            if (!pending) focus_quit(false);
++        }
+         if (press[5] && cur_tab == TAB_MODS && mods_grab >= 0) mods_grab = -1, press[5] = false, changed = true;   // (puts the mod down)
+         if (press[5] && pending) pending = nullptr, changed = true;   // (a Restart or Quit waiting for its second press: cancelled)
+         else if (press[5] && cur_tab == TAB_MOTION) cur_tab = TAB_CONTROLS, press[5] = false, changed = true;   // (back)
+@@ -5562,7 +5600,41 @@ void menu_tick() {
+         }
+         if (!tab_shown(cur_tab)) cur_tab = TAB_GRAPHICS;   // (the Mods tab, its mods gone: never, as the list is the start's)
+         if (cur_tab != TAB_MODS) mods_grab = -1;
+-        if (cur_tab == TAB_MODS) {   // (the Mods tab: its own lines, draw_mods)
++        const Row* quit = quit_action();
++        const bool full_menu = mine && open_now.load() && page == 0 && !quick_debug && (!tune_mode || cur_tab == TAB_MODS);
++        if (quit && full_menu && mods_grab < 0 && (press[1] || press[2])) {
++            int first = 0, last = -1;
++            int& sel = cur_tab == TAB_MODS ? mods_sel : tab_selected[cur_tab];
++            if (cur_tab == TAB_MODS) {
++                auto lines = mod_lines();
++                first = mods_step(lines, -1, 1), last = mods_step(lines, (int)lines.size(), -1);
++            } else if (cur_tab == TAB_DEBUG) {
++                first = debug_step(-1, 1), last = debug_step(first, -1);
++            } else {
++                last = tab_row_count(cur_tab) - 1;
++                while (first <= last && rows[tab_row_to_global(cur_tab, first)].heading) ++first;
++                while (last >= first && rows[tab_row_to_global(cur_tab, last)].heading) --last;
++            }
++            if (quit_focus.navigate(press[1], press[2], sel <= first || last < 0)) {
++                if (!quit_focus.active && first >= 0 && last >= 0) sel = press[1] ? last : first;
++                press[1] = press[2] = press[7] = false;
++                pending = nullptr, changed = true;
++            }
++        }
++        const bool quit_edge = quit_release.accept(press[7], held[7] || (raw >> pad_confirm & 1) || (ptr.held & HOS_MOUSE_LEFT));
++        auto confirm_action = [&](const Row& r) {
++            if (pending != &r) pending = &r;
++            else {
++                save();
++                pipeline_cache_save(true);
++                pending = nullptr;
++                if (r.setting->on_activate) r.setting->on_activate();
++            }
++            changed = true;
++        };
++        if (quit_focus.active && quit) {
++            if (full_menu && quit_edge && !press[5]) confirm_action(*quit);
++        } else if (cur_tab == TAB_MODS) {   // (the Mods tab: its own lines, draw_mods)
+             if (pending) pending = nullptr, changed = true;   // (a Restart or Quit waiting for its second press: not on this tab)
+             mods_tick(press, changed);
+         } else if (tab_row_count(cur_tab) == 0) {
+@@ -5594,15 +5666,7 @@ void menu_tick() {
+             if (pending && (pending != &r || !mine)) pending = nullptr, changed = true;
+             if (press[7] && confirm_selected) {
+                 if (mine && !press[5]) {
+-                    if (pending != &r) {
+-                        pending = &r, changed = true;
+-                    } else {   // (as Restart now: saved first, as the window's own close does not force the pipeline cache)
+-                        save();
+-                        pipeline_cache_save(true);
+-                        pending = nullptr;
+-                        if (r.setting->on_activate) r.setting->on_activate();   // (Restart's, Quit's: menu_restart_game, menu_quit_game)
+-                        changed = true;
+-                    }
++                    if (&r != quit || (open_now.load() && page == 0 && quit_edge)) confirm_action(r);
+                 }
+             } else if (r.cheat >= 0) cheat_press(r.cheat, press, changed);   // (a debug tool: on the Debug tab itself)
+             else if (press[7] && is_motion_row(r)) cur_tab = TAB_MOTION, tab_selected[TAB_MOTION] = 0, press[7] = false, changed = true;
+@@ -5639,6 +5703,7 @@ void menu_tick() {
+         static bool told = false;
+         const bool now_open = open_now.load();
+         if (!now_open) {
++            quit_focus.active = false;
+             tune_mode = false;
+             if (drag_row >= 0) save();   // (a slider let go off the window: kept now)
+             sim_turf_settings_flush();
+diff --git a/gpu/vk/vk_menu_hit.h b/gpu/vk/vk_menu_hit.h
+index 2d05b4d..055bb7a 100644
+--- a/gpu/vk/vk_menu_hit.h
++++ b/gpu/vk/vk_menu_hit.h
+@@ -11,6 +11,7 @@ enum Part {
+     kTabPrev,   // the tab strip's left end
+     kTab,       // a tab: index
+     kTabNext,   // its right end
++    kQuit,      // fixed header action, outside the right bumper's target
+     kRow,       // an option's row: index (the tab's own), side -1 the value's left half, 1 its right half, 0 the name
+     kSlider,    // a slider row's track: index, permille 0 to 1000 along it
+     kCtlOption, // the Controls page: one of its own rows above the grid (index), side -1 the value's left half, 1 its right
+diff --git a/tests/test_menu_quit.cpp b/tests/test_menu_quit.cpp
+new file mode 100644
+index 0000000..a7f40ee
+--- /dev/null
++++ b/tests/test_menu_quit.cpp
+@@ -0,0 +1,30 @@
++#include "../gpu/vk/menu_quit.h"
++#include "../gpu/vk/vk_menu_hit.h"
++#include <cassert>
++#include <initializer_list>
++
++int main() {
++    using namespace mkwvk;
++    for (float width : {480.f, 1280.f, 1920.f}) {
++        auto h = menu_quit::layout(width, 1.f, 16.f, 650.f);
++        assert(h.tab_left >= 0 && h.tab_left + 650.f*h.tab_scale <= h.left);
++        assert(h.left < h.right && h.right <= width && width-h.right == 16.f);
++        menu_hit::Map hits{};
++        hits.clear(0, 0, width, 720);
++        hits.add(h.left, 4, h.right, 50, menu_hit::kQuit, -1);
++        for (int scroll : {0, 12, 30}) {
++            hits.add(0, 80, width, 110, menu_hit::kRow, scroll);
++            assert(hits.at((h.left+h.right)/2, 25).part == menu_hit::kQuit);
++        }
++    }
++    menu_quit::Release gate;
++    assert(gate.accept(true, true)); // first keyboard, pad, or pointer edge
++    for (int i=0; i<100; ++i) assert(!gate.accept(true, true));
++    assert(!gate.accept(false, false));
++    assert(gate.accept(true, true)); // independent confirmation
++    menu_quit::Focus f;
++    assert(!f.active);
++    assert(!f.navigate(true,false,false)); // up from an ordinary row
++    assert(f.navigate(true,false,true) && f.active);
++    assert(f.navigate(false,true,true) && !f.active); // restore first setting
++}
+diff --git a/tests/test_menu_quit.py b/tests/test_menu_quit.py
+new file mode 100644
+index 0000000..1cc3ebe
+--- /dev/null
++++ b/tests/test_menu_quit.py
+@@ -0,0 +1,87 @@
++"""Exercise the sticky header and production input branch without a game window."""
++
++import os
++from pathlib import Path
++import subprocess
++
++ROOT = Path(__file__).resolve().parents[1]
++MENU = (ROOT / "gpu/vk/vk_menu.cpp").read_text(encoding="utf8")
++
++
++def compile_run(source, tmp):
++    exe = tmp / "test.exe"
++    subprocess.run(
++        [os.environ.get("CXX", "g++"), "-std=c++20", "-I" + str(ROOT / "gpu/vk"), str(source), "-o", str(exe)],
++        check=True,
++        timeout=60,
++    )
++    subprocess.run([str(exe)], check=True, timeout=10)
++
++
++def test_header(tmp_path):
++    draw = MENU.split("void draw_options(", 1)[1].split("void draw_tune_bar(", 1)[0]
++    assert draw.index("menu_hit::kQuit") < draw.index("if (cur_tab == TAB_MODS)")
++    assert "quit_focus.active ? ui::kGold : ui::kTabInset" in draw
++    assert "quit_focus.active ? ui::kGoldInk : ui::kInkBright" in draw
++    assert "hit.part == menu_hit::kQuit && quit_focus.active) press[7] = true" in MENU
++    compile_run(ROOT / "tests/test_menu_quit.cpp", tmp_path)
++
++
++def test_quit_navigation(tmp_path):
++    branch = MENU.split("if (tab_left || tab_right || tune_toggle)", 1)[1].split(
++        "} else if (cur_tab == TAB_MODS) {   // (the Mods tab: its own lines", 1
++    )[0]
++    enums = MENU.split("enum MenuTab {", 1)[1].split("};", 1)[0]
++    focus = MENU.split("auto focus_quit = ", 1)[1].split("    if (!mine", 1)[0]
++    fixture = (
++        r"""
++#include "menu_quit.h"
++#include <cassert>
++#include <atomic>
++using namespace mkwvk;
++enum MenuTab {ENUMS};
++int cur_tab, tab_selected[TAB_PAGE+1]{}, mods_sel=0, mods_grab=-1, page=0, ask_sel=0;
++int closes=0,saves=0,caches=0; bool mods=true,dirty=false,tune_mode=false,quick_debug=false;
++std::atomic<bool> open_now{true};
++bool tab_shown(int t){return t!=TAB_MODS || mods;} bool restart_ask(){return dirty;}
++struct Setting {void (*on_activate)();} action{[]{++closes;}};
++struct Row {bool heading;Setting* setting;}; Row rows[]={{true,nullptr},{false,nullptr},{false,&action}};
++const Row* pending=nullptr; const Row* quit_action(){return rows+2;}
++int tab_row_count(int){return 3;} int tab_row_to_global(int,int k){return k;}
++struct Lines{int size(){return 3;}}; Lines mod_lines(){return {};}
++int mods_step(Lines,int,int dir){return dir>0?1:2;} int debug_step(int sel,int){return sel<0?1:2;}
++void save(){++saves;} void pipeline_cache_save(bool force){assert(force);++caches;}
++menu_quit::Focus quit_focus; menu_quit::Release quit_release;
++void tick(int key=-1,int source=0,bool hold=false,bool tab_right=false){
++    bool press[18]{},held[18]{}, changed=false,mine=true,tab_left=false,tune_toggle=false;
++    if(key>=0)press[key]=true;
++    held[7]=hold&&source==0; int raw=hold&&source==1?4:0,pad_confirm=2,HOS_MOUSE_LEFT=1;
++    struct {int held;} ptr{hold&&source==2};
++    auto focus_quit = FOCUS
++    if (tab_left || tab_right || tune_toggle) BRANCH }
++}
++int main(){
++    for(int t=0;t<=TAB_MOTION;++t){
++        cur_tab=t; int& sel=t==TAB_MODS?mods_sel:tab_selected[t]; sel=1;
++        tick(1); assert(quit_focus.active); tick(1); assert(!quit_focus.active && sel==2);
++        sel=1; tick(1); tick(2); assert(!quit_focus.active && sel==1); tick(1);
++        for(int src=0;src<3;++src){
++            int before=closes; tick(7,src,true); assert(pending);
++            for(int i=0;i<60;++i) tick(7,(src+1)%3,true);
++            assert(closes==before); tick(); dirty=true; tick(5); dirty=false;
++            assert(!pending && quit_focus.active && cur_tab==t && page==0 && open_now);
++            tick(7,src,true); tick(); tick(7,(src+1)%3,true); tick();
++            assert(!pending && closes==before+1 && closes==saves && closes==caches);
++        }
++        tick(7); tick(-1,0,false,true); assert(!pending && !quit_focus.active);
++    }
++    mods=false;cur_tab=TAB_NFC;tick(-1,0,false,true);assert(cur_tab==TAB_DEBUG);
++    dirty=true;tick(5);assert(page==5 && !pending && open_now);
++}
++""".replace("ENUMS", enums)
++        .replace("FOCUS", focus)
++        .replace("BRANCH", branch)
++    )
++    source = tmp_path / "menu_quit_integration.cpp"
++    source.write_text(fixture, encoding="utf8")
++    compile_run(source, tmp_path)
+diff --git a/tests/test_menu_quit_queued.py b/tests/test_menu_quit_queued.py
+new file mode 100644
+index 0000000..5b407e9
+--- /dev/null
++++ b/tests/test_menu_quit_queued.py
+@@ -0,0 +1,17 @@
++from test_menu_quit import compile_run
++
++
++def test_host_delivers_press_after_physical_keydown(tmp_path):
++    source = tmp_path / "queued.cpp"
++    source.write_text("""#include "menu_quit.h"
++#include <cassert>
++int main() {
++    mkwvk::menu_quit::Release gate;
++    for (int press = 0; press < 2; ++press) {
++        assert(!gate.accept(false, true));
++        assert(gate.accept(true, true));
++        assert(!gate.accept(true, true));
++        assert(!gate.accept(false, false));
++    }
++}""")
++    compile_run(source, tmp_path)

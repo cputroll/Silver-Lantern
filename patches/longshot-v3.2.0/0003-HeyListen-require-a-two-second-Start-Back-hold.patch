@@ -1,0 +1,31 @@
+From 0448b4b2ee8ddf2ec2494f2b180ebd055b34ec22 Mon Sep 17 00:00:00 2001
+From: GhostDMA <ghostdma1337@gmail.com>
+Date: Thu, 26 Nov 2026 18:53:39 -0800
+Subject: [PATCH 3/3] HeyListen: require a two-second Start+Back hold
+
+---
+ gpu/vk/vk_menu.cpp | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/gpu/vk/vk_menu.cpp b/gpu/vk/vk_menu.cpp
+index d79b57b..460996d 100644
+--- a/gpu/vk/vk_menu.cpp
++++ b/gpu/vk/vk_menu.cpp
+@@ -5046,7 +5046,16 @@ void menu_tick() {
+     static uint32_t pad_held = 0;
+     const uint32_t raw = mine && host && host->pad_raw ? host->pad_raw() : 0, pad_press = raw & ~pad_held;
+     const uint32_t chord = 1u << HOS_PAD_BACK | 1u << HOS_PAD_START;
+-    const bool chord_now = (raw & chord) == chord && (pad_held & chord) != chord;
++    static int64_t chord_since = 0;
++    static bool chord_fired = false;
++    const bool chord_down = (raw & chord) == chord;
++    if (!chord_down) {
++        chord_fired = false;
++    } else if ((pad_held & chord) != chord) {
++        chord_since = prof_now();
++    }
++    const bool chord_now = chord_down && !chord_fired && prof_now() - chord_since >= 2000000000LL;
++    if (chord_now) chord_fired = true;
+     pad_held = raw;
+     if (pad_press) pad_last = true;   // (a controller: its buttons in the prompts)
+ #ifndef VK_RSHIFT

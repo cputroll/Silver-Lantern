@@ -1,0 +1,128 @@
+From df889a49b031f2e2ca30b76e60790c56f2eab3e1 Mon Sep 17 00:00:00 2001
+From: GhostDMA <ghostdma1337@gmail.com>
+Date: Fri, 27 Nov 2026 01:48:22 -0800
+Subject: [PATCH 4/4] HeyListen: preserve Quit confirmation on pointer exit
+
+---
+ gpu/vk/vk_menu.cpp              | 16 ++++++-
+ tests/test_menu_quit_pointer.py | 74 +++++++++++++++++++++++++++++++++
+ 2 files changed, 88 insertions(+), 2 deletions(-)
+ create mode 100644 tests/test_menu_quit_pointer.py
+
+diff --git a/gpu/vk/vk_menu.cpp b/gpu/vk/vk_menu.cpp
+index 460996d..d68bbcf 100644
+--- a/gpu/vk/vk_menu.cpp
++++ b/gpu/vk/vk_menu.cpp
+@@ -5524,8 +5524,15 @@ void menu_tick() {
+             if (ht != hover_tab) hover_tab = ht, changed = true;
+             int& sel = cur_tab == TAB_MODS ? mods_sel : tab_selected[cur_tab];   // (the Mods tab: its line, draw_mods)
+             const bool on_row = hit.part == menu_hit::kRow || hit.part == menu_hit::kSlider;
+-            if (mine && drag_row < 0 && (moved || (ptr.pressed & HOS_MOUSE_LEFT)))
+-                focus_quit(hit.part == menu_hit::kQuit && mods_grab < 0);
++            if (mine && drag_row < 0) {
++                if (quit_focus.active && pending && hit.part != menu_hit::kQuit) {
++                    // Hover alone leaves Confirm armed. Back below must still see pending to consume it.
++                    if (press[5] || (ptr.pressed & HOS_MOUSE_RIGHT)) quit_focus.active = false;
++                    else if (ptr.pressed & HOS_MOUSE_LEFT) focus_quit(false);
++                } else if (moved || (ptr.pressed & HOS_MOUSE_LEFT)) {
++                    focus_quit(hit.part == menu_hit::kQuit && mods_grab < 0);
++                }
++            }
+             if (drag_row >= 0) {   // (a slider held: it follows the cursor's x until let go)
+                 Row& d = rows[tab_row_to_global(cur_tab, drag_row)];
+                 if (!(ptr.held & HOS_MOUSE_LEFT) || !d.value) {
+@@ -5655,6 +5662,11 @@ void menu_tick() {
+             if (selected >= tab_count) selected = tab_count - 1;   // (a row gone since: the debug tools turned off, HDR turned off: row_shown)
+             auto heading_at = [&](int k) { return rows[tab_row_to_global(cur_tab, k)].heading; };   // (stepped over)
+             if (heading_at(selected)) selected = (selected + 1) % tab_count;
++            if ((press[0] || press[6] || esc_opens) && &rows[tab_row_to_global(cur_tab, selected)] == quit) {
++                for (int i = 0; i < tab_count; ++i) {
++                    if (!heading_at(i)) { selected = i; break; }
++                }
++            }
+             if (cur_tab == TAB_DEBUG && (press[1] || press[2])) {   // (the Debug tab: in its layout's order, debug_rows)
+                 selected = debug_step(selected, press[2] ? 1 : -1);
+                 changed = true;
+diff --git a/tests/test_menu_quit_pointer.py b/tests/test_menu_quit_pointer.py
+new file mode 100644
+index 0000000..197e8e9
+--- /dev/null
++++ b/tests/test_menu_quit_pointer.py
+@@ -0,0 +1,74 @@
++from test_menu_quit import MENU, compile_run
++
++
++def section(start, end, source=MENU):
++    return source[source.index(start) : source.index(end, source.index(start))]
++
++
++def test_pointer_cancel_and_reopen(tmp_path):
++    src = r"""
++#include <cassert>
++enum MenuTab { ENUMS };
++namespace menu_hit { constexpr int kQuit=1; }
++constexpr int HOS_MOUSE_LEFT=1,HOS_MOUSE_RIGHT=2;
++struct { bool active; } quit_focus;
++struct Row {bool heading;}; Row rows[]={{true},{true},{false},{false}};
++const Row *quit=rows+3,*pending=nullptr;
++int tab_row_to_global(int,int i){return i;}
++bool restart_ask(){return true;}
++bool open_now=true, tune_mode=false, quick_debug=false;
++int page=0,ask_sel=0,cur_tab=TAB_MOTION,mods_grab=-1;
++void pointer(int part,int pressed,bool moved,bool back){
++    bool press[18]{},changed=false,mine=true;
++    press[5]=back;
++    int drag_row=-1; struct {int part;} hit{part}; struct {int pressed;} ptr{pressed};
++    FOCUS
++    POINTER
++    @RIGHT@
++    BACK
++}
++int main(){
++    for (int cancel=0;cancel<3;++cancel) {
++        for (bool simultaneous : {false,true}) {
++            quit_focus.active=true; pending=quit;
++            if (!simultaneous) {
++                pointer(0,0,true,false);
++                assert(quit_focus.active && pending==quit);
++            }
++            pointer(0,cancel==1?HOS_MOUSE_RIGHT:cancel==2?HOS_MOUSE_LEFT:0,simultaneous,cancel==0);
++            assert(!quit_focus.active && !pending && open_now && !page && cur_tab==TAB_MOTION);
++        }
++    }
++    for(int key : {0,6,5}) {
++        bool press[18]{},esc_opens=key==5;
++        press[key]=!esc_opens;
++        int selected=3,tab_count=4;
++        REOPEN
++        assert(selected==2);
++    }
++}
++"""
++    src = "#include <initializer_list>\n" + src.replace("ENUMS", MENU.split("enum MenuTab {", 1)[1].split("};", 1)[0])
++    pointer = MENU.split(
++        "int& sel = cur_tab == TAB_MODS ? mods_sel : tab_selected[cur_tab];   // (the Mods tab: its line", 1
++    )[1]
++    src = src.replace("FOCUS", section("auto focus_quit =", "    if (!mine"))
++    src = src.replace("POINTER", section("if (mine && drag_row", "            if (drag_row >= 0)", pointer))
++    src = src.replace("@RIGHT@", section("if (ptr.pressed & HOS_MOUSE_RIGHT) press[5]", "\n", pointer))
++    src = src.replace(
++        "BACK",
++        section(
++            "if (press[5]) {", "        // (the tabs:", pointer.split("if (tab_left || tab_right || tune_toggle)", 1)[1]
++        ),
++    )
++    src = src.replace(
++        "REOPEN",
++        section(
++            "auto heading_at =",
++            "            if (cur_tab == TAB_DEBUG",
++            MENU.split("const int tab_count = tab_row_count(cur_tab);")[-1],
++        ),
++    )
++    source = tmp_path / "pointer.cpp"
++    source.write_text(src, encoding="utf8")
++    compile_run(source, tmp_path)
+-- 
+2.53.0.windows.3
+

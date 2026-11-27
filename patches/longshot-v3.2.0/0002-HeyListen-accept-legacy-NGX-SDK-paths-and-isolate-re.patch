@@ -1,0 +1,74 @@
+From 3b80fe6dd826a3c6a936dacaf19e321f54df3cb8 Mon Sep 17 00:00:00 2001
+From: GhostDMA <ghostdma1337@gmail.com>
+Date: Thu, 26 Nov 2026 18:53:38 -0800
+Subject: [PATCH 2/3] HeyListen: accept legacy NGX SDK paths and isolate
+ release stamps
+
+Use the upstream longshot_version.txt writer. Supply the matching upstream release tag in local version.txt; do not replay a pinned v3.2.0 stamp.
+---
+ .gitignore       |  2 ++
+ nx2/build.py     |  2 +-
+ nx2/make_game.py | 10 +++++++---
+ 3 files changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/.gitignore b/.gitignore
+index b1fbfea..ca566d0 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -21,6 +21,8 @@ gamefile/
+ 
+ # ---- build output and caches ----
+ build/
++# Release-specific input to make_game.py's longshot_version.txt writer.
++/version.txt
+ /third_party_objects/
+ __pycache__/
+ *.pyc
+diff --git a/nx2/build.py b/nx2/build.py
+index e9af355..b7dee92 100644
+--- a/nx2/build.py
++++ b/nx2/build.py
+@@ -583,7 +583,7 @@ def ngx_sdk(sdk, linux):
+ 
+ # LONGSHOT_NGX_SDK=<folder>: the Vulkan back end with NVIDIA DLSS Super Resolution, from NVIDIA's NGX SDK fetched into that
+ # folder by scripts/fetch.py dlss (its include/ and this platform's lib/; never committed, NVIDIA's license). Off without it.
+-NGX_SDK = ngx_sdk(os.environ.get("LONGSHOT_NGX_SDK", ""), LINUX)
++NGX_SDK = ngx_sdk(os.environ.get("LONGSHOT_NGX_SDK") or os.environ.get("HOOKSHOT_NGX_SDK", ""), LINUX)
+ # (llvm-mingw: what NVIDIA's library asks of Microsoft's runtime, linked in with it. Not compiled otherwise)
+ NGX_MSVC_RT = "vk_ngx_msvc_rt.cpp"
+ # LONGSHOT_FSR=1: the Vulkan back end with AMD FSR 4 (gpu/vk/vk_fsr4.cpp), from AMD's FSR API headers (third_party/fidelityfx,
+diff --git a/nx2/make_game.py b/nx2/make_game.py
+index 8930a8b..2589b6e 100644
+--- a/nx2/make_game.py
++++ b/nx2/make_game.py
+@@ -2664,7 +2664,11 @@ def ngx_platform():
+ 
+ def ngx_folder():
+     """Where --fetch-ngx-sdk keeps NVIDIA's DLSS SDK between builds: LONGSHOT_NGX_SDK, else work/ngx-sdk here"""
+-    return os.environ.get("LONGSHOT_NGX_SDK") or os.path.join(ROOT, "work", "ngx-sdk")
++    return ngx_sdk_env() or os.path.join(ROOT, "work", "ngx-sdk")
++
++
++def ngx_sdk_env():
++    return os.environ.get("LONGSHOT_NGX_SDK") or os.environ.get("HOOKSHOT_NGX_SDK", "")
+ 
+ 
+ def fetch_ngx_sdk(a):
+@@ -2688,7 +2692,7 @@ def fetch_ngx_sdk(a):
+ 
+ def ngx_built():
+     """This build has NVIDIA DLSS: LONGSHOT_NGX_SDK holds this platform's library (what nx2/build.py takes)"""
+-    sdk = os.environ.get("LONGSHOT_NGX_SDK", "")
++    sdk = ngx_sdk_env()
+     return bool(sdk) and os.path.isfile(ngx_script().library(sdk, ngx_platform()))
+ 
+ 
+@@ -2793,7 +2797,7 @@ def place_ngx_runtime(out):
+     runtime placed, or None"""
+     ngx = ngx_script()
+     platform = ngx_platform()
+-    sdk = os.environ.get("LONGSHOT_NGX_SDK", "")
++    sdk = ngx_sdk_env()
+     if not sdk or not (os.path.isfile(ngx.library(sdk, platform)) and os.path.isfile(ngx.runtime(sdk, platform))):
+         # (a folder built with DLSS before and rebuilt without it loses NVIDIA's runtimes too)
+         for kind in ngx.RUNTIMES:
