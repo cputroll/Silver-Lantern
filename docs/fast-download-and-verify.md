@@ -53,7 +53,7 @@ release URL.
 - A single monotonic progress bar tracks all phases; 100% is reserved for
   "Ready to play".
 
-## Fast verification (the 84-second check)
+## Fast verification
 
 `install_scan_windows.py` + `plan_game_files` (`Get-HeyListen.py:2612-2665`
 and the native module):
@@ -63,10 +63,21 @@ and the native module):
 2. **Identity-bound hashing.** For matching-size files, the native planner
    hashes in **256-file batches** with a worker pool; file identity is bound
    (path + size + recorded manifest identity), so untouched files are skipped
-   without hashing.
+   without hashing. From launcher v1.9.1, the explicit install and update
+   check holds each verified file against writes, renames and deletion from
+   the moment it is hashed until the second inventory finishes. If another
+   process has the file open for writing, the check cannot take that hold
+   and runs the full fallback instead.
 3. **Fail-closed fallback.** A second inventory detects changes the fast pass
    could have missed; any uncertainty falls back to the legacy per-file
-   verifier — never a hash skip.
+   verifier. From v1.9.1, this walk excludes only the launcher's active log
+   in the install root. It identifies the root by directory identity, not
+   path text. If the manifest lists the log path, the full fallback still
+   runs. Full SHA-256 verification is unchanged.
+
+On a 30 GB install, the published v1.9.1 completed the check in **55–58 s**
+without fallback. On v1.9.0, growth of the launcher's own log changed the
+second inventory on every check; the same check took **575 s** with fallback.
 
 ## Operations notes
 
