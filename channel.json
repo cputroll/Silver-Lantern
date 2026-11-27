@@ -1,12 +1,1 @@
-{
-  "version": 1,
-  "revision": 8,
-  "manifest": "game-manifest-8.json",
-  "sha256": "6a7530a1c1d1f3fafdeac39ff6da0d786991d16e7d3e5a1a14c4e94b0e169be4",
-  "previous": {
-    "version": 1,
-    "revision": 7,
-    "manifest": "game-manifest-7.json",
-    "sha256": "e73d83b26f011737f77fc762ee571e0c78083f0a9b91d9fe9a84bd2836f710d9"
-  }
-}
+{"version":1,"revision":9,"manifest":"game-manifest-9.json","sha256":"b238bacfb1f51f40f8b073b57695ee4bcb11b9ad6dd9e702d62eaf1634d22fb9","previous":{"version":1,"revision":8,"manifest":"game-manifest-8.json","sha256":"6a7530a1c1d1f3fafdeac39ff6da0d786991d16e7d3e5a1a14c4e94b0e169be4"}}
