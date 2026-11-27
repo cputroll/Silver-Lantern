@@ -9,4 +9,4 @@ git apply --check quit-fixes.patch
 git apply quit-fixes.patch
 ```
 
-These later fixes have **not** been ported to Longshot or included in the game release.
+These fixes were ported to Longshot v3.2.0 as [patch 0004 in the Longshot series](https://github.com/cputroll/Silver-Lantern/tree/source/longshot-v3.2.0-port-patches/patches/longshot-v3.2.0) and ship in game-channel revision 9.
