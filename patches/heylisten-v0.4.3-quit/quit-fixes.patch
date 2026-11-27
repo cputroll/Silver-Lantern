@@ -1,0 +1,396 @@
+diff --git a/engine/gpu/vk/menu_quit.h b/engine/gpu/vk/menu_quit.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..46d244f407795f1a99d0b42ea5c4c1ab7531195d
+--- /dev/null
++++ b/engine/gpu/vk/menu_quit.h
+@@ -0,0 +1,31 @@
++#pragma once
++#include <algorithm>
++
++namespace mkwvk::menu_quit {
++struct Header { float left, right, tab_left, tab_scale; };
++// Reserve the button first. Shrink the whole tab strip (including its bumpers)
++// together only if it no longer fits to the left of the button.
++inline Header layout(float width, float s, float safe, float strip) {
++    const float right = width - safe, left = right - 132*s;
++    const float room = std::max(0.f, left - 8*s);
++    const float scale = std::min(1.f, room / strip);
++    const float start = std::min((width-strip*scale)/2, room-strip*scale);
++    return {left, right, std::max(0.f,start), scale};
++}
++struct Focus {
++    bool active = false;
++    bool navigate(bool up, bool down, bool first) {
++        if (active && (up || down)) { active = false; return true; }
++        if (first && up) { active = true; return true; }
++        return false;
++    }
++};
++struct Release {
++    bool locked = false;
++    bool accept(bool edge, bool held) {
++        const bool accepted = edge && !locked;
++        locked = held;
++        return accepted;
++    }
++};
++}
+diff --git a/engine/gpu/vk/vk_menu.cpp b/engine/gpu/vk/vk_menu.cpp
+index a212cb0b5a116b9c19ce06b3983eca3b5616aca1..ded4afd554f585d35a23ea8e099ac8571f0762ea 100644
+--- a/engine/gpu/vk/vk_menu.cpp
++++ b/engine/gpu/vk/vk_menu.cpp
+@@ -33,6 +33,7 @@
+ #include "perf_report.h"   // (telemetry_available, perf_frame_shown: the two telemetry rows)
+ #include "perf_parts.h"   // (the host's pushes at each present: the frame's pacing sleep, a map loading)
+ #include "vk_menu_hit.h"
++#include "menu_quit.h"
+ #include "vk_draw.h"   // (pipeline_cache_save: Restart now keeps what was built)
+ #include "oot_cheat_items.h"
+ #include "vk_progress.h"   // (StartupView, version_text: the start-up screen)
+@@ -1088,6 +1089,8 @@ Row rows[] = {
+ constexpr int kQuitRow = sizeof rows / sizeof rows[0] - 1;
+ constexpr int kRestartRow = kQuitRow - 1;
+ const Row* pending = nullptr;   // (Restart or Quit: shows Confirm until its second press)
++menu_quit::Focus quit_focus;
++menu_quit::Release quit_release;
+ bool cheats_env = false;   // (HOS_OOT_CHEATS=1: on whatever the Debug tab says)
+ /// The debug tools: the Debug tab's row, or HOS_OOT_CHEATS=1
+ bool cheats_on() { return cheats_env || opts.debug_tools; }
+@@ -1926,15 +1929,19 @@ void draw_options(ui::Ctx& c) {
+     const char* const tab_titles[TAB_COUNT] = {"Graphics", "Gameplay", "Controls", "Debug"};
+     float tw[TAB_COUNT], total = 0;
+     for (int i = 0; i < TAB_COUNT; i++) tw[i] = ui::size_of(c.f.heading, 23 * s, tab_titles[i]).x + 56 * s, total += tw[i];
+-    float x = (c.w - total) * 0.5f;
++    const auto header = menu_quit::layout(c.w, s, c.safe, total + 96*s);
++    const float ts = s * header.tab_scale;
++    total *= header.tab_scale;
++    for (float& w : tw) w *= header.tab_scale;
++    float x = header.tab_left + 48*ts;
+     const float ty = hh * 0.5f + s;
+     const char* const keys[2] = {c.pad ? "L" : "Q", c.pad ? "R" : "E"};
+     for (int i = 0; i < 2; i++) {
+-        const float cw = 26 * s, cx = i ? x + total + 22 * s : x - 22 * s - cw;
++        const float cw = 26 * ts, cx = i ? x + total + 22 * ts : x - 22 * ts - cw;
+         const bool hover = hover_tab == TAB_COUNT + i;
+         c.d->AddRectFilled(ImVec2(cx, ty - 13 * s), ImVec2(cx + cw, ty + 13 * s), hover ? ui::kTabInset : ui::kBannerInk, 3 * s);
+-        ui::text_mid_centre(c, c.f.strong, 14 * s, cx + cw * 0.5f, ty, ui::kInk, keys[i]);
+-        hits.add(i ? cx - 10 * s : 0, 0, i ? c.w : cx + cw + 10 * s, hh, i ? menu_hit::kTabNext : menu_hit::kTabPrev, -1);
++        ui::text_mid_centre(c, c.f.strong, 14 * ts, cx + cw * 0.5f, ty, ui::kInk, keys[i]);
++        hits.add(i ? cx - 10 * ts : 0, 0, i ? header.left : cx + cw + 10 * ts, hh, i ? menu_hit::kTabNext : menu_hit::kTabPrev, -1);
+     }
+     for (int i = 0; i < TAB_COUNT; i++) {
+         const bool shown = i == (cur_tab == TAB_MOTION ? TAB_CONTROLS : cur_tab);   // (the Motion page: under Controls)
+@@ -1945,24 +1952,29 @@ void draw_options(ui::Ctx& c) {
+                 c.d->AddLine(ImVec2(x + tw[i] - 1, 0), ImVec2(x + tw[i] - 1, hh - 3 * s), ui::rgba(52, 34, 16), std::max(1.0f, s));
+             }
+         }
+-        ui::text_mid(c, c.f.heading, 23 * s, x + 28 * s, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
++        ui::text_mid(c, c.f.heading, 23 * ts, x + 28 * ts, ty, shown ? ui::kInkBright : ui::kBannerInk, tab_titles[i]);
+         hits.add(x, 0, x + tw[i], hh, menu_hit::kTab, i);
+         x += tw[i];
+     }
+     {   // (which build, at the banner's left, so a report can say it without opening the log; the release alone when the whole
+         // line would run into the tabs)
+         std::string ver = std::string("HeyListen ") + HOOKSHOT_VERSION;
+-        const float room = (c.w - total) * 0.5f - 60 * s - c.safe;
++        const float room = header.tab_left - 12 * s - c.safe;
+         if (ui::size_of(c.f.body, 15 * s, ver.c_str()).x > room && ver.find(" (") != std::string::npos) ver.resize(ver.find(" ("));
+         if (ui::size_of(c.f.body, 15 * s, ver.c_str()).x <= room) ui::text_mid(c, c.f.body, 15 * s, c.safe, ty, ui::kBannerInk, ver.c_str());
+     }
++    const ImVec2 qa(header.left, ty - 18*s), qb(header.right, ty + 18*s);
++    c.d->AddRectFilled(qa, qb, quit_focus.active ? ui::kGold : ui::kTabInset, 3*s);
++    ui::text_mid_centre(c, c.f.strong, 18*s, (qa.x+qb.x)/2, ty, quit_focus.active ? ui::kGoldInk : ui::kInkBright,
++                        quit_focus.active && pending == &rows[kQuitRow] ? "Confirm quit?" : "Quit game");
++    hits.add(qa.x, qa.y, qb.x, qb.y, menu_hit::kQuit, -1);
+     // the rows, in the column; the help beside it
+     float cx0, cx1, hx0, hx1;
+     bool narrow;
+     columns(c, &cx0, &cx1, &hx0, &hx1, &narrow);
+     column(c, cx0, cx1, hh);
+     const int count = tab_row_count(cur_tab), sel = tab_selected[cur_tab];
+-    const Row& selr = rows[tab_row_to_global(cur_tab, sel)];
++    const Row& selr = rows[quit_focus.active ? kQuitRow : tab_row_to_global(cur_tab, sel)];
+     const char* hint = selr.value && selr.hint ? selr.hint(*selr.value, -1) : nullptr;
+     const std::string pending_line = (cur_tab == TAB_GRAPHICS || cur_tab == TAB_DEBUG) && restart_pending() ? restart_line(c, 16 * s, hx1 - hx0 - 66 * s) : "";
+     static float help_tall = 0, help_tall_w = 0;
+@@ -1979,6 +1991,12 @@ void draw_options(ui::Ctx& c) {
+         if (const char* says = cheat_confirm(selr.cheat)) prompt_list[prompts_n++] = {ui::kConfirm, says};
+         prompt_list[prompts_n++] = {ui::kTabs, "Tabs"}, prompt_list[prompts_n++] = {ui::kBack, "Close"};
+     }
++    if (quit_focus.active) {
++        prompt_list[1] = {ui::kConfirm, pending == &selr ? "Confirm quit" : "Quit game"};
++        const bool motion = cur_tab == TAB_MOTION;
++        prompt_list[motion ? 2 : 3] = {ui::kBack, pending == &selr ? "Cancel" : motion ? "Back" : "Close"};
++        prompts_n = motion ? 3 : 4;
++    }
+     const float bar_top = ui::prompt_bar_top(c);   // (the strip itself drawn last, over all: below)
+     float bottom = std::min(c.h - c.safe, bar_top) - 10 * s;   // (the rows end above the prompts)
+     const bool after = restart_changed(selr);
+@@ -2012,7 +2030,7 @@ void draw_options(ui::Ctx& c) {
+             c.d->AddLine(ImVec2(rx0 + tw + 16 * s, ty), ImVec2(rx1, ty), ui::alpha(ui::kEdge, 0.9f), std::max(1.0f, s));
+             continue;
+         }
+-        const bool selected = i == sel;
++        const bool selected = !quit_focus.active && i == sel;
+         name_cell(c, ImVec2(rx0, y), ImVec2(split, y + rh), r.name, selected, restart_changed(r), 18.5f, row_inactive(r.value));
+         const ImVec2 va(split, y), vb(rx1, y + rh);
+         float t0 = 0, t1 = 0;
+@@ -2023,7 +2041,7 @@ void draw_options(ui::Ctx& c) {
+         } else if (r.cheat >= 0 && !tool.empty()) {   // (a debug tool with a value: arrows when Left and Right choose it)
+             choice_cell(c, va, vb, tool, selected, cheat_chooses(r.cheat), cheat_chooses(r.cheat));
+         } else if (!r.value) {   // (a page, or Restart and Quit: Confirm until the second press)
+-            if (pending == &r) choice_cell(c, va, vb, "Press again to confirm", selected, false, false);
++            if (!quit_focus.active && pending == &r) choice_cell(c, va, vb, "Press again to confirm", selected, false, false);
+             else if (is_psychov35_reset_row(r)) choice_cell(c, va, vb, "Reset", selected, false, false);   // (an action, not a page)
+             else {
+                 choice_cell(c, va, vb, "", selected, false, false);
+@@ -2851,6 +2869,11 @@ void menu_tick() {
+         restart_state.choose_later(now);
+         open_now = false, page = 0, changed = true;
+     };
++    if (press[0] || press[6] || !mine) {
++        if (quit_focus.active || pending) changed = true;
++        quit_focus.active = false;
++        pending = nullptr;
++    }
+     if ((press[0] || press[6]) && open_now.load() && page == 5) {
+         later();
+     } else if ((press[0] || press[6]) && open_now.load() && restart_ask()) {
+@@ -3048,6 +3071,10 @@ void menu_tick() {
+         }
+         changed |= scrolled;
+     } else if (open_now.load()) {
++        const bool was_pending = pending != nullptr;   // (Back cancels even if this frame's hover moves away)
++        auto focus_quit = [&](bool focused) {
++            if (quit_focus.active != focused) quit_focus.active = focused, pending = nullptr, changed = true;
++        };
+         if (mouse) {   // (the mouse: see the top of this file)
+             const menu_hit::Hit hit = hits.at((float)mx, (float)my);
+             const int ht = hit.part == menu_hit::kTab ? hit.index : hit.part == menu_hit::kTabPrev ? TAB_COUNT
+@@ -3055,6 +3082,13 @@ void menu_tick() {
+             if (ht != hover_tab) hover_tab = ht, changed = true;
+             int& sel = tab_selected[cur_tab];
+             const bool on_row = hit.part == menu_hit::kRow || hit.part == menu_hit::kSlider;
++            if (mine && drag_row < 0 && (moved || (ptr.pressed & HOS_MOUSE_LEFT))) {
++                if (hit.part == menu_hit::kQuit) focus_quit(true);
++                else if (pending == &rows[kQuitRow]) {
++                    // Hover alone must leave the confirmation visible until the next click or Back.
++                    if ((ptr.pressed & (HOS_MOUSE_LEFT | HOS_MOUSE_RIGHT)) || press[5]) focus_quit(false);
++                } else if (on_row || ht >= 0 || moved) focus_quit(false);
++            }
+             if (drag_row >= 0) {   // (a slider held: it follows the cursor's x until let go)
+                 Row& d = rows[tab_row_to_global(cur_tab, drag_row)];
+                 if (!(ptr.held & HOS_MOUSE_LEFT) || !d.value) {
+@@ -3069,7 +3103,8 @@ void menu_tick() {
+                 sel = hit.index, changed = true;
+             }
+             if ((ptr.pressed & HOS_MOUSE_LEFT) && drag_row < 0) {
+-                if (hit.part == menu_hit::kTabPrev) tab_left = true;
++                if (hit.part == menu_hit::kQuit) press[7] = true;
++                else if (hit.part == menu_hit::kTabPrev) tab_left = true;
+                 else if (hit.part == menu_hit::kTabNext) tab_right = true;
+                 else if (hit.part == menu_hit::kTab && hit.index != cur_tab) cur_tab = hit.index, changed = true;
+                 else if (hit.part == menu_hit::kSlider) {
+@@ -3092,8 +3127,8 @@ void menu_tick() {
+             // values change by a click on their arrows or halves, a slider's drag, Left and Right, A and Enter)
+             if (ptr.wheel && drag_row < 0) wheel_rows[cur_tab] += ptr.wheel, changed = true;
+         }
+-        if (press[5] && cur_tab == TAB_MOTION) cur_tab = TAB_CONTROLS, press[5] = false, changed = true;   // (back)
+-        if (press[5] && pending) pending = nullptr, changed = true;   // (a Restart or Quit waiting for its second press: cancelled)
++        if (tab_left || tab_right) focus_quit(false);
++        if (press[5] && was_pending) pending = nullptr, changed = true;   // (a Restart or Quit waiting for its second press: cancelled)
+         else if (press[5] && cur_tab == TAB_MOTION) cur_tab = TAB_CONTROLS, press[5] = false, changed = true;   // (back)
+         else if (press[5] && restart_ask()) page = 5, ask_sel = 0, changed = true;   // (the restart question first)
+         else if (press[5]) open_now = false;
+@@ -3106,6 +3141,21 @@ void menu_tick() {
+         if (selected >= tab_count) selected = tab_count - 1;   // (a row gone since: the debug tools with them turned off)
+         auto heading_at = [&](int k) { return rows[tab_row_to_global(cur_tab, k)].heading; };   // (stepped over)
+         if (heading_at(selected)) selected = (selected + 1) % tab_count;
++        int first = 0;
++        while (first < tab_count && heading_at(first)) ++first;
++        if ((press[0] || press[6]) && tab_row_to_global(cur_tab, selected) == kQuitRow) selected = first;
++        const bool leaving_quit = quit_focus.active;
++        if (quit_focus.navigate(press[1], press[2], selected == first)) {
++            if (leaving_quit && first < tab_count) {
++                selected = first;
++                if (press[1]) {
++                    selected = tab_count - 1;
++                    while (heading_at(selected)) --selected;
++                }
++            }
++            press[1] = press[2] = press[7] = false;
++            pending = nullptr, changed = true;
++        }
+         if (press[1]) {
+             do selected = (selected + tab_count - 1) % tab_count;
+             while (heading_at(selected));
+@@ -3116,7 +3166,9 @@ void menu_tick() {
+             while (heading_at(selected));
+             changed = true;
+         }
+-        Row& r = rows[tab_row_to_global(cur_tab, selected)];
++        Row& r = rows[quit_focus.active ? kQuitRow : tab_row_to_global(cur_tab, selected)];
++        const bool quit_edge = quit_release.accept(press[7], held[7] || (raw >> pad_confirm & 1) || (ptr.held & HOS_MOUSE_LEFT));
++        if (&r == &rows[kQuitRow]) press[7] = mine && open_now.load() && page == 0 && quit_edge;
+         const bool confirm_selected = &r == &rows[kQuitRow] || &r == &rows[kRestartRow];
+         if (pending && (pending != &r || !mine)) pending = nullptr, changed = true;
+         if (press[7] && confirm_selected) {
+@@ -3161,6 +3213,7 @@ void menu_tick() {
+         if (!now_open) {
+             if (drag_row >= 0) save();   // (a slider let go off the window: kept now)
+             hover_tab = -1, drag_row = -1, mouse_read = false;
++            quit_focus.active = false;
+             pending = nullptr;
+         }
+         if (now_open != told && app_window()) {
+diff --git a/engine/gpu/vk/vk_menu_hit.h b/engine/gpu/vk/vk_menu_hit.h
+index 14cb5e780a6c3befcc74f96d996d807a339c2689..0cf32ef2880292adb3e9458ea0865e20855c36b8 100644
+--- a/engine/gpu/vk/vk_menu_hit.h
++++ b/engine/gpu/vk/vk_menu_hit.h
+@@ -11,6 +11,7 @@ enum Part {
+     kTabPrev,   // the tab strip's left end
+     kTab,       // a tab: index
+     kTabNext,   // its right end
++    kQuit,      // fixed Quit game action in the main tab banner
+     kRow,       // an option's row: index (the tab's own), side -1 the value's left half, 1 its right half, 0 the name
+     kSlider,    // a slider row's track: index, permille 0 to 1000 along it
+     kCtlOption, // the Controls page: one of its own rows above the grid (index), side -1 the value's left half, 1 its right
+diff --git a/engine/tests/test_menu_quit.cpp b/engine/tests/test_menu_quit.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a7f40ee7bdd4694f1b1068e435eff421203ca3f9
+--- /dev/null
++++ b/engine/tests/test_menu_quit.cpp
+@@ -0,0 +1,30 @@
++#include "../gpu/vk/menu_quit.h"
++#include "../gpu/vk/vk_menu_hit.h"
++#include <cassert>
++#include <initializer_list>
++
++int main() {
++    using namespace mkwvk;
++    for (float width : {480.f, 1280.f, 1920.f}) {
++        auto h = menu_quit::layout(width, 1.f, 16.f, 650.f);
++        assert(h.tab_left >= 0 && h.tab_left + 650.f*h.tab_scale <= h.left);
++        assert(h.left < h.right && h.right <= width && width-h.right == 16.f);
++        menu_hit::Map hits{};
++        hits.clear(0, 0, width, 720);
++        hits.add(h.left, 4, h.right, 50, menu_hit::kQuit, -1);
++        for (int scroll : {0, 12, 30}) {
++            hits.add(0, 80, width, 110, menu_hit::kRow, scroll);
++            assert(hits.at((h.left+h.right)/2, 25).part == menu_hit::kQuit);
++        }
++    }
++    menu_quit::Release gate;
++    assert(gate.accept(true, true)); // first keyboard, pad, or pointer edge
++    for (int i=0; i<100; ++i) assert(!gate.accept(true, true));
++    assert(!gate.accept(false, false));
++    assert(gate.accept(true, true)); // independent confirmation
++    menu_quit::Focus f;
++    assert(!f.active);
++    assert(!f.navigate(true,false,false)); // up from an ordinary row
++    assert(f.navigate(true,false,true) && f.active);
++    assert(f.navigate(false,true,true) && !f.active); // restore first setting
++}
+diff --git a/engine/tests/test_menu_quit.py b/engine/tests/test_menu_quit.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..56fac87882232ad0548e556a8357cc94badd1fc3
+--- /dev/null
++++ b/engine/tests/test_menu_quit.py
+@@ -0,0 +1,97 @@
++"""Exercise the fixed header geometry and the menu's actual navigation/exit branches without closing a game."""
++import argparse
++from pathlib import Path
++import subprocess
++import tempfile
++
++ROOT = Path(__file__).resolve().parents[1]
++menu = (ROOT / 'gpu/vk/vk_menu.cpp').read_text(encoding='utf8')
++draw = menu.split('void draw_options(', 1)[1].split('ui::prompt_bar(c, prompt_list', 1)[0]
++assert 'menu_hit::kQuit' in draw.split('scroll_rows(cur_tab', 1)[0], 'no fixed Quit game hit target'
++assert 'quit_focus.active ? ui::kGold : ui::kTabInset' in draw, 'Quit focus needs the gold selection fill'
++assert 'quit_focus.active ? ui::kGoldInk : ui::kInkBright' in draw, 'Quit focus needs dark text on gold'
++assert 'if (hit.part == menu_hit::kQuit) press[7] = true;' in menu
++toggle = menu[menu.index('    if (press[0] || press[6] || !mine)'):menu.index('        // (the layout row shows')] + '    }'
++branch = menu[menu.index('if (open_now.load()) {', menu.index('if (changed) teleport_reveal();')):menu.index(' else if (r.cheat >= 0) cheat_press')]
++fixture = r'''
++#include "menu_quit.h"
++#include "vk_menu_hit.h"
++#include <atomic>
++#include <cassert>
++using namespace mkwvk;
++struct Row { bool heading; int *value,lo,hi,step,cheat; }; Row rows[12] = {{true}};
++const int kQuitRow=11,kRestartRow=10,TAB_COUNT=4,TAB_MOTION=4,TAB_CONTROLS=2;
++int tab_row_count(int t){return t==1 ? 3 : 2;} int tab_row_to_global(int t,int s){return t==1 && s==2 ? kQuitRow : 2*t+s;}
++int selected_tab=0,tab_selected[5]{},cur_tab=0,ask_sel=0,page=0,closes=0,saves=0,caches=0;
++std::atomic<bool> open_now{true}; Row* pending=nullptr;
++menu_quit::Focus quit_focus; menu_quit::Release quit_release;
++using HWND=int; constexpr int WM_APP=100, WM_CLOSE=1,HOS_MOUSE_LEFT=1,HOS_MOUSE_RIGHT=2;
++void logf(const char*){} HWND app_window(){return 1;} void save(){++saves;}
++void pipeline_cache_save(bool force){assert(force);++caches;}
++void PostMessageA(HWND,int msg,int,int){assert(msg==WM_CLOSE);++closes;}
++bool restart_ask(){return false;}
++void change_row(Row&,int,int,bool=true){assert(false);} bool cheat_chooses(int){return false;}
++void tick(int key=-1,int src=0,bool hold=false,bool tab_right=false,bool moved=false,bool right=false,bool left=false,int mx=0){
++    bool changed=false,mine=true,tab_left=false,press[18]{},held[18]{};
++    if(key>=0)press[key]=true;
++    held[7]=hold&&src==0; int pad_confirm=2,raw=(hold&&src==1)?4:0;
++    struct {int held,pressed,wheel;} ptr{hold&&src==2,right?HOS_MOUSE_RIGHT:left?HOS_MOUSE_LEFT:0,0};
++    bool mouse=moved||left||right; menu_hit::Map hits{}; int my=0,hover_tab=-1,drag_row=-1,wheel_rows[5]{};
++    hits.clear(0,0,100,100); hits.add(10,0,20,10,menu_hit::kQuit,-1);
++    int listening=0; auto later=[](){assert(false);};
++    TOGGLE
++    BRANCH
++    }
++}
++int main(){
++    for(int t=0;t<4;t++){
++        assert(cur_tab==t && !quit_focus.active && !pending);
++        tab_selected[t]=(t==0 ? 1 : 0);
++        tick(1); assert(quit_focus.active);
++        tick(1); assert(!quit_focus.active && tab_selected[t]==tab_row_count(t)-1);
++        tab_selected[t]=(t==0 ? 1 : 0);
++        tick(1); assert(quit_focus.active);
++        tick(2); assert(!quit_focus.active && tab_selected[t]==(t==0 ? 1 : 0));
++        tick(1);assert(quit_focus.active);
++        for(int src=0;src<3;src++){
++            int before=closes;
++            tick(7,src,true); assert(pending && closes==before);
++            for(int n=0;n<60;n++)tick(7,src,true);
++            tick(); assert(closes==before && pending);
++            tick(5);assert(open_now && !pending && closes==before);
++            tick(7,src,true);tick();tick(7,(src+1)%3,true);tick();
++            assert(closes==before+1 && !pending && saves==closes && caches==closes);
++        }
++        tick(7);tick(-1,0,false,true);assert(!pending && !quit_focus.active);
++    }
++    for(bool right : {true,false}) {
++        tick(1);tick(7);assert(quit_focus.active && pending);
++        tick(right?-1:5,0,false,false,true,right); // hover off with right-click or Esc/controller Back
++        assert(open_now && !quit_focus.active && !pending);
++    }
++    for(int cancel=0;cancel<3;++cancel){
++        int before=closes;
++        tick(-1,2,true,false,false,false,true,15); // click Quit
++        tick(-1,0,false,false,true); // release and move onto the menu background
++        assert(quit_focus.active && pending==&rows[kQuitRow] && open_now);
++        tick(cancel==0?5:-1,0,false,false,false,cancel==1,cancel==2); // Back, right-click, or left-click elsewhere
++        assert(open_now && !pending && closes==before);
++    }
++    cur_tab=1;tab_selected[1]=2;assert(tab_row_to_global(1,2)==kQuitRow);
++    tick(5);assert(!open_now);tick(0);
++    assert(open_now && !quit_focus.active && tab_selected[1]==0 && !rows[tab_row_to_global(1,0)].heading);
++}
++'''.replace('TOGGLE', toggle).replace('BRANCH', branch)
++
++if __name__ == '__main__':
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--cxx', default='g++')
++    cxx = parser.parse_args().cxx
++    with tempfile.TemporaryDirectory() as tmp:
++        source = Path(tmp) / 'integration.cpp'
++        source.write_text(fixture, encoding='utf8')
++        for test in [ROOT / 'tests/test_menu_quit.cpp', source]:
++            exe = Path(tmp) / 'test.exe'
++            subprocess.run([cxx, '-std=c++20', '-I'+str(ROOT/'gpu/vk'), str(test), '-o', str(exe)], check=True, timeout=30)
++            subprocess.run([str(exe)], check=True, timeout=10)
++    print('PASS: sticky Quit game geometry, four tabs, held inputs, pointer-off confirmation, cancellation and confirmed exit')
